@@ -11,12 +11,16 @@ import { windowAttentionPlan } from './window-attention.js';
 import { buildTrayMenuTemplate } from './tray-menu.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
+import { autoUpdater } from 'electron-updater';
+import { createUpdater } from '@farsight/shared/updater';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let mainWindow = null;
 let tray = null;
 let hostId = '';
 let quitting = false;
+let hostUpdater = null;
+let latestUpdateUi = { showRestartPrompt: false, checking: false, message: '', version: null };
 // 16×16 Aurora gradient PNG (violet→blue, rounded). Inline data URL so the tray
 // needs no external icon asset (packaging-safe).
 const TRAY_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAmUlEQVR4nKXT4QrBYBiG4ef4RCKRLKyxsLCwsEitpKSkpKSkpJzlLXIE33sA189LKw+lLbT0Yd6BJIRZHyYRxCMYxzCcQpTAYAG9FMI1dDcoyJArJsjA3yILpr0DWXBzD7Jg7wCy4MYRZMH1E8iCa2eQBVcvIAuuXEEWXL6BLLh0B1lw8QGy4MIT9F/lhPMv9Cv5XeWCc2/0AR9g1yt6gn/UAAAAAElFTkSuQmCC';
@@ -76,6 +80,10 @@ function refreshTrayMenu() {
     password: sessionPassword,
     onShow: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } },
     onQuit: () => { quitting = true; app.quit(); },
+    updateReady: latestUpdateUi.showRestartPrompt,
+    updateVersion: latestUpdateUi.version,
+    onRestartUpdate: () => hostUpdater && hostUpdater.installNow(),
+    onCheckUpdates: () => hostUpdater && hostUpdater.checkNow(),
   })));
 }
 
@@ -172,6 +180,12 @@ ipcMain.handle('select-injector-display', (_e, index) => {
 // The injector validates every event before it reaches nut.js.
 ipcMain.on('inject-input', (_e, evt) => { getInjector().inject(evt); });
 
+// Auto-update: the renderer can trigger a manual check/install, and reports
+// whether a remote-control session is active so we never install mid-session.
+ipcMain.handle('updater:check', () => { if (hostUpdater) hostUpdater.checkNow(); return true; });
+ipcMain.handle('updater:install', () => hostUpdater ? hostUpdater.installNow() : { ok: false, reason: 'not-downloaded' });
+ipcMain.on('updater:set-session-active', (_e, active) => { if (hostUpdater) hostUpdater.setSessionActive(active); });
+
 app.whenReady().then(() => {
   createWindow();
   createTray();
@@ -180,6 +194,17 @@ app.whenReady().then(() => {
   registerPanicKey(globalShortcut, 'CommandOrControl+Alt+F12', () => {
     if (mainWindow) mainWindow.webContents.send('panic');
   });
+
+  hostUpdater = createUpdater({
+    updater: autoUpdater,
+    isPackaged: app.isPackaged,
+    onStatus: (ui) => {
+      latestUpdateUi = ui;
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updater:status', ui);
+      refreshTrayMenu();
+    },
+  });
+  hostUpdater.start();
 });
 app.on('will-quit', () => globalShortcut.unregisterAll());
 app.on('window-all-closed', () => { if (quitting && process.platform !== 'darwin') app.quit(); });

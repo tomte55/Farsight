@@ -15,7 +15,7 @@ summary and trust assumptions below.
 - TURN: ephemeral HMAC credentials (short TTL); coturn denies relaying to private IP ranges.
 - DoS: signaling caps payload size and per-IP connections/registrations; closes idle sockets.
 - Privilege: host runs `asInvoker` (non-admin). Elevation is never automatic.
-- Builds: signed via electron-builder (CSC_LINK/CSC_KEY_PASSWORD at CI/build time).
+- Builds: unsigned (electron-builder signing is supported via CSC_LINK/CSC_KEY_PASSWORD but not currently configured — Windows SmartScreen may warn on first run).
 - Persistent unattended credentials: argon2id hashed, opt-in, off by default.
 - Logging: structured JSON events (register/connect/auth_fail/locked/disconnect); never
   passwords or SDP.
@@ -48,3 +48,13 @@ injected input by design (UIPI) — this is expected and safe.
   elevated build variant) to drive elevated windows. The secure-desktop prompt
   itself still cannot be captured without a SYSTEM-service host (deferred
   unattended-access work).
+
+## Software updates
+Farsight apps auto-update via electron-updater from the project's GitHub
+Releases. Builds are unsigned, so update integrity rests on HTTPS transport plus
+electron-updater's SHA-512 verification of each artifact against the signed
+`latest-*.yml` metadata on the release. The trust boundary is GitHub plus the
+maintainer's release pipeline: a compromised release pipeline or maintainer
+account could serve a malicious update — the same trust already required to
+distribute the installers at all. Updates never apply during an active session
+and never force a restart (see the auto-update design).

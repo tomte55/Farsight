@@ -7,10 +7,11 @@
     "prestart": "node ../../scripts/vendor-shared.mjs",
     "start": "electron .",
     "predist": "node ../../scripts/vendor-shared.mjs",
-    "dist": "electron-builder --config electron-builder.yml"
+    "dist": "electron-builder --config electron-builder.yml --publish never"
   },
   "dependencies": {
-    "@farsight/shared": "*"
+    "@farsight/shared": "*",
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "electron": "^33.0.0",

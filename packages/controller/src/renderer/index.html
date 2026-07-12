@@ -30,6 +30,11 @@
   }
 </style>
 
+<div id="update-banner" hidden style="display:flex;gap:10px;align-items:center;justify-content:center;padding:8px;background:var(--panel);border-bottom:1px solid var(--line)">
+  <span id="update-msg"></span>
+  <button id="update-restart" class="btn btn-primary" style="padding:4px 12px">Restart now</button>
+</div>
+
 <div id="setup" hidden style="min-height:100vh;display:grid;place-items:center">
   <div style="width:340px">
     <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
@@ -53,6 +58,8 @@
     <input id="host-pw" class="input" placeholder="Password (xxxx-xxxx-xxxx)" />
     <button id="go" class="btn btn-primary" style="width:100%;margin-top:4px">Connect</button>
     <button id="open-settings" class="btn" style="width:100%;margin-top:8px">Change signaling server…</button>
+    <button id="check-updates" class="btn" style="width:100%;margin-top:8px">Check for updates</button>
+    <span id="update-status" class="statusline"></span>
     <p id="status" class="statusline"></p>
   </div>
 </div>

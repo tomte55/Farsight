@@ -28,6 +28,11 @@
   <button id="cut" class="btn btn-danger" style="padding:5px 12px">Disconnect</button>
 </div>
 
+<div id="update-banner" hidden style="display:flex;gap:10px;align-items:center;justify-content:center;padding:8px;background:var(--panel);border-bottom:1px solid var(--line)">
+  <span id="update-msg"></span>
+  <button id="update-restart" class="btn btn-primary" style="padding:4px 12px">Restart now</button>
+</div>
+
 <div id="setup" hidden>
   <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
   <div style="font-size:15px;font-weight:700;margin-bottom:3px">Set up your signaling server</div>
@@ -48,6 +53,8 @@
     <div class="chip"><span id="host-pw">…</span><button class="cbtn" data-copy="host-pw">Copy</button></div>
     <div id="status-pill" class="pill ready"><span class="pd"></span><span id="status">Connecting to signaling…</span></div>
     <button id="open-settings" class="btn" style="margin-top:8px">Change signaling server…</button>
+    <button id="check-updates" class="btn" style="margin-top:8px">Check for updates</button>
+    <span id="update-status" class="statusline"></span>
   </div>
 
   <div id="consent" class="card attn" style="display:none">
