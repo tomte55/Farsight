@@ -2,6 +2,15 @@
 # Append this block to your Caddyfile. Caddy auto-provisions the Let's Encrypt
 # cert and upgrades the WebSocket, giving the required WSS endpoint.
 # flush_interval -1 disables response buffering for low-latency signaling.
+#
+# H-1: Caddy's reverse_proxy automatically APPENDS the client's IP to any
+# incoming X-Forwarded-For header (it never trusts/forwards a client-supplied
+# value as-is). The signaling server reads that appended, right-most XFF
+# entry as the real client IP when TRUST_PROXY=1 — no extra Caddy config
+# (trusted_proxies / header_up) is needed here. Only set TRUST_PROXY=1 on the
+# signaling server when it sits behind this proxy; never set it if the
+# server is ever exposed directly to the internet, or per-IP rate limits
+# become spoofable.
 signal.example.org {
 	reverse_proxy 127.0.0.1:8090 {
 		flush_interval -1

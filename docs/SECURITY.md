@@ -15,7 +15,7 @@ summary and trust assumptions below.
 - TURN: ephemeral HMAC credentials (short TTL); coturn denies relaying to private IP ranges.
 - DoS: signaling caps payload size and per-IP connections/registrations; closes idle sockets.
 - Privilege: host runs `asInvoker` (non-admin). Elevation is never automatic.
-- Builds: unsigned (electron-builder signing is supported via CSC_LINK/CSC_KEY_PASSWORD but not currently configured — Windows SmartScreen may warn on first run).
+- Builds: unsigned (electron-builder signing is supported via CSC_LINK/CSC_KEY_PASSWORD but not currently configured — Windows SmartScreen may warn on first run). Signing is already wired into the release CI (`.github/workflows/release.yml`) and activates automatically once the `CSC_LINK` (base64-encoded .pfx) and `CSC_KEY_PASSWORD` repo secrets are added; until then, builds remain unsigned.
 - Persistent unattended credentials: argon2id hashed, opt-in, off by default.
 - Logging: structured JSON events (register/connect/auth_fail/locked/disconnect); never
   passwords or SDP.

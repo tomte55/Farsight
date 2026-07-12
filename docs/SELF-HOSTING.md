@@ -72,6 +72,13 @@ docker compose -f packages/signaling-server/docker-compose.yml up -d --build
 Confirm `wss://<SIGNAL_DOMAIN>` is reachable (curl or a browser WebSocket test) and that the
 container logs show it listening.
 
+Set `TRUST_PROXY=1` in the signaling server's `.env` (see
+`packages/signaling-server/.env.example`) since it's running behind the Caddy reverse proxy from
+step 2 — this makes per-IP rate limiting read the real client IP that Caddy appends to
+`X-Forwarded-For`, instead of the container's own loopback address. Leave `TRUST_PROXY` unset if
+you ever run the signaling server directly exposed (no reverse proxy in front) or on a bare LAN,
+since a client could otherwise spoof its IP via that header.
+
 ## 4. Deploy coturn (TURN relay)
 
 Run the deploy script as root — it provisions a Caddy vhost for the TURN domain (to obtain a
@@ -115,3 +122,16 @@ takes precedence over the stored value.
 - Certificates renew automatically via Caddy for the signaling server. coturn's copy of the
   TURN-domain certificate is a point-in-time export — plan to re-run `infra/coturn/deploy.sh`
   (or export + restart coturn) after Caddy renews it.
+
+## Code signing (optional)
+
+Farsight's installers ship unsigned by default (see `docs/SECURITY.md`). The release workflow
+(`.github/workflows/release.yml`) already passes `CSC_LINK` / `CSC_KEY_PASSWORD` through to
+electron-builder for both the host and controller build steps — signing activates automatically,
+with no workflow changes, once you add these two repo secrets:
+
+- `CSC_LINK` — a base64-encoded `.pfx` code-signing certificate.
+- `CSC_KEY_PASSWORD` — the certificate's password.
+
+Until both secrets are present, electron-builder builds unsigned (this is its documented
+behavior when `CSC_LINK` is empty), so adding this is a safe, no-op-until-configured change.

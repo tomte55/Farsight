@@ -33,11 +33,20 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           npm pkg set version="$VERSION" -w @farsight/host -w @farsight/controller
 
+      # Code signing (optional): electron-builder signs automatically once the
+      # CSC_LINK (base64 .pfx) and CSC_KEY_PASSWORD repo secrets are added; it
+      # builds unsigned when they're empty, so this is a no-op until then.
       - name: Build host installer
         run: npm run dist -w @farsight/host
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
 
       - name: Build controller installer
         run: npm run dist -w @farsight/controller
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
 
       - name: List built artifacts
         shell: bash
