@@ -14,7 +14,12 @@ export function createUpdater({ updater, isPackaged, onStatus, intervalMs = SIX_
 
   const emit = () => onStatus(updateUiState({ status, sessionActive, version }));
   const check = () => {
-    updater.checkForUpdates().catch(() => { status = 'error'; emit(); });
+    try {
+      updater.checkForUpdates().catch(() => { status = 'error'; emit(); });
+    } catch {
+      status = 'error';
+      emit();
+    }
   };
 
   return {
