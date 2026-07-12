@@ -13,7 +13,8 @@
     "./turn": "./src/turn.js",
     "./signaling-url": "./src/signaling-url.js",
     "./config": "./src/config.js",
-    "./update-policy": "./src/update-policy.js"
+    "./update-policy": "./src/update-policy.js",
+    "./updater": "./src/updater.js"
   },
   "dependencies": {
     "argon2": "^0.41.1"
