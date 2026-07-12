@@ -95,6 +95,7 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
     async handleCandidate(c) { try { await pc.addIceCandidate(c); } catch {} },
     sendInput(evt) { if (inputChannel.readyState === 'open') inputChannel.send(JSON.stringify(evt)); },
     sendControl(evt) { if (controlChannel.readyState === 'open') controlChannel.send(JSON.stringify(evt)); },
+    getStats: () => pc.getStats(),
     close: () => { clearIceRestart(); pc.close(); },
   };
 }

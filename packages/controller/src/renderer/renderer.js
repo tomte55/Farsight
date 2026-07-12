@@ -6,6 +6,7 @@ import { MSG } from '@farsight/shared/protocol';
 import { CONTROL } from '@farsight/shared/control-events';
 import { isValidHostId } from '@farsight/shared/host-id';
 import { sessionOverlayFor } from '../session-overlay.js';
+import { extractStats, throughputKbps, formatQuality } from '../stats.js';
 
 const idInput = document.getElementById('host-id');
 const statusEl = document.getElementById('status');
@@ -18,8 +19,33 @@ const setupError = document.getElementById('setup-error');
 let signalingUrl = null;
 let peer = null, signal = null;
 const overlayEl = document.getElementById('overlay');
+const qualityEl = document.getElementById('quality');
 const lastCreds = { targetId: '', password: '' };
 let inputWired = false;
+
+// Connection-quality readout: polls peer.getStats() every ~2s while a session
+// is active. lastStatsSample carries the previous extractStats() result so
+// throughputKbps() can diff byte/time deltas across ticks.
+let statsTimer = null;
+let lastStatsSample = null;
+function stopStatsPoll() {
+  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  lastStatsSample = null;
+  if (qualityEl) qualityEl.textContent = '';
+}
+function startStatsPoll() {
+  stopStatsPoll();
+  statsTimer = setInterval(async () => {
+    if (!peer) { stopStatsPoll(); return; }
+    try {
+      const report = await peer.getStats();
+      const cur = extractStats(report);
+      const kbps = lastStatsSample ? throughputKbps(lastStatsSample, cur) : null;
+      lastStatsSample = cur;
+      if (qualityEl) qualityEl.textContent = formatQuality({ rttMs: cur.rttMs, kbps, width: cur.width, height: cur.height, transport: cur.transport });
+    } catch { /* never throw into the poller */ }
+  }, 2000);
+}
 // Set when the host tells us it ended the session (HOST_ENDED). Suppresses the
 // transient-disconnect/reconnect path so the terminal "Session ended" overlay
 // isn't overwritten by the peer-close connectionstatechange that follows.
@@ -104,6 +130,7 @@ function showOverlay(connState, reason) {
 }
 
 function doClose() {
+  stopStatsPoll();
   if (peer) { peer.close(); peer = null; }
   if (signal) { signal.close && signal.close(); signal = null; }
   overlayEl.hidden = true;
@@ -114,6 +141,7 @@ function doClose() {
 }
 
 function doReconnect() {
+  stopStatsPoll();
   if (peer) { peer.close(); peer = null; }
   if (signal) { signal.close && signal.close(); signal = null; }
   overlayEl.hidden = true;
@@ -166,6 +194,7 @@ document.getElementById('go').addEventListener('click', async () => {
           // of the reconnect flow.
           sessionClosing = true;
           setActive(false);
+          stopStatsPoll();
           if (peer) { peer.close(); peer = null; }
           if (screenEl.style.display === 'block') showOverlay(null, 'host_ended');
         }
@@ -176,6 +205,7 @@ document.getElementById('go').addEventListener('click', async () => {
         connectEl.style.display = 'none';
         screenEl.style.display = 'block';
         document.getElementById('end').onclick = doClose;
+        startStatsPoll();
         // Forward mouse/keyboard over the input data channel. Registered once
         // (onTrack can fire again on Reconnect); the handler reads the current
         // module-level `peer` and no-ops when there is none (e.g. after Close).
@@ -219,6 +249,7 @@ document.getElementById('go').addEventListener('click', async () => {
     [MSG.ERROR]: (m) => { statusEl.textContent = ERROR_TEXT[m.reason] || `Error: ${m.reason}`; },
     [MSG.PEER_DISCONNECTED]: () => {
       setActive(false);
+      stopStatsPoll();
       if (sessionClosing) return; // host already told us it ended — keep that overlay
       if (screenEl.style.display === 'block') showOverlay(null, 'peer_disconnected');
       else { statusEl.textContent = 'Host disconnected.'; connectEl.style.display = ''; }
