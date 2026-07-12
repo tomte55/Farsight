@@ -7,7 +7,7 @@
     "prestart": "node ../../scripts/vendor-shared.mjs",
     "start": "electron .",
     "predist": "node ../../scripts/vendor-shared.mjs",
-    "dist": "electron-builder --config electron-builder.yml"
+    "dist": "electron-builder --config electron-builder.yml --publish never"
   },
   "dependencies": {
     "@farsight/shared": "*",
