@@ -65,6 +65,8 @@ function createWindow() {
       sandbox: true, // R-7: defense in depth
     },
   });
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // Attended-access: the app must keep running to receive connections, so
   // closing the window hides it to the tray instead of quitting. A real quit
@@ -194,9 +196,23 @@ app.whenReady().then(() => {
   createTray();
   mainWindow.on('focus', () => mainWindow.flashFrame(false));
   // Panic hotkey: a physical override that instantly kills any session.
-  registerPanicKey(globalShortcut, 'CommandOrControl+Alt+F12', () => {
+  // globalShortcut.register fails silently if another app already owns the
+  // accelerator, leaving the documented instant-kill override inactive — warn
+  // in the console and surface it visibly in the renderer. did-finish-load is
+  // attached synchronously here (before the async loadFile navigation
+  // triggered in createWindow can complete), so it cannot fire before this
+  // listener is registered; the renderer's own onPanicUnavailable listener is
+  // wired up before its first await, so it is guaranteed to be registered by
+  // the time did-finish-load fires.
+  const panicOk = registerPanicKey(globalShortcut, 'CommandOrControl+Alt+F12', () => {
     if (mainWindow) mainWindow.webContents.send('panic');
   });
+  if (!panicOk) {
+    console.warn('[panic] Failed to register Ctrl+Alt+F12 — another app may own it. The instant-kill override is NOT active.');
+    mainWindow.webContents.on('did-finish-load', () => {
+      if (mainWindow) mainWindow.webContents.send('panic-unavailable');
+    });
+  }
 
   hostUpdater = createUpdater({
     updater: autoUpdater,

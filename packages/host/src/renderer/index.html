@@ -1,6 +1,15 @@
 <!-- packages/host/src/renderer/index.html -->
 <!doctype html>
 <meta charset="utf-8" />
+<!--
+  CSP: the real containment here is connect-src/object-src/base-uri/default-src
+  (blocks a compromised renderer from exfiltrating to or navigating to
+  arbitrary origins). 'unsafe-inline' is retained for script/style only
+  because of the inline importmap below and pervasive inline style="..."
+  attributes throughout this file; a hash/nonce-based tightening is a future
+  improvement.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>Farsight Host</title>
 <link rel="stylesheet" href="../shared/farsight.css" />
 <!--
@@ -22,6 +31,8 @@
   /* Host-specific: reserve room for the fixed session bar when active. */
   body.in-session .app { padding-top: 46px; }
 </style>
+
+<div id="panic-warning" hidden style="position:fixed;left:0;right:0;bottom:0;z-index:60;padding:9px 16px;background:var(--danger-bg);border-top:1px solid var(--danger-line);color:var(--danger-ink);font-size:13px;text-align:center">Panic hotkey (Ctrl+Alt+F12) is unavailable — another app may be using it. The instant-kill override is not active.</div>
 
 <div class="sessionbar" id="banner" style="display:none">
   <span>● Remote session active</span>

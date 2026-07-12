@@ -175,6 +175,15 @@ window.farsightIpc.onPanic(() => {
   endSessionByHost('panic', 'Session ended by panic key.', { immediate: true });
 });
 
+// If the main process couldn't register the panic hotkey (another app owns
+// Ctrl+Alt+F12), show a visible warning that the instant-kill override is
+// inactive. Registered synchronously here, before this module's first
+// top-level await, so it is guaranteed to be listening before the main
+// process's did-finish-load handler sends 'panic-unavailable'.
+window.farsightIpc.onPanicUnavailable(() => {
+  document.getElementById('panic-warning').hidden = false;
+});
+
 // The session password is generated in the main process (node:crypto) and shown
 // here; it is sent on REGISTER so the signaling server can gate controllers.
 const sessionPassword = await window.farsightIpc.getSessionPassword();

@@ -48,6 +48,8 @@ function createWindow() {
       sandbox: true, // R-7: defense in depth
     },
   });
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (e) => e.preventDefault());
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow = win;
   return win;

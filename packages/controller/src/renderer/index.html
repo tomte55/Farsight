@@ -1,6 +1,15 @@
 <!-- packages/controller/src/renderer/index.html -->
 <!doctype html>
 <meta charset="utf-8" />
+<!--
+  CSP: the real containment here is connect-src/object-src/base-uri/default-src
+  (blocks a compromised renderer from exfiltrating to or navigating to
+  arbitrary origins). 'unsafe-inline' is retained for script/style only
+  because of the inline importmap below and pervasive inline style="..."
+  attributes throughout this file; a hash/nonce-based tightening is a future
+  improvement.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>Farsight Controller</title>
 <link rel="stylesheet" href="../shared/farsight.css" />
 <!--
