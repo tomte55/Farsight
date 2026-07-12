@@ -1,6 +1,7 @@
 // packages/controller/src/peer.js
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
+import { CHUNK_SIZE } from '@farsight/shared/file-transfer';
 
 // P-3: prefer VP8 then H264 (broad hardware-encoder coverage, low encode
 // latency) by REORDERING (never excluding) the codec list on the video
@@ -58,7 +59,11 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
     controlChannel.send(JSON.stringify({ type: CONTROL.LIST_MONITORS }));
   });
   controlChannel.addEventListener('message', (m) => {
-    if (typeof m.data === 'string' && m.data.length > 8192) return;
+    // R-7 (defense in depth): bound the payload before parsing so a hostile
+    // host cannot send a huge string to the JSON parser. 256 KB, not 8 KB,
+    // because CLIPBOARD frames carry up to 100000 chars of validated text and
+    // need headroom for JSON-string escaping around that payload.
+    if (typeof m.data === 'string' && m.data.length > 262144) return;
     let evt; try { evt = validateControlEvent(JSON.parse(m.data)); } catch { return; }
     if (onControl) onControl(evt);
   });
@@ -106,7 +111,20 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
     // string (meta/end/cancel) or a raw ArrayBuffer chunk. onFileMessage lets
     // the renderer register its handler once the channel exists.
     sendFileData(data) { try { if (fileChannel.readyState === 'open') fileChannel.send(data); } catch { /* guarded */ } },
-    onFileMessage(cb) { try { fileChannel.onmessage = (m) => { try { cb(m.data); } catch { /* guarded */ } }; } catch { /* guarded */ } },
+    // R-7 (defense in depth): bound incoming 'file' channel messages before
+    // dispatch, mirroring the host's hostFileChannel.onmessage bounds — drop
+    // oversized framing strings and binary chunks wildly larger than CHUNK_SIZE.
+    onFileMessage(cb) {
+      try {
+        fileChannel.onmessage = (m) => {
+          try {
+            if (typeof m.data === 'string' && m.data.length > 8192) return;
+            if (m.data instanceof ArrayBuffer && m.data.byteLength > CHUNK_SIZE * 2) return;
+            cb(m.data);
+          } catch { /* guarded */ }
+        };
+      } catch { /* guarded */ }
+    },
     fileBufferedAmount() { try { return fileChannel.bufferedAmount; } catch { return 0; } },
     onFileBufferedLow(cb) { try { fileChannel.onbufferedamountlow = () => { try { cb(); } catch { /* guarded */ } }; } catch { /* guarded */ } },
     getStats: () => pc.getStats(),

@@ -8,6 +8,12 @@ import { isValidHostId } from '@farsight/shared/host-id';
 import {
   CHUNK_SIZE, MAX_FILE_SIZE, metaFrame, endFrame, parseFrame, sanitizeFilename, createReceiver,
 } from '@farsight/shared/file-transfer';
+
+// Bound on receiveState.chunks.length: legit transfers use CHUNK_SIZE chunks
+// (~6400 for a 100 MB file), so this bounds the array against a peer sending
+// a huge number of tiny chunks (O(n^2) reduce + per-ArrayBuffer overhead) even
+// though each one is individually within the total-byte cap.
+const MAX_CHUNKS = Math.ceil(MAX_FILE_SIZE / CHUNK_SIZE) + 16;
 import { sessionOverlayFor } from '../session-overlay.js';
 import { extractStats, throughputKbps, formatQuality } from '../stats.js';
 
@@ -189,13 +195,17 @@ function handleFileMessage(data) {
   }
   // Binary chunk (ArrayBuffer). Cap total received at MAX_FILE_SIZE regardless
   // of the declared meta.size, in case a peer sends more than it announced.
+  // Uses the receiver's O(1) running total (not a per-chunk reduce over
+  // chunks, which is O(n^2) over a transfer) and also caps chunk COUNT, so a
+  // peer sending millions of tiny chunks can't freeze the renderer or blow
+  // memory via per-ArrayBuffer overhead even while staying under the byte cap.
   if (!receiveState) return;
   const buf = data instanceof ArrayBuffer ? data : (data && data.buffer);
   if (!buf) return;
-  const total = receiveState.chunks.reduce((n, c) => n + c.byteLength, 0) + buf.byteLength;
-  if (total > MAX_FILE_SIZE) { resetFileReceive(); setMenuStatus('Incoming file too large — aborted.'); return; }
-  receiveState.chunks.push(buf);
   receiveState.receiver.pushChunkBytes(buf.byteLength);
+  if (receiveState.receiver.received > MAX_FILE_SIZE) { resetFileReceive(); setMenuStatus('Incoming file too large — aborted.'); return; }
+  if (receiveState.chunks.length >= MAX_CHUNKS) { resetFileReceive(); setMenuStatus('Transfer aborted (too many chunks).'); return; }
+  receiveState.chunks.push(buf);
   if (receiveState.receiver.isComplete()) finishFileReceive();
 }
 

@@ -74,8 +74,12 @@ export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = 
     }
     ch.addEventListener('message', (m) => {
       // R-7 (defense in depth): bound the payload before parsing so a hostile
-      // controller cannot send a huge string to the JSON parser.
-      if (typeof m.data === 'string' && m.data.length > 8192) return;
+      // controller cannot send a huge string to the JSON parser. The control
+      // channel gets a higher 256 KB bound (input stays at 8 KB) because
+      // CLIPBOARD frames carry up to 100000 chars of validated text and need
+      // headroom for JSON-string escaping around that payload.
+      const bound = ch.label === 'control' ? 262144 : 8192;
+      if (typeof m.data === 'string' && m.data.length > bound) return;
       let parsed; try { parsed = JSON.parse(m.data); } catch { return; }
       if (ch.label === 'input') onInput(parsed);
       else if (ch.label === 'control') onControl(parsed);
