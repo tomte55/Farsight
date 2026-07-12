@@ -49,7 +49,7 @@ function createWindow() {
     },
   });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  win.webContents.on('will-navigate', (e) => e.preventDefault());
+  win.webContents.on('will-navigate', (e, url) => { if (url !== win.webContents.getURL()) e.preventDefault(); });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   mainWindow = win;
   return win;

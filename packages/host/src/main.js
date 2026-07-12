@@ -66,7 +66,7 @@ function createWindow() {
     },
   });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  win.webContents.on('will-navigate', (e) => e.preventDefault());
+  win.webContents.on('will-navigate', (e, url) => { if (url !== win.webContents.getURL()) e.preventDefault(); });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // Attended-access: the app must keep running to receive connections, so
   // closing the window hides it to the tray instead of quitting. A real quit

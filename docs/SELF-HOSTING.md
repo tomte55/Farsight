@@ -126,12 +126,15 @@ takes precedence over the stored value.
 ## Code signing (optional)
 
 Farsight's installers ship unsigned by default (see `docs/SECURITY.md`). The release workflow
-(`.github/workflows/release.yml`) already passes `CSC_LINK` / `CSC_KEY_PASSWORD` through to
-electron-builder for both the host and controller build steps — signing activates automatically,
-with no workflow changes, once you add these two repo secrets:
+(`.github/workflows/release.yml`) does NOT pass `CSC_LINK` / `CSC_KEY_PASSWORD` through to
+electron-builder by default — electron-builder 24.x treats an empty `CSC_LINK` as a set-but-invalid
+cert path and fails the build, so the two build steps intentionally leave those vars unset. To
+enable signing:
 
-- `CSC_LINK` — a base64-encoded `.pfx` code-signing certificate.
-- `CSC_KEY_PASSWORD` — the certificate's password.
+1. Add two repo secrets: `CSC_LINK` (a base64-encoded `.pfx` code-signing certificate) and
+   `CSC_KEY_PASSWORD` (the certificate's password).
+2. Add an `env:` block with those two vars to the "Build host installer" and "Build controller
+   installer" steps in `.github/workflows/release.yml` (see the comment above those steps).
 
-Until both secrets are present, electron-builder builds unsigned (this is its documented
-behavior when `CSC_LINK` is empty), so adding this is a safe, no-op-until-configured change.
+Only once both the secrets exist and the workflow is updated will electron-builder sign the
+installers; until then, builds remain unsigned.
