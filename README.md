@@ -107,6 +107,17 @@ encrypts session media end-to-end with DTLS-SRTP. The self-hosted signaling serv
 brokers the handshake and must be treated as trusted. Builds are currently unsigned.
 See **[SECURITY.md](docs/SECURITY.md)** for the full trust model and threat notes.
 
+## Known limitations
+
+- **Ctrl+Alt+Del / secure-attention** cannot be sent to a remote Windows machine. The
+  Secure Attention Sequence is handled by the Windows kernel and cannot be triggered by
+  injected keystrokes; the `SendSAS` API requires a UIAccess-signed binary or a service.
+  This is gated on code signing (see below) plus a small privileged helper, and is on the
+  roadmap rather than faked with a button that silently does nothing.
+- **Builds are unsigned**, so Windows SmartScreen warns on first run. Code signing is wired
+  in CI and activates once a certificate secret is added (see `docs/SECURITY.md`).
+- **Clipboard sync** covers text (not images/files) and file transfer is capped at 100 MB.
+
 ## License
 
 [MIT](LICENSE) © tomte55
