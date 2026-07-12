@@ -182,9 +182,9 @@ ipcMain.on('inject-input', (_e, evt) => { getInjector().inject(evt); });
 
 // Auto-update: the renderer can trigger a manual check/install, and reports
 // whether a remote-control session is active so we never install mid-session.
-ipcMain.handle('updater:check', () => { hostUpdater.checkNow(); return true; });
-ipcMain.handle('updater:install', () => hostUpdater.installNow());
-ipcMain.on('updater:set-session-active', (_e, active) => hostUpdater.setSessionActive(active));
+ipcMain.handle('updater:check', () => { if (hostUpdater) hostUpdater.checkNow(); return true; });
+ipcMain.handle('updater:install', () => hostUpdater ? hostUpdater.installNow() : { ok: false, reason: 'not-downloaded' });
+ipcMain.on('updater:set-session-active', (_e, active) => { if (hostUpdater) hostUpdater.setSessionActive(active); });
 
 app.whenReady().then(() => {
   createWindow();
