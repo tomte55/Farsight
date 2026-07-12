@@ -27,19 +27,25 @@ let sessionClosing = false;
 // Session-active signal for the auto-updater: true while the remote screen is
 // showing, false at every teardown path (host-ended, peer-disconnected,
 // Disconnect). Keeps a pending update prompt from firing mid-session.
-const setActive = (v) => window.farsightIpc.setSessionActive(v);
+const setActive = (v) => { window.farsightIpc.setSessionActive(v); document.body.classList.toggle('in-session', v); };
 
 const updateBanner = document.getElementById('update-banner');
 const updateMsg = document.getElementById('update-msg');
-const updateStatus = document.getElementById('update-status');
+const menuStatus = document.getElementById('menu-status');
 
 window.farsightIpc.onUpdateStatus((ui) => {
-  updateBanner.hidden = !ui.showRestartPrompt;
-  updateMsg.textContent = ui.showRestartPrompt ? ui.message : '';
-  updateStatus.textContent = ui.message || '';
+  updateBanner.classList.toggle('show', ui.showRestartPrompt);
+  updateMsg.textContent = ui.showRestartPrompt ? `Update available (${ui.version})` : '';
+  menuStatus.textContent = ui.message || '';
 });
-document.getElementById('update-restart').addEventListener('click', () => window.farsightIpc.installUpdate());
-document.getElementById('check-updates').addEventListener('click', () => window.farsightIpc.checkForUpdates());
+document.getElementById('update-restart').addEventListener('click', (e) => { e.preventDefault(); window.farsightIpc.installUpdate(); });
+
+// Settings cogwheel menu (top-right): toggle on click, dismiss on outside click.
+const settingsCog = document.getElementById('settings-cog');
+const settingsMenu = document.getElementById('settings-menu');
+settingsCog.addEventListener('click', (e) => { e.stopPropagation(); settingsMenu.classList.toggle('open'); });
+document.addEventListener('click', (e) => { if (!settingsMenu.contains(e.target) && e.target !== settingsCog) settingsMenu.classList.remove('open'); });
+document.getElementById('menu-check-updates').addEventListener('click', () => window.farsightIpc.checkForUpdates());
 
 async function refreshSignalingUrl() {
   signalingUrl = await window.farsightIpc.getSignalingUrl();
@@ -53,7 +59,8 @@ async function saveSignaling() {
   else { setupError.textContent = res.error; }
 }
 document.getElementById('save-signaling').addEventListener('click', saveSignaling);
-document.getElementById('open-settings').addEventListener('click', async () => {
+document.getElementById('menu-change-server').addEventListener('click', async () => {
+  settingsMenu.classList.remove('open');
   urlInput.value = (await window.farsightIpc.getSignalingUrl()) || '';
   connectEl.style.display = 'none';
   setupEl.hidden = false;

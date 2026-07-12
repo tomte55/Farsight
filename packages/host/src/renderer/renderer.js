@@ -14,15 +14,21 @@ const bannerEl = document.getElementById('banner');
 const appEl = document.querySelector('.app');
 const updateBanner = document.getElementById('update-banner');
 const updateMsg = document.getElementById('update-msg');
-const updateStatus = document.getElementById('update-status');
+const menuStatus = document.getElementById('menu-status');
 
 window.farsightIpc.onUpdateStatus((ui) => {
-  updateBanner.hidden = !ui.showRestartPrompt;
-  updateMsg.textContent = ui.showRestartPrompt ? ui.message : '';
-  updateStatus.textContent = ui.message || '';
+  updateBanner.classList.toggle('show', ui.showRestartPrompt);
+  updateMsg.textContent = ui.showRestartPrompt ? `Update available (${ui.version})` : '';
+  menuStatus.textContent = ui.message || '';
 });
-document.getElementById('update-restart').addEventListener('click', () => window.farsightIpc.installUpdate());
-document.getElementById('check-updates').addEventListener('click', () => window.farsightIpc.checkForUpdates());
+document.getElementById('update-restart').addEventListener('click', (e) => { e.preventDefault(); window.farsightIpc.installUpdate(); });
+
+// Settings cogwheel menu (top-right): toggle on click, dismiss on outside click.
+const settingsCog = document.getElementById('settings-cog');
+const settingsMenu = document.getElementById('settings-menu');
+settingsCog.addEventListener('click', (e) => { e.stopPropagation(); settingsMenu.classList.toggle('open'); });
+document.addEventListener('click', (e) => { if (!settingsMenu.contains(e.target) && e.target !== settingsCog) settingsMenu.classList.remove('open'); });
+document.getElementById('menu-check-updates').addEventListener('click', () => window.farsightIpc.checkForUpdates());
 
 // Copy buttons on the ID/password chips (clipboard is allowed in the renderer).
 for (const btn of document.querySelectorAll('.cbtn')) {
@@ -210,7 +216,8 @@ async function saveSignaling() {
   else { setupError.textContent = res.error; }
 }
 document.getElementById('save-signaling').addEventListener('click', saveSignaling);
-document.getElementById('open-settings').addEventListener('click', async () => {
+document.getElementById('menu-change-server').addEventListener('click', async () => {
+  settingsMenu.classList.remove('open');
   urlInput.value = (await window.farsightIpc.getSignalingUrl()) || '';
   appEl.style.display = 'none';      // hide the normal host view while setup is up
   setupEl.hidden = false;
