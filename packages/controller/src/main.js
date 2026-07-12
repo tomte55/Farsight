@@ -1,6 +1,9 @@
 // packages/controller/src/main.js
 import { app, BrowserWindow, ipcMain } from 'electron';
-import { autoUpdater } from 'electron-updater';
+// electron-updater is CommonJS: a named ESM import fails in the packaged app's
+// ESM loader, so use the default import + destructure interop.
+import electronUpdater from 'electron-updater';
+const { autoUpdater } = electronUpdater;
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync } from 'node:fs';

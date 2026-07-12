@@ -11,7 +11,10 @@ import { windowAttentionPlan } from './window-attention.js';
 import { buildTrayMenuTemplate } from './tray-menu.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
-import { autoUpdater } from 'electron-updater';
+// electron-updater is CommonJS: a named ESM import fails in the packaged app's
+// ESM loader, so use the default import + destructure interop.
+import electronUpdater from 'electron-updater';
+const { autoUpdater } = electronUpdater;
 import { createUpdater } from '@farsight/shared/updater';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
