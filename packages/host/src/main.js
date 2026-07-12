@@ -80,6 +80,10 @@ function refreshTrayMenu() {
     password: sessionPassword,
     onShow: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } },
     onQuit: () => { quitting = true; app.quit(); },
+    updateReady: latestUpdateUi.showRestartPrompt,
+    updateVersion: latestUpdateUi.version,
+    onRestartUpdate: () => hostUpdater && hostUpdater.installNow(),
+    onCheckUpdates: () => hostUpdater && hostUpdater.checkNow(),
   })));
 }
 
