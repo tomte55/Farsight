@@ -79,5 +79,9 @@ jobs:
           body_path: RELEASE_BODY.md
           files: |
             packages/host/dist/*.exe
+            packages/host/dist/latest-host.yml
+            packages/host/dist/*.blockmap
             packages/controller/dist/*.exe
+            packages/controller/dist/latest-controller.yml
+            packages/controller/dist/*.blockmap
           fail_on_unmatched_files: true
