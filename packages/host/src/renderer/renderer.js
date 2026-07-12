@@ -12,6 +12,17 @@ const statusEl = document.getElementById('status');
 const consentEl = document.getElementById('consent');
 const bannerEl = document.getElementById('banner');
 const appEl = document.querySelector('.app');
+const updateBanner = document.getElementById('update-banner');
+const updateMsg = document.getElementById('update-msg');
+const updateStatus = document.getElementById('update-status');
+
+window.farsightIpc.onUpdateStatus((ui) => {
+  updateBanner.hidden = !ui.showRestartPrompt;
+  updateMsg.textContent = ui.showRestartPrompt ? ui.message : '';
+  updateStatus.textContent = ui.message || '';
+});
+document.getElementById('update-restart').addEventListener('click', () => window.farsightIpc.installUpdate());
+document.getElementById('check-updates').addEventListener('click', () => window.farsightIpc.checkForUpdates());
 
 // Copy buttons on the ID/password chips (clipboard is allowed in the renderer).
 for (const btn of document.querySelectorAll('.cbtn')) {
@@ -80,6 +91,7 @@ function endSessionByHost(reason, statusText, { immediate = false } = {}) {
 // Consent gate: nothing is captured or streamed until the user clicks Allow.
 const session = createSession({
   onStateChange: (st) => {
+    window.farsightIpc.setSessionActive(st === 'active');
     consentEl.style.display = st === 'pending_consent' ? 'block' : 'none';
     document.getElementById('idle').style.display = (st === 'pending_consent' || st === 'active') ? 'none' : 'block';
     bannerEl.style.display = st === 'active' ? 'flex' : 'none';
