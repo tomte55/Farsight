@@ -96,9 +96,11 @@ let fileTransferId = 0;
 let sendingFile = false;
 let pendingBufferedLowResolve = null;
 let receiveState = null; // { receiver, chunks: ArrayBuffer[], id }
-const sendFileBtn = document.getElementById('menu-send-file');
+const sendFileBtn = document.getElementById('send-file');
+const fileStatusEl = document.getElementById('file-status');
 
 function setMenuStatus(text) { if (menuStatus) menuStatus.textContent = text; }
+function setFileStatus(text) { if (fileStatusEl) fileStatusEl.textContent = text; }
 
 // Backpressure: wait for the channel's bufferedAmount to drop below the
 // threshold before sending the next chunk. cancelPendingFileSend() force-
@@ -121,12 +123,13 @@ function resetFileTransferState() {
 }
 
 async function sendFile() {
-  if (!peer) { setMenuStatus('Connect to a host first.'); return; }
+  if (!peer) { setFileStatus('Connect to a host first.'); return; }
   if (sendingFile) return;
   const picked = await window.farsightIpc.pickFile();
+  if (!peer) return; // session may have torn down while the OS file dialog was open
   if (!picked) return;
-  if (picked.error) { setMenuStatus(picked.error); return; }
-  if (picked.size > MAX_FILE_SIZE) { setMenuStatus('File is larger than the 100 MB transfer limit.'); return; }
+  if (picked.error) { setFileStatus(picked.error); return; }
+  if (picked.size > MAX_FILE_SIZE) { setFileStatus('File is larger than the 100 MB transfer limit.'); return; }
   sendingFile = true;
   const id = ++fileTransferId;
   const peerRef = peer;
@@ -142,19 +145,19 @@ async function sendFile() {
       if (peer !== peerRef) break;
       peerRef.sendFileData(chunk);
       offset = end;
-      setMenuStatus(`Sending ${picked.name}… ${Math.min(100, Math.round((offset / picked.size) * 100))}%`);
+      setFileStatus(`Sending ${picked.name}… ${Math.min(100, Math.round((offset / picked.size) * 100))}%`);
     }
     if (peer === peerRef) {
       peerRef.sendFileData(endFrame(id));
-      setMenuStatus(`Sent ${picked.name}.`);
+      setFileStatus(`Sent ${picked.name}.`);
     }
   } catch {
-    setMenuStatus('File send failed.');
+    setFileStatus('File send failed.');
   } finally {
     sendingFile = false;
   }
 }
-if (sendFileBtn) sendFileBtn.addEventListener('click', () => { settingsMenu.classList.remove('open'); sendFile(); });
+if (sendFileBtn) sendFileBtn.addEventListener('click', sendFile);
 
 async function finishFileReceive() {
   if (!receiveState) return;
@@ -168,9 +171,9 @@ async function finishFileReceive() {
   const name = sanitizeFilename(receiver.name);
   try {
     const res = await window.farsightIpc.saveFile({ name, bytes: combined.buffer });
-    setMenuStatus(res && res.ok ? `Saved ${name}.` : 'Save cancelled.');
+    setFileStatus(res && res.ok ? `Saved ${name}.` : 'Save cancelled.');
   } catch {
-    setMenuStatus('Save failed.');
+    setFileStatus('Save failed.');
   }
 }
 
@@ -181,15 +184,15 @@ function handleFileMessage(data) {
     if (!frame) return;
     if (frame.t === 'meta') {
       const receiver = createReceiver({
-        onProgress: (p) => setMenuStatus(`Receiving ${sanitizeFilename(frame.name)}… ${Math.round(p * 100)}%`),
+        onProgress: (p) => setFileStatus(`Receiving ${sanitizeFilename(frame.name)}… ${Math.round(p * 100)}%`),
       });
-      try { receiver.begin(frame); } catch { setMenuStatus('Incoming file rejected (too large).'); resetFileReceive(); return; }
+      try { receiver.begin(frame); } catch { setFileStatus('Incoming file rejected (too large).'); resetFileReceive(); return; }
       receiveState = { receiver, chunks: [], id: frame.id };
     } else if (frame.t === 'end') {
       if (!receiveState || receiveState.id !== frame.id) return;
       finishFileReceive();
     } else if (frame.t === 'cancel') {
-      if (receiveState && receiveState.id === frame.id) { resetFileReceive(); setMenuStatus('Transfer cancelled by sender.'); }
+      if (receiveState && receiveState.id === frame.id) { resetFileReceive(); setFileStatus('Transfer cancelled by sender.'); }
     }
     return;
   }
@@ -203,8 +206,8 @@ function handleFileMessage(data) {
   const buf = data instanceof ArrayBuffer ? data : (data && data.buffer);
   if (!buf) return;
   receiveState.receiver.pushChunkBytes(buf.byteLength);
-  if (receiveState.receiver.received > MAX_FILE_SIZE) { resetFileReceive(); setMenuStatus('Incoming file too large — aborted.'); return; }
-  if (receiveState.chunks.length >= MAX_CHUNKS) { resetFileReceive(); setMenuStatus('Transfer aborted (too many chunks).'); return; }
+  if (receiveState.receiver.received > MAX_FILE_SIZE) { resetFileReceive(); setFileStatus('Incoming file too large — aborted.'); return; }
+  if (receiveState.chunks.length >= MAX_CHUNKS) { resetFileReceive(); setFileStatus('Transfer aborted (too many chunks).'); return; }
   receiveState.chunks.push(buf);
   if (receiveState.receiver.isComplete()) finishFileReceive();
 }

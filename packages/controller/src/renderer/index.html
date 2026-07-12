@@ -44,7 +44,6 @@
 <div id="settings-menu" class="menu">
   <button id="menu-change-server">Change signaling server…</button>
   <button id="menu-check-updates">Check for updates</button>
-  <button id="menu-send-file">Send file…</button>
   <div id="menu-status" class="menu-status"></div>
 </div>
 
@@ -85,6 +84,8 @@
     <span style="display:flex;gap:10px;align-items:center">
       <span id="quality" class="qstat"></span>
       <select id="monitors" style="display:none"></select>
+      <button id="send-file" class="btn" style="padding:5px 10px">Send file…</button>
+      <span id="file-status" class="qstat"></span>
       <button id="end" class="btn btn-danger" style="padding:5px 12px">Disconnect</button>
     </span>
   </div>
