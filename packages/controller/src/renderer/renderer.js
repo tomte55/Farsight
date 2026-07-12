@@ -24,6 +24,22 @@ let inputWired = false;
 // transient-disconnect/reconnect path so the terminal "Session ended" overlay
 // isn't overwritten by the peer-close connectionstatechange that follows.
 let sessionClosing = false;
+// Session-active signal for the auto-updater: true while the remote screen is
+// showing, false at every teardown path (host-ended, peer-disconnected,
+// Disconnect). Keeps a pending update prompt from firing mid-session.
+const setActive = (v) => window.farsightIpc.setSessionActive(v);
+
+const updateBanner = document.getElementById('update-banner');
+const updateMsg = document.getElementById('update-msg');
+const updateStatus = document.getElementById('update-status');
+
+window.farsightIpc.onUpdateStatus((ui) => {
+  updateBanner.hidden = !ui.showRestartPrompt;
+  updateMsg.textContent = ui.showRestartPrompt ? ui.message : '';
+  updateStatus.textContent = ui.message || '';
+});
+document.getElementById('update-restart').addEventListener('click', () => window.farsightIpc.installUpdate());
+document.getElementById('check-updates').addEventListener('click', () => window.farsightIpc.checkForUpdates());
 
 async function refreshSignalingUrl() {
   signalingUrl = await window.farsightIpc.getSignalingUrl();
@@ -87,6 +103,7 @@ function doClose() {
   screenEl.style.display = 'none';
   connectEl.style.display = '';
   statusEl.textContent = '';
+  setActive(false);
 }
 
 function doReconnect() {
@@ -141,12 +158,14 @@ document.getElementById('go').addEventListener('click', async () => {
           // restart fires) and show the terminal "Session ended" overlay instead
           // of the reconnect flow.
           sessionClosing = true;
+          setActive(false);
           if (peer) { peer.close(); peer = null; }
           if (screenEl.style.display === 'block') showOverlay(null, 'host_ended');
         }
       },
       onTrack: (stream) => {
         video.srcObject = stream;
+        setActive(true);
         connectEl.style.display = 'none';
         screenEl.style.display = 'block';
         document.getElementById('end').onclick = doClose;
@@ -177,6 +196,7 @@ document.getElementById('go').addEventListener('click', async () => {
     [MSG.CANDIDATE]: (m) => peer.handleCandidate(m.candidate),
     [MSG.ERROR]: (m) => { statusEl.textContent = ERROR_TEXT[m.reason] || `Error: ${m.reason}`; },
     [MSG.PEER_DISCONNECTED]: () => {
+      setActive(false);
       if (sessionClosing) return; // host already told us it ended — keep that overlay
       if (screenEl.style.display === 'block') showOverlay(null, 'peer_disconnected');
       else { statusEl.textContent = 'Host disconnected.'; connectEl.style.display = ''; }
