@@ -180,8 +180,23 @@ document.getElementById('go').addEventListener('click', async () => {
         // (onTrack can fire again on Reconnect); the handler reads the current
         // module-level `peer` and no-ops when there is none (e.g. after Close).
         if (!inputWired) {
+          // Coalesce mousemove to at most one send per animation frame (raw
+          // mousemove can fire ~165/sec on high-refresh displays). Non-move
+          // events are still forwarded immediately, but flush any pending
+          // move first so ordering (move-then-click) is preserved.
+          let pendingMove = null, rafId = 0;
+          const flushMove = () => {
+            rafId = 0;
+            if (!pendingMove || !peer) { pendingMove = null; return; }
+            const e = pendingMove; pendingMove = null;
+            const rect = video.getBoundingClientRect();
+            const evt = domEventToInput(e, rect);
+            if (evt && peer) peer.sendInput(evt);
+          };
           const forward = (e) => {
             if (!peer) return;
+            if (e.type === 'mousemove') { pendingMove = e; if (!rafId) rafId = requestAnimationFrame(flushMove); return; }
+            if (pendingMove) flushMove(); // preserve order: last move before this event
             if (['mousedown', 'mouseup', 'wheel'].includes(e.type)) e.preventDefault();
             const rect = video.getBoundingClientRect();
             const evt = domEventToInput(e, rect);
