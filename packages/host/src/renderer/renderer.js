@@ -65,6 +65,30 @@ let remoteReady = false;
 let pendingOffer = null;
 const pendingCandidates = [];
 
+// Clipboard sync: while the session is active, poll the local OS clipboard and
+// forward changes to the peer over the control channel; write received peer
+// clipboard text locally. lastClip tracks the last text seen/synced in either
+// direction so a write we just performed doesn't get re-sent on the next poll
+// (echo-loop prevention).
+let clipTimer = null;
+let lastClip = null;
+function startClipboardSync() {
+  if (clipTimer) return;
+  lastClip = null;
+  clipTimer = setInterval(async () => {
+    try {
+      const text = await window.farsightIpc.readClipboard();
+      if (typeof text === 'string' && text !== '' && text !== lastClip) {
+        lastClip = text;
+        if (peer) peer.sendControl({ type: CONTROL.CLIPBOARD, text: text.slice(0, 100000) });
+      }
+    } catch { /* ignore */ }
+  }, 800);
+}
+function stopClipboardSync() {
+  if (clipTimer) { clearInterval(clipTimer); clipTimer = null; }
+}
+
 function flushCandidates() {
   while (pendingCandidates.length) peer.handleCandidate(pendingCandidates.shift());
 }
@@ -76,6 +100,7 @@ function teardown() {
   if (currentStream) { currentStream.getTracks().forEach((t) => t.stop()); currentStream = null; }
   if (peer) { peer.close(); peer = null; }
   if (timers) { timers.stop(); timers = null; }
+  stopClipboardSync();
   remoteReady = false;
   pendingOffer = null;
   pendingCandidates.length = 0;
@@ -102,12 +127,18 @@ const session = createSession({
     document.getElementById('idle').style.display = (st === 'pending_consent' || st === 'active') ? 'none' : 'block';
     bannerEl.style.display = st === 'active' ? 'flex' : 'none';
     document.body.classList.toggle('in-session', st === 'active');
+    if (st === 'active') startClipboardSync();
   },
 });
 
 async function onControl(raw) {
   let evt;
   try { evt = validateControlEvent(raw); } catch { return; }
+  if (evt.type === CONTROL.CLIPBOARD) {
+    lastClip = evt.text;
+    window.farsightIpc.writeClipboard(evt.text);
+    return;
+  }
   if (evt.type === CONTROL.LIST_MONITORS) {
     peer && peer.sendControl({ type: CONTROL.MONITORS, monitors: monitorsForControl(displays) });
   } else if (evt.type === CONTROL.SELECT_MONITOR) {

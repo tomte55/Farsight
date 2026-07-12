@@ -1,5 +1,5 @@
 // packages/host/src/main.js
-import { app, BrowserWindow, desktopCapturer, screen, ipcMain, globalShortcut, Tray, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, desktopCapturer, screen, ipcMain, globalShortcut, Tray, Menu, nativeImage, clipboard } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInjector } from './input-injector.js';
@@ -184,6 +184,11 @@ ipcMain.handle('select-injector-display', (_e, index) => {
 // (ipcRenderer.send) so high-frequency mouse moves don't await a round trip.
 // The injector validates every event before it reaches nut.js.
 ipcMain.on('inject-input', (_e, evt) => { getInjector().inject(evt); });
+
+// Clipboard sync: the renderer polls/writes the OS clipboard via these handlers
+// (native clipboard access is main-process-only, like nut.js input injection).
+ipcMain.handle('clipboard-read', () => clipboard.readText());
+ipcMain.on('clipboard-write', (_e, text) => { if (typeof text === 'string') clipboard.writeText(text); });
 
 // Auto-update: the renderer can trigger a manual check/install, and reports
 // whether a remote-control session is active so we never install mid-session.

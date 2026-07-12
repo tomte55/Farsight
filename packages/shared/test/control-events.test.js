@@ -37,3 +37,19 @@ test('host_ended reason is bounded and optional', () => {
 test('rejects unknown control type', () => {
   expect(() => validateControlEvent({ type: 'shutdown' })).toThrow('invalid control event');
 });
+
+test('clipboard event round-trips text', () => {
+  expect(validateControlEvent({ type: CONTROL.CLIPBOARD, text: 'hello' })).toEqual({ type: 'clipboard', text: 'hello' });
+  expect(validateControlEvent({ type: CONTROL.CLIPBOARD, text: '' })).toEqual({ type: 'clipboard', text: '' });
+});
+
+test('clipboard event rejects oversized text', () => {
+  expect(() => validateControlEvent({ type: CONTROL.CLIPBOARD, text: 'x'.repeat(100001) })).toThrow('invalid control event');
+  expect(validateControlEvent({ type: CONTROL.CLIPBOARD, text: 'x'.repeat(100000) }).text.length).toBe(100000);
+});
+
+test('clipboard event rejects non-string text', () => {
+  expect(() => validateControlEvent({ type: CONTROL.CLIPBOARD, text: 123 })).toThrow('invalid control event');
+  expect(() => validateControlEvent({ type: CONTROL.CLIPBOARD, text: null })).toThrow('invalid control event');
+  expect(() => validateControlEvent({ type: CONTROL.CLIPBOARD })).toThrow('invalid control event');
+});

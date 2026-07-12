@@ -55,6 +55,30 @@ let sessionClosing = false;
 // Disconnect). Keeps a pending update prompt from firing mid-session.
 const setActive = (v) => { window.farsightIpc.setSessionActive(v); document.body.classList.toggle('in-session', v); };
 
+// Clipboard sync: while the session view is up, poll the local OS clipboard and
+// forward changes to the peer over the control channel; write received peer
+// clipboard text locally. lastClip tracks the last text seen/synced in either
+// direction so a write we just performed doesn't get re-sent on the next poll
+// (echo-loop prevention).
+let clipTimer = null;
+let lastClip = null;
+function startClipboardSync() {
+  if (clipTimer) return;
+  lastClip = null;
+  clipTimer = setInterval(async () => {
+    try {
+      const text = await window.farsightIpc.readClipboard();
+      if (typeof text === 'string' && text !== '' && text !== lastClip) {
+        lastClip = text;
+        if (peer) peer.sendControl({ type: CONTROL.CLIPBOARD, text: text.slice(0, 100000) });
+      }
+    } catch { /* ignore */ }
+  }, 800);
+}
+function stopClipboardSync() {
+  if (clipTimer) { clearInterval(clipTimer); clipTimer = null; }
+}
+
 const updateBanner = document.getElementById('update-banner');
 const updateMsg = document.getElementById('update-msg');
 const menuStatus = document.getElementById('menu-status');
@@ -131,6 +155,7 @@ function showOverlay(connState, reason) {
 
 function doClose() {
   stopStatsPoll();
+  stopClipboardSync();
   if (peer) { peer.close(); peer = null; }
   if (signal) { signal.close && signal.close(); signal = null; }
   overlayEl.hidden = true;
@@ -142,6 +167,7 @@ function doClose() {
 
 function doReconnect() {
   stopStatsPoll();
+  stopClipboardSync();
   if (peer) { peer.close(); peer = null; }
   if (signal) { signal.close && signal.close(); signal = null; }
   overlayEl.hidden = true;
@@ -177,6 +203,11 @@ document.getElementById('go').addEventListener('click', async () => {
       // The host enumerates its monitors over the reliable control channel; build
       // the picker and send SELECT_MONITOR when the user switches.
       onControl: (evt) => {
+        if (evt.type === CONTROL.CLIPBOARD) {
+          lastClip = evt.text;
+          window.farsightIpc.writeClipboard(evt.text);
+          return;
+        }
         if (evt.type === CONTROL.MONITORS) {
           const sel = document.getElementById('monitors');
           sel.innerHTML = '';
@@ -195,6 +226,7 @@ document.getElementById('go').addEventListener('click', async () => {
           sessionClosing = true;
           setActive(false);
           stopStatsPoll();
+          stopClipboardSync();
           if (peer) { peer.close(); peer = null; }
           if (screenEl.style.display === 'block') showOverlay(null, 'host_ended');
         }
@@ -206,6 +238,7 @@ document.getElementById('go').addEventListener('click', async () => {
         screenEl.style.display = 'block';
         document.getElementById('end').onclick = doClose;
         startStatsPoll();
+        startClipboardSync();
         // Forward mouse/keyboard over the input data channel. Registered once
         // (onTrack can fire again on Reconnect); the handler reads the current
         // module-level `peer` and no-ops when there is none (e.g. after Close).
@@ -250,6 +283,7 @@ document.getElementById('go').addEventListener('click', async () => {
     [MSG.PEER_DISCONNECTED]: () => {
       setActive(false);
       stopStatsPoll();
+      stopClipboardSync();
       if (sessionClosing) return; // host already told us it ended — keep that overlay
       if (screenEl.style.display === 'block') showOverlay(null, 'peer_disconnected');
       else { statusEl.textContent = 'Host disconnected.'; connectEl.style.display = ''; }

@@ -1,5 +1,5 @@
 // packages/controller/src/main.js
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, clipboard } from 'electron';
 // electron-updater is CommonJS: a named ESM import fails in the packaged app's
 // ESM loader, so use the default import + destructure interop.
 import electronUpdater from 'electron-updater';
@@ -34,6 +34,10 @@ ipcMain.handle('set-signaling-url', (_e, url) => {
     return { ok: false, error: err.message };
   }
 });
+
+// Clipboard sync: the renderer polls/writes the OS clipboard via these handlers.
+ipcMain.handle('clipboard-read', () => clipboard.readText());
+ipcMain.on('clipboard-write', (_e, text) => { if (typeof text === 'string') clipboard.writeText(text); });
 
 let mainWindow = null;
 let ctrlUpdater = null;

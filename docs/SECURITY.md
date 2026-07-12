@@ -58,3 +58,10 @@ maintainer's release pipeline: a compromised release pipeline or maintainer
 account could serve a malicious update — the same trust already required to
 distribute the installers at all. Updates never apply during an active session
 and never force a restart (see the auto-update design).
+
+## Clipboard sync
+During an active session, clipboard TEXT is synchronized in both directions
+(bounded to 100000 chars) over the encrypted control channel. This is within
+the attended-control trust model (the controller already has full input/screen
+access), but be aware sensitive clipboard contents are shared while a session
+is active.
