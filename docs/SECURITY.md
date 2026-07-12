@@ -65,3 +65,17 @@ During an active session, clipboard TEXT is synchronized in both directions
 the attended-control trust model (the controller already has full input/screen
 access), but be aware sensitive clipboard contents are shared while a session
 is active.
+
+## File transfer
+During an active session, either side can send an arbitrary file to the other
+over a dedicated reliable, ordered data channel (separate from input/control,
+so a transfer never blocks the cursor or session control). Transfers are
+bounded to 100 MB; the receiving side additionally caps total bytes received
+at that limit regardless of the declared size, in case a peer sends more than
+it announced. Received filenames are always sanitized to a basename (path
+separators and `..` stripped, falling back to `"download"`) before the save
+path is chosen, preventing path traversal. Saving always goes through a
+user-driven OS Save dialog — nothing is written to disk without the receiving
+user picking a location. This is within the attended-control trust model (the
+controller already has full input/screen access, and the host user has
+already granted consent).

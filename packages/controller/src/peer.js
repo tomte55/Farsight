@@ -46,6 +46,13 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
   // Control (monitor list/switch, session end) rides a reliable, ordered channel
   // — these messages must not be dropped or reordered.
   const controlChannel = pc.createDataChannel('control', { ordered: true });
+  // File transfer rides its OWN reliable, ordered channel — separate from
+  // input/control so a large transfer never blocks the cursor or session
+  // control messages. bufferedAmountLowThreshold backs the sender's
+  // backpressure loop (see the renderer's waitForBufferedLow).
+  const fileChannel = pc.createDataChannel('file', { ordered: true });
+  try { fileChannel.binaryType = 'arraybuffer'; } catch { /* guarded */ }
+  try { fileChannel.bufferedAmountLowThreshold = 262144; } catch { /* guarded */ }
   controlChannel.addEventListener('open', () => {
     // Ask the host to enumerate its monitors as soon as the channel is ready.
     controlChannel.send(JSON.stringify({ type: CONTROL.LIST_MONITORS }));
@@ -95,6 +102,13 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
     async handleCandidate(c) { try { await pc.addIceCandidate(c); } catch {} },
     sendInput(evt) { if (inputChannel.readyState === 'open') inputChannel.send(JSON.stringify(evt)); },
     sendControl(evt) { if (controlChannel.readyState === 'open') controlChannel.send(JSON.stringify(evt)); },
+    // File transfer surface: sendFileData accepts either a JSON framing
+    // string (meta/end/cancel) or a raw ArrayBuffer chunk. onFileMessage lets
+    // the renderer register its handler once the channel exists.
+    sendFileData(data) { try { if (fileChannel.readyState === 'open') fileChannel.send(data); } catch { /* guarded */ } },
+    onFileMessage(cb) { try { fileChannel.onmessage = (m) => { try { cb(m.data); } catch { /* guarded */ } }; } catch { /* guarded */ } },
+    fileBufferedAmount() { try { return fileChannel.bufferedAmount; } catch { return 0; } },
+    onFileBufferedLow(cb) { try { fileChannel.onbufferedamountlow = () => { try { cb(); } catch { /* guarded */ } }; } catch { /* guarded */ } },
     getStats: () => pc.getStats(),
     close: () => { clearIceRestart(); pc.close(); },
   };

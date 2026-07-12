@@ -6,6 +6,9 @@ import { createSessionTimers } from '../timeouts.js';
 import { monitorsForControl } from '../capture.js';
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
+import {
+  CHUNK_SIZE, MAX_FILE_SIZE, metaFrame, endFrame, parseFrame, sanitizeFilename, createReceiver,
+} from '@farsight/shared/file-transfer';
 
 const idEl = document.getElementById('host-id');
 const statusEl = document.getElementById('status');
@@ -89,6 +92,123 @@ function stopClipboardSync() {
   if (clipTimer) { clearInterval(clipTimer); clipTimer = null; }
 }
 
+// File transfer: bidirectional over the dedicated 'file' data channel (created
+// by the controller; received here via createHostPeer's onFileMessage param).
+// Active only while a peer exists — sendFile()/handleFileMessage() both no-op
+// without one. State is reset on every teardown path, same as clipboard sync.
+let fileTransferId = 0;
+let sendingFile = false;
+let pendingBufferedLowResolve = null;
+let receiveState = null; // { receiver, chunks: ArrayBuffer[], id }
+const sendFileBtn = document.getElementById('menu-send-file');
+
+function setMenuStatus(text) { if (menuStatus) menuStatus.textContent = text; }
+
+// Backpressure: wait for the channel's bufferedAmount to drop below the
+// threshold before sending the next chunk. cancelPendingFileSend() force-
+// resolves this if a teardown happens mid-wait, so a torn-down session can
+// never leave sendFile() awaiting an event that will never fire again.
+async function waitForBufferedLow(peerRef) {
+  if (!peerRef || peerRef.fileBufferedAmount() <= 1_000_000) return;
+  await new Promise((resolve) => {
+    pendingBufferedLowResolve = resolve;
+    peerRef.onFileBufferedLow(() => { pendingBufferedLowResolve = null; resolve(); });
+  });
+}
+function cancelPendingFileSend() {
+  if (pendingBufferedLowResolve) { const r = pendingBufferedLowResolve; pendingBufferedLowResolve = null; r(); }
+}
+function resetFileReceive() { receiveState = null; }
+function resetFileTransferState() {
+  resetFileReceive();
+  cancelPendingFileSend();
+}
+
+async function sendFile() {
+  if (!peer) { setMenuStatus('No active session.'); return; }
+  if (sendingFile) return;
+  const picked = await window.farsightIpc.pickFile();
+  if (!picked) return;
+  if (picked.error) { setMenuStatus(picked.error); return; }
+  if (picked.size > MAX_FILE_SIZE) { setMenuStatus('File is larger than the 100 MB transfer limit.'); return; }
+  sendingFile = true;
+  const id = ++fileTransferId;
+  const peerRef = peer;
+  try {
+    peerRef.sendFileData(metaFrame({ id, name: picked.name, size: picked.size, mime: 'application/octet-stream' }));
+    const bytes = picked.bytes;
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      if (peer !== peerRef) break; // torn down / replaced mid-send
+      const end = Math.min(offset + CHUNK_SIZE, bytes.byteLength);
+      const chunk = bytes.slice(offset, end);
+      await waitForBufferedLow(peerRef);
+      if (peer !== peerRef) break;
+      peerRef.sendFileData(chunk);
+      offset = end;
+      setMenuStatus(`Sending ${picked.name}… ${Math.min(100, Math.round((offset / picked.size) * 100))}%`);
+    }
+    if (peer === peerRef) {
+      peerRef.sendFileData(endFrame(id));
+      setMenuStatus(`Sent ${picked.name}.`);
+    }
+  } catch {
+    setMenuStatus('File send failed.');
+  } finally {
+    sendingFile = false;
+  }
+}
+if (sendFileBtn) sendFileBtn.addEventListener('click', () => { settingsMenu.classList.remove('open'); sendFile(); });
+
+async function finishFileReceive() {
+  if (!receiveState) return;
+  const { receiver, chunks } = receiveState;
+  receiver.end();
+  resetFileReceive();
+  const total = chunks.reduce((n, c) => n + c.byteLength, 0);
+  const combined = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { combined.set(new Uint8Array(c), off); off += c.byteLength; }
+  const name = sanitizeFilename(receiver.name);
+  try {
+    const res = await window.farsightIpc.saveFile({ name, bytes: combined.buffer });
+    setMenuStatus(res && res.ok ? `Saved ${name}.` : 'Save cancelled.');
+  } catch {
+    setMenuStatus('Save failed.');
+  }
+}
+
+// Wired as createHostPeer's onFileMessage callback (see startSession below).
+function handleFileMessage(data) {
+  if (typeof data === 'string') {
+    const frame = parseFrame(data);
+    if (!frame) return;
+    if (frame.t === 'meta') {
+      const receiver = createReceiver({
+        onProgress: (p) => setMenuStatus(`Receiving ${sanitizeFilename(frame.name)}… ${Math.round(p * 100)}%`),
+      });
+      try { receiver.begin(frame); } catch { setMenuStatus('Incoming file rejected (too large).'); resetFileReceive(); return; }
+      receiveState = { receiver, chunks: [], id: frame.id };
+    } else if (frame.t === 'end') {
+      if (!receiveState || receiveState.id !== frame.id) return;
+      finishFileReceive();
+    } else if (frame.t === 'cancel') {
+      if (receiveState && receiveState.id === frame.id) { resetFileReceive(); setMenuStatus('Transfer cancelled by sender.'); }
+    }
+    return;
+  }
+  // Binary chunk (ArrayBuffer). Cap total received at MAX_FILE_SIZE regardless
+  // of the declared meta.size, in case a peer sends more than it announced.
+  if (!receiveState) return;
+  const buf = data instanceof ArrayBuffer ? data : (data && data.buffer);
+  if (!buf) return;
+  const total = receiveState.chunks.reduce((n, c) => n + c.byteLength, 0) + buf.byteLength;
+  if (total > MAX_FILE_SIZE) { resetFileReceive(); setMenuStatus('Incoming file too large — aborted.'); return; }
+  receiveState.chunks.push(buf);
+  receiveState.receiver.pushChunkBytes(buf.byteLength);
+  if (receiveState.receiver.isComplete()) finishFileReceive();
+}
+
 function flushCandidates() {
   while (pendingCandidates.length) peer.handleCandidate(pendingCandidates.shift());
 }
@@ -101,6 +221,7 @@ function teardown() {
   if (peer) { peer.close(); peer = null; }
   if (timers) { timers.stop(); timers = null; }
   stopClipboardSync();
+  resetFileTransferState();
   remoteReady = false;
   pendingOffer = null;
   pendingCandidates.length = 0;
@@ -170,6 +291,7 @@ async function startSession() {
     // activity so an actively-used session doesn't hit the idle timeout.
     onInput: (evt) => { if (session.isActive()) { window.farsightIpc.injectInput(evt); if (timers) timers.activity(); } },
     onControl: (evt) => onControl(evt),
+    onFileMessage: (data) => handleFileMessage(data),
   });
   // Auto-end the session on inactivity (idle) or after a hard cap (absolute).
   timers = createSessionTimers({

@@ -1,5 +1,6 @@
 // packages/host/src/peer.js
 import { MSG } from '@farsight/shared/protocol';
+import { CHUNK_SIZE } from '@farsight/shared/file-transfer';
 
 // P-1: protect resolution/text legibility under bandwidth pressure (screen
 // content), rather than Chromium's default 'balanced' which drops resolution
@@ -33,7 +34,7 @@ function preferVideoCodecs(transceiver) {
   } catch { /* leave default negotiation */ }
 }
 
-export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = () => {}, onControl = () => {} }) {
+export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = () => {}, onControl = () => {}, onFileMessage = () => {} }) {
   const pc = new RTCPeerConnection({ iceServers });
   let videoSender = null;
   for (const track of stream.getTracks()) {
@@ -47,8 +48,30 @@ export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = 
   } catch { /* leave default negotiation */ }
 
   let hostControlChannel = null;
+  let hostFileChannel = null;
   pc.addEventListener('datachannel', (e) => {
     const ch = e.channel;
+    if (ch.label === 'file') {
+      try { ch.binaryType = 'arraybuffer'; } catch { /* guarded */ }
+      hostFileChannel = ch;
+      ch.onmessage = (m) => {
+        try {
+          if (typeof m.data === 'string') {
+            // R-7 (defense in depth): bound framing strings before they reach
+            // JSON parsing / the receiver state machine.
+            if (m.data.length > 8192) return;
+            onFileMessage(m.data);
+          } else {
+            // Binary chunk: bound well above CHUNK_SIZE (in case of transient
+            // renegotiation of chunk size) but drop anything wildly oversized.
+            const len = m.data && m.data.byteLength;
+            if (typeof len !== 'number' || len > CHUNK_SIZE * 2) return;
+            onFileMessage(m.data);
+          }
+        } catch { /* never throw out of a data channel handler */ }
+      };
+      return;
+    }
     ch.addEventListener('message', (m) => {
       // R-7 (defense in depth): bound the payload before parsing so a hostile
       // controller cannot send a huge string to the JSON parser.
@@ -82,6 +105,17 @@ export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = 
     },
     sendControl(evt) {
       if (hostControlChannel && hostControlChannel.readyState === 'open') hostControlChannel.send(JSON.stringify(evt));
+    },
+    // File transfer surface, mirroring the controller peer's. onFileMessage
+    // is wired via the constructor callback above (the channel is created by
+    // the controller and only exists once 'datachannel' fires), so it is not
+    // re-exposed as a registration method here.
+    sendFileData(data) {
+      try { if (hostFileChannel && hostFileChannel.readyState === 'open') hostFileChannel.send(data); } catch { /* guarded */ }
+    },
+    fileBufferedAmount() { try { return hostFileChannel ? hostFileChannel.bufferedAmount : 0; } catch { return 0; } },
+    onFileBufferedLow(cb) {
+      try { if (hostFileChannel) hostFileChannel.onbufferedamountlow = () => { try { cb(); } catch { /* guarded */ } }; } catch { /* guarded */ }
     },
     close: () => pc.close(),
   };
