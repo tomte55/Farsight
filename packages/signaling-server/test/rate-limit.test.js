@@ -33,3 +33,37 @@ test('reset clears failures', () => {
   rl.recordFailure(k); rl.recordFailure(k); expect(rl.isLocked(k)).toBe(true);
   rl.reset(k); expect(rl.isLocked(k)).toBe(false);
 });
+
+// L-4: periodic GC — sweep() prunes every key's expired timestamps and drops
+// keys left empty, so long-running servers don't accumulate stale entries
+// forever from one-off attackers/probes.
+test('sweep prunes expired entries across all keys after the window passes', () => {
+  let t = 0;
+  const rl = createRateLimiter({ maxAttempts: 5, windowMs: 1000, now: () => t });
+  const a = key('h1', '1.1.1.1');
+  const b = key('h2', '2.2.2.2');
+  rl.recordFailure(a);
+  rl.recordFailure(b);
+  t = 2000; // past the window for both
+  rl.sweep();
+  // After sweep, both keys should read as fully fresh — isLocked without
+  // side effects reads the state sweep left behind (no lingering attempts).
+  rl.recordFailure(a);
+  expect(rl.isLocked(a)).toBe(false); // only 1 recent attempt, well under maxAttempts
+  expect(rl.isLocked(b)).toBe(false);
+});
+
+test('sweep is a no-op (and does not throw) when there are no entries', () => {
+  const rl = createRateLimiter({ maxAttempts: 5, windowMs: 1000 });
+  expect(() => rl.sweep()).not.toThrow();
+});
+
+test('sweep leaves unexpired entries intact', () => {
+  let t = 0;
+  const rl = createRateLimiter({ maxAttempts: 2, windowMs: 1000, now: () => t });
+  const k = key('h', '1.2.3.4');
+  rl.recordFailure(k); rl.recordFailure(k);
+  expect(rl.isLocked(k)).toBe(true);
+  rl.sweep(); // window hasn't passed yet
+  expect(rl.isLocked(k)).toBe(true);
+});

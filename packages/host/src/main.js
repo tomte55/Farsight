@@ -1,5 +1,5 @@
 // packages/host/src/main.js
-import { app, BrowserWindow, desktopCapturer, screen, ipcMain, globalShortcut, Tray, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, desktopCapturer, screen, ipcMain, globalShortcut, Tray, Menu, nativeImage, clipboard, dialog } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInjector } from './input-injector.js';
@@ -11,6 +11,7 @@ import { windowAttentionPlan } from './window-attention.js';
 import { buildTrayMenuTemplate } from './tray-menu.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
+import { MAX_FILE_SIZE } from '@farsight/shared/file-transfer';
 // electron-updater is CommonJS: a named ESM import fails in the packaged app's
 // ESM loader, so use the default import + destructure interop.
 import electronUpdater from 'electron-updater';
@@ -65,6 +66,8 @@ function createWindow() {
       sandbox: true, // R-7: defense in depth
     },
   });
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (e, url) => { if (url !== win.webContents.getURL()) e.preventDefault(); });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // Attended-access: the app must keep running to receive connections, so
   // closing the window hides it to the tray instead of quitting. A real quit
@@ -183,6 +186,34 @@ ipcMain.handle('select-injector-display', (_e, index) => {
 // The injector validates every event before it reaches nut.js.
 ipcMain.on('inject-input', (_e, evt) => { getInjector().inject(evt); });
 
+// Clipboard sync: the renderer polls/writes the OS clipboard via these handlers
+// (native clipboard access is main-process-only, like nut.js input injection).
+ipcMain.handle('clipboard-read', () => clipboard.readText());
+ipcMain.on('clipboard-write', (_e, text) => { if (typeof text === 'string' && text.length <= 100000) clipboard.writeText(text); });
+
+// File transfer: fs/dialog access is main-process-only, like clipboard and
+// nut.js. pick-file returns the whole file as an ArrayBuffer (bounded to
+// MAX_FILE_SIZE) for the renderer to chunk and send over the 'file' data
+// channel; save-file always goes through a user-driven Save dialog, and only
+// ever uses the basename of the (already-sanitized-by-caller) name.
+ipcMain.handle('pick-file', async () => {
+  const r = await dialog.showOpenDialog({ properties: ['openFile'] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  const p = r.filePaths[0];
+  let buf;
+  try { buf = readFileSync(p); } catch (err) { return { error: err.message }; }
+  if (buf.length > MAX_FILE_SIZE) return { error: 'File is larger than the 100 MB transfer limit.' };
+  return { name: path.basename(p), size: buf.length, bytes: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length) };
+});
+ipcMain.handle('save-file', async (_e, arg) => {
+  const { name, bytes } = arg || {};
+  if (!(bytes instanceof ArrayBuffer)) return { ok: false };
+  const r = await dialog.showSaveDialog({ defaultPath: path.basename(String(name || 'download')) });
+  if (r.canceled || !r.filePath) return { ok: false };
+  try { writeFileSync(r.filePath, Buffer.from(bytes)); return { ok: true }; }
+  catch (err) { return { ok: false, error: err.message }; }
+});
+
 // Auto-update: the renderer can trigger a manual check/install, and reports
 // whether a remote-control session is active so we never install mid-session.
 ipcMain.handle('updater:check', () => { if (hostUpdater) hostUpdater.checkNow(); return true; });
@@ -194,9 +225,23 @@ app.whenReady().then(() => {
   createTray();
   mainWindow.on('focus', () => mainWindow.flashFrame(false));
   // Panic hotkey: a physical override that instantly kills any session.
-  registerPanicKey(globalShortcut, 'CommandOrControl+Alt+F12', () => {
+  // globalShortcut.register fails silently if another app already owns the
+  // accelerator, leaving the documented instant-kill override inactive — warn
+  // in the console and surface it visibly in the renderer. did-finish-load is
+  // attached synchronously here (before the async loadFile navigation
+  // triggered in createWindow can complete), so it cannot fire before this
+  // listener is registered; the renderer's own onPanicUnavailable listener is
+  // wired up before its first await, so it is guaranteed to be registered by
+  // the time did-finish-load fires.
+  const panicOk = registerPanicKey(globalShortcut, 'CommandOrControl+Alt+F12', () => {
     if (mainWindow) mainWindow.webContents.send('panic');
   });
+  if (!panicOk) {
+    console.warn('[panic] Failed to register Ctrl+Alt+F12 — another app may own it. The instant-kill override is NOT active.');
+    mainWindow.webContents.on('did-finish-load', () => {
+      if (mainWindow) mainWindow.webContents.send('panic-unavailable');
+    });
+  }
 
   hostUpdater = createUpdater({
     updater: autoUpdater,

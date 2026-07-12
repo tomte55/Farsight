@@ -15,7 +15,7 @@ summary and trust assumptions below.
 - TURN: ephemeral HMAC credentials (short TTL); coturn denies relaying to private IP ranges.
 - DoS: signaling caps payload size and per-IP connections/registrations; closes idle sockets.
 - Privilege: host runs `asInvoker` (non-admin). Elevation is never automatic.
-- Builds: unsigned (electron-builder signing is supported via CSC_LINK/CSC_KEY_PASSWORD but not currently configured — Windows SmartScreen may warn on first run).
+- Builds: unsigned (electron-builder signing is supported via CSC_LINK/CSC_KEY_PASSWORD but not currently configured — Windows SmartScreen may warn on first run). Signing is NOT wired into the release CI (`.github/workflows/release.yml`) by default — electron-builder 24.x fails the build on an empty `CSC_LINK`, so the vars are intentionally left out. To enable signing, add the `CSC_LINK` (base64-encoded .pfx) and `CSC_KEY_PASSWORD` repo secrets AND add the documented `env:` block to the two build steps; until then, builds remain unsigned.
 - Persistent unattended credentials: argon2id hashed, opt-in, off by default.
 - Logging: structured JSON events (register/connect/auth_fail/locked/disconnect); never
   passwords or SDP.
@@ -58,3 +58,24 @@ maintainer's release pipeline: a compromised release pipeline or maintainer
 account could serve a malicious update — the same trust already required to
 distribute the installers at all. Updates never apply during an active session
 and never force a restart (see the auto-update design).
+
+## Clipboard sync
+During an active session, clipboard TEXT is synchronized in both directions
+(bounded to 100000 chars) over the encrypted control channel. This is within
+the attended-control trust model (the controller already has full input/screen
+access), but be aware sensitive clipboard contents are shared while a session
+is active.
+
+## File transfer
+During an active session, either side can send an arbitrary file to the other
+over a dedicated reliable, ordered data channel (separate from input/control,
+so a transfer never blocks the cursor or session control). Transfers are
+bounded to 100 MB; the receiving side additionally caps total bytes received
+at that limit regardless of the declared size, in case a peer sends more than
+it announced. Received filenames are always sanitized to a basename (path
+separators and `..` stripped, falling back to `"download"`) before the save
+path is chosen, preventing path traversal. Saving always goes through a
+user-driven OS Save dialog — nothing is written to disk without the receiving
+user picking a location. This is within the attended-control trust model (the
+controller already has full input/screen access, and the host user has
+already granted consent).

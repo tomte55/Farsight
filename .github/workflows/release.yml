@@ -33,6 +33,10 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           npm pkg set version="$VERSION" -w @farsight/host -w @farsight/controller
 
+      # To enable Windows code signing: add repo secrets CSC_LINK (base64 of your .pfx)
+      # and CSC_KEY_PASSWORD, then add an env: block with those two vars to the two build
+      # steps below. Do NOT wire the env unconditionally — electron-builder 24.x fails on an
+      # empty CSC_LINK, so the vars must only be present once the secrets actually exist.
       - name: Build host installer
         run: npm run dist -w @farsight/host
 

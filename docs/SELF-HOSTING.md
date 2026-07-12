@@ -72,6 +72,13 @@ docker compose -f packages/signaling-server/docker-compose.yml up -d --build
 Confirm `wss://<SIGNAL_DOMAIN>` is reachable (curl or a browser WebSocket test) and that the
 container logs show it listening.
 
+Set `TRUST_PROXY=1` in the signaling server's `.env` (see
+`packages/signaling-server/.env.example`) since it's running behind the Caddy reverse proxy from
+step 2 — this makes per-IP rate limiting read the real client IP that Caddy appends to
+`X-Forwarded-For`, instead of the container's own loopback address. Leave `TRUST_PROXY` unset if
+you ever run the signaling server directly exposed (no reverse proxy in front) or on a bare LAN,
+since a client could otherwise spoof its IP via that header.
+
 ## 4. Deploy coturn (TURN relay)
 
 Run the deploy script as root — it provisions a Caddy vhost for the TURN domain (to obtain a
@@ -115,3 +122,19 @@ takes precedence over the stored value.
 - Certificates renew automatically via Caddy for the signaling server. coturn's copy of the
   TURN-domain certificate is a point-in-time export — plan to re-run `infra/coturn/deploy.sh`
   (or export + restart coturn) after Caddy renews it.
+
+## Code signing (optional)
+
+Farsight's installers ship unsigned by default (see `docs/SECURITY.md`). The release workflow
+(`.github/workflows/release.yml`) does NOT pass `CSC_LINK` / `CSC_KEY_PASSWORD` through to
+electron-builder by default — electron-builder 24.x treats an empty `CSC_LINK` as a set-but-invalid
+cert path and fails the build, so the two build steps intentionally leave those vars unset. To
+enable signing:
+
+1. Add two repo secrets: `CSC_LINK` (a base64-encoded `.pfx` code-signing certificate) and
+   `CSC_KEY_PASSWORD` (the certificate's password).
+2. Add an `env:` block with those two vars to the "Build host installer" and "Build controller
+   installer" steps in `.github/workflows/release.yml` (see the comment above those steps).
+
+Only once both the secrets exist and the workflow is updated will electron-builder sign the
+installers; until then, builds remain unsigned.

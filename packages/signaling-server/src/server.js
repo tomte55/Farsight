@@ -10,6 +10,8 @@ import { createRateLimiter } from './rate-limit.js';
 import { createConnectionLimits } from './limits.js';
 import { createLogger } from './log.js';
 import { loadConfig } from './config.js';
+import { clientIp } from './client-ip.js';
+import { createTokenBucket } from './token-bucket.js';
 
 const IDLE_TIMEOUT_MS = 15000;
 
@@ -36,8 +38,17 @@ export function createSignalingServer({ port, config } = {}) {
   const wss = new WebSocketServer({ port: listenPort, maxPayload: 64 * 1024 });
   const registry = createRegistry();
   const limiter = createRateLimiter({ maxAttempts: cfg.maxAttempts, windowMs: cfg.windowMs });
+  // L-1: bounds CONNECT attempts (offline target, bad password, or success)
+  // per source IP, so probing for live host IDs is capped regardless of
+  // hit/miss outcome — separate from the per-(host,IP) password lockout above.
+  const connectLimiter = createRateLimiter({ maxAttempts: cfg.connectBurst, windowMs: cfg.windowMs });
   const limits = createConnectionLimits();
   const log = createLogger();
+
+  // L-4: periodic GC so long-running servers don't accumulate stale limiter
+  // entries from one-off attackers/probes that never come back to age out.
+  const gc = setInterval(() => { limiter.sweep(); connectLimiter.sweep(); }, 60000);
+  if (gc.unref) gc.unref();
 
   const send = (socket, type, payload) => {
     if (socket && socket.readyState === socket.OPEN) {
@@ -46,15 +57,26 @@ export function createSignalingServer({ port, config } = {}) {
   };
 
   wss.on('connection', (socket, req) => {
-    // R-4: capture the source IP at connection time so lockout can be keyed by
-    // `targetId|sourceIp` (per attacker, not per host).
-    const ip = req?.socket?.remoteAddress ?? 'unknown';
+    // R-4/H-1: capture the source IP at connection time so lockout can be
+    // keyed by `targetId|sourceIp` (per attacker, not per host). Behind a
+    // trusted reverse proxy, req.socket.remoteAddress is the proxy's constant
+    // IP — clientIp() reads X-Forwarded-For instead, but only when trustProxy
+    // is explicitly configured (untrusted XFF is spoofable).
+    const ip = clientIp({
+      remoteAddress: req?.socket?.remoteAddress,
+      forwardedFor: req?.headers?.['x-forwarded-for'],
+      trustProxy: cfg.trustProxy,
+    }) ?? 'unknown';
 
     // R-2: per-IP connection cap — reject floods before allocating state.
     if (!limits.canConnect(ip)) { socket.close(); return; }
     limits.addConn(ip);
 
-    socket.farsight = { id: null, password: null, peerSocket: null, ip, registered: false };
+    // L-2: per-socket message rate limit — a token bucket generous enough
+    // for normal ICE-candidate bursts, tight enough to stop message floods.
+    const bucket = createTokenBucket({ capacity: cfg.msgBurst, refillPerSec: cfg.msgPerSec });
+
+    socket.farsight = { id: null, password: null, peerSocket: null, ip, registered: false, bucket };
 
     // R-2: close a socket that neither registers (host) nor pairs (controller)
     // within the idle window, so half-open sockets can't accumulate.
@@ -65,6 +87,9 @@ export function createSignalingServer({ port, config } = {}) {
     const clearIdle = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } };
 
     socket.on('message', (raw) => {
+      // L-2: enforce the per-socket rate limit before doing any parse work.
+      if (!socket.farsight.bucket.tryRemove()) return;
+
       let msg;
       try {
         msg = parseMessage(raw.toString());
@@ -91,6 +116,13 @@ export function createSignalingServer({ port, config } = {}) {
           break;
         }
         case MSG.CONNECT: {
+          // L-1: bound CONNECT attempts per source IP before touching the
+          // registry, so probing for live host IDs (offline target, bad
+          // password, or success — every outcome counts) is capped by a
+          // uniform response that leaks nothing about which IDs are live.
+          const ipKey = socket.farsight.ip;
+          if (connectLimiter.isLocked(ipKey)) { send(socket, MSG.ERROR, { reason: 'rate_limited' }); break; }
+          connectLimiter.recordFailure(ipKey);
           const target = registry.get(msg.targetId);
           if (!target) { send(socket, MSG.ERROR, { reason: 'host_offline' }); break; }
           // R-4: composite lockout key scopes attempts to (host, this controller IP).
@@ -148,7 +180,10 @@ export function createSignalingServer({ port, config } = {}) {
     });
   });
 
-  return { wss, close: () => new Promise((res) => wss.close(res)) };
+  return {
+    wss,
+    close: () => { clearInterval(gc); return new Promise((res) => wss.close(res)); },
+  };
 }
 
 // Allow `node src/server.js` to run standalone (cross-platform entrypoint check).

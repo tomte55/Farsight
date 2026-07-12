@@ -8,6 +8,9 @@ export const CONTROL = Object.freeze({
   // key, or timeout). Lets the controller show a clear "session ended" message
   // instead of interpreting the peer drop as a transient loss and reconnecting.
   HOST_ENDED: 'host_ended',
+  // Bidirectional clipboard sync: text copied on either machine, forwarded to
+  // the peer over the reliable control channel while a session is active.
+  CLIPBOARD: 'clipboard',
 });
 
 const fail = () => { throw new Error('invalid control event'); };
@@ -36,6 +39,9 @@ export function validateControlEvent(evt) {
     case CONTROL.HOST_ENDED:
       if (evt.reason !== undefined && (typeof evt.reason !== 'string' || evt.reason.length > 32)) fail();
       return evt.reason !== undefined ? { type: evt.type, reason: evt.reason } : { type: evt.type };
+    case CONTROL.CLIPBOARD:
+      if (typeof evt.text !== 'string' || evt.text.length > 100000) fail();
+      return { type: evt.type, text: evt.text };
     default:
       return fail();
   }

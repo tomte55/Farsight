@@ -1,6 +1,28 @@
 // packages/controller/src/peer.js
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
+import { CHUNK_SIZE } from '@farsight/shared/file-transfer';
+
+// P-3: prefer VP8 then H264 (broad hardware-encoder coverage, low encode
+// latency) by REORDERING (never excluding) the codec list on the video
+// transceiver. The controller creates the offer, so its preference order
+// drives negotiation.
+function preferVideoCodecs(transceiver) {
+  try {
+    if (!transceiver || !transceiver.setCodecPreferences) return;
+    const caps = (RTCRtpReceiver.getCapabilities && RTCRtpReceiver.getCapabilities('video'))
+      || (RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('video'));
+    if (!caps || !caps.codecs) return;
+    const rank = (c) => {
+      const m = c.mimeType.toLowerCase();
+      if (m === 'video/vp8') return 0;
+      if (m === 'video/h264') return 1;
+      return 2; // keep everything else, just after the preferred two
+    };
+    const ordered = [...caps.codecs].sort((a, b) => rank(a) - rank(b));
+    transceiver.setCodecPreferences(ordered);
+  } catch { /* leave default negotiation */ }
+}
 
 // Pure mapping of RTCPeerConnection.connectionState to user-facing text.
 export function describeConnectionState(state) {
@@ -17,19 +39,31 @@ export function describeConnectionState(state) {
 
 export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onControl, onConnectionState }) {
   const pc = new RTCPeerConnection({ iceServers });
-  pc.addTransceiver('video', { direction: 'recvonly' });
+  const videoTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
+  preferVideoCodecs(videoTransceiver);
   // Input rides an unreliable + unordered channel: a dropped packet must never
   // stall the cursor (global constraint).
   const inputChannel = pc.createDataChannel('input', { ordered: false, maxRetransmits: 0 });
   // Control (monitor list/switch, session end) rides a reliable, ordered channel
   // — these messages must not be dropped or reordered.
   const controlChannel = pc.createDataChannel('control', { ordered: true });
+  // File transfer rides its OWN reliable, ordered channel — separate from
+  // input/control so a large transfer never blocks the cursor or session
+  // control messages. bufferedAmountLowThreshold backs the sender's
+  // backpressure loop (see the renderer's waitForBufferedLow).
+  const fileChannel = pc.createDataChannel('file', { ordered: true });
+  try { fileChannel.binaryType = 'arraybuffer'; } catch { /* guarded */ }
+  try { fileChannel.bufferedAmountLowThreshold = 262144; } catch { /* guarded */ }
   controlChannel.addEventListener('open', () => {
     // Ask the host to enumerate its monitors as soon as the channel is ready.
     controlChannel.send(JSON.stringify({ type: CONTROL.LIST_MONITORS }));
   });
   controlChannel.addEventListener('message', (m) => {
-    if (typeof m.data === 'string' && m.data.length > 8192) return;
+    // R-7 (defense in depth): bound the payload before parsing so a hostile
+    // host cannot send a huge string to the JSON parser. 256 KB, not 8 KB,
+    // because CLIPBOARD frames carry up to 100000 chars of validated text and
+    // need headroom for JSON-string escaping around that payload.
+    if (typeof m.data === 'string' && m.data.length > 262144) return;
     let evt; try { evt = validateControlEvent(JSON.parse(m.data)); } catch { return; }
     if (onControl) onControl(evt);
   });
@@ -37,16 +71,29 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
   pc.addEventListener('icecandidate', (e) => {
     if (e.candidate) sendSignal(MSG.CANDIDATE, { candidate: e.candidate });
   });
-  // Surface connection state, and on a transient drop attempt a single ICE
-  // restart (re-gather candidates, possibly via TURN) before giving up.
-  pc.addEventListener('connectionstatechange', async () => {
+  // Surface connection state, and on a drop that PERSISTS attempt a single
+  // ICE restart (re-gather candidates, possibly via TURN) before giving up.
+  // P-6: debounced — WebRTC flaps disconnected->connected under transient
+  // loss, and restarting on every flap thrashes a recoverable link.
+  let iceRestartTimer = null;
+  const clearIceRestart = () => { if (iceRestartTimer) { clearTimeout(iceRestartTimer); iceRestartTimer = null; } };
+  pc.addEventListener('connectionstatechange', () => {
     if (onConnectionState) onConnectionState(pc.connectionState);
-    if (pc.connectionState === 'disconnected') {
-      try {
-        const offer = await pc.createOffer({ iceRestart: true });
-        await pc.setLocalDescription(offer);
-        sendSignal(MSG.OFFER, { sdp: offer.sdp });
-      } catch {}
+    const recoverable = (s) => s === 'disconnected' || s === 'failed';
+    if (recoverable(pc.connectionState)) {
+      if (!iceRestartTimer) {
+        iceRestartTimer = setTimeout(async () => {
+          iceRestartTimer = null;
+          if (!recoverable(pc.connectionState)) return; // recovered during the grace window
+          try {
+            const offer = await pc.createOffer({ iceRestart: true });
+            await pc.setLocalDescription(offer);
+            sendSignal(MSG.OFFER, { sdp: offer.sdp });
+          } catch {}
+        }, 2500);
+      }
+    } else {
+      clearIceRestart();
     }
   });
 
@@ -60,6 +107,27 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
     async handleCandidate(c) { try { await pc.addIceCandidate(c); } catch {} },
     sendInput(evt) { if (inputChannel.readyState === 'open') inputChannel.send(JSON.stringify(evt)); },
     sendControl(evt) { if (controlChannel.readyState === 'open') controlChannel.send(JSON.stringify(evt)); },
-    close: () => pc.close(),
+    // File transfer surface: sendFileData accepts either a JSON framing
+    // string (meta/end/cancel) or a raw ArrayBuffer chunk. onFileMessage lets
+    // the renderer register its handler once the channel exists.
+    sendFileData(data) { try { if (fileChannel.readyState === 'open') fileChannel.send(data); } catch { /* guarded */ } },
+    // R-7 (defense in depth): bound incoming 'file' channel messages before
+    // dispatch, mirroring the host's hostFileChannel.onmessage bounds — drop
+    // oversized framing strings and binary chunks wildly larger than CHUNK_SIZE.
+    onFileMessage(cb) {
+      try {
+        fileChannel.onmessage = (m) => {
+          try {
+            if (typeof m.data === 'string' && m.data.length > 8192) return;
+            if (m.data instanceof ArrayBuffer && m.data.byteLength > CHUNK_SIZE * 2) return;
+            cb(m.data);
+          } catch { /* guarded */ }
+        };
+      } catch { /* guarded */ }
+    },
+    fileBufferedAmount() { try { return fileChannel.bufferedAmount; } catch { return 0; } },
+    onFileBufferedLow(cb) { try { fileChannel.onbufferedamountlow = () => { try { cb(); } catch { /* guarded */ } }; } catch { /* guarded */ } },
+    getStats: () => pc.getStats(),
+    close: () => { clearIceRestart(); pc.close(); },
   };
 }

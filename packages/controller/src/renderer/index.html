@@ -1,6 +1,15 @@
 <!-- packages/controller/src/renderer/index.html -->
 <!doctype html>
 <meta charset="utf-8" />
+<!--
+  CSP: the real containment here is connect-src/object-src/base-uri/default-src
+  (blocks a compromised renderer from exfiltrating to or navigating to
+  arbitrary origins). 'unsafe-inline' is retained for script/style only
+  because of the inline importmap below and pervasive inline style="..."
+  attributes throughout this file; a hash/nonce-based tightening is a future
+  improvement.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>Farsight Controller</title>
 <link rel="stylesheet" href="../shared/farsight.css" />
 <!--
@@ -14,7 +23,8 @@
     "@farsight/shared/host-id": "../shared/host-id.js",
     "@farsight/shared/signaling-url": "../shared/signaling-url.js",
     "@farsight/shared/input-events": "../shared/input-events.js",
-    "@farsight/shared/control-events": "../shared/control-events.js"
+    "@farsight/shared/control-events": "../shared/control-events.js",
+    "@farsight/shared/file-transfer": "../shared/file-transfer.js"
   }
 }
 </script>
@@ -72,7 +82,10 @@
   <div class="sessionbar">
     <span>Remote session</span>
     <span style="display:flex;gap:10px;align-items:center">
+      <span id="quality" class="qstat"></span>
       <select id="monitors" style="display:none"></select>
+      <button id="send-file" class="btn" style="padding:5px 10px">Send file…</button>
+      <span id="file-status" class="qstat"></span>
       <button id="end" class="btn btn-danger" style="padding:5px 12px">Disconnect</button>
     </span>
   </div>
