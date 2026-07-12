@@ -67,11 +67,12 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
   const clearIceRestart = () => { if (iceRestartTimer) { clearTimeout(iceRestartTimer); iceRestartTimer = null; } };
   pc.addEventListener('connectionstatechange', () => {
     if (onConnectionState) onConnectionState(pc.connectionState);
-    if (pc.connectionState === 'disconnected') {
+    const recoverable = (s) => s === 'disconnected' || s === 'failed';
+    if (recoverable(pc.connectionState)) {
       if (!iceRestartTimer) {
         iceRestartTimer = setTimeout(async () => {
           iceRestartTimer = null;
-          if (pc.connectionState !== 'disconnected') return; // recovered during the grace window
+          if (!recoverable(pc.connectionState)) return; // recovered during the grace window
           try {
             const offer = await pc.createOffer({ iceRestart: true });
             await pc.setLocalDescription(offer);

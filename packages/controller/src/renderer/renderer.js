@@ -196,7 +196,7 @@ document.getElementById('go').addEventListener('click', async () => {
           const forward = (e) => {
             if (!peer) return;
             if (e.type === 'mousemove') { pendingMove = e; if (!rafId) rafId = requestAnimationFrame(flushMove); return; }
-            if (pendingMove) flushMove(); // preserve order: last move before this event
+            if (pendingMove) { if (rafId) cancelAnimationFrame(rafId); flushMove(); } // preserve order: last move before this event
             if (['mousedown', 'mouseup', 'wheel'].includes(e.type)) e.preventDefault();
             const rect = video.getBoundingClientRect();
             const evt = domEventToInput(e, rect);
