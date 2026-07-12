@@ -19,4 +19,8 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   onPanic: (cb) => ipcRenderer.on('panic', () => cb()),
   getSignalingUrl: () => ipcRenderer.invoke('get-signaling-url'),
   setSignalingUrl: (url) => ipcRenderer.invoke('set-signaling-url', url),
+  checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  installUpdate: () => ipcRenderer.invoke('updater:install'),
+  setSessionActive: (active) => ipcRenderer.send('updater:set-session-active', active),
+  onUpdateStatus: (cb) => ipcRenderer.on('updater:status', (_e, ui) => cb(ui)),
 });
