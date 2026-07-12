@@ -2,6 +2,27 @@
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
 
+// P-3: prefer VP8 then H264 (broad hardware-encoder coverage, low encode
+// latency) by REORDERING (never excluding) the codec list on the video
+// transceiver. The controller creates the offer, so its preference order
+// drives negotiation.
+function preferVideoCodecs(transceiver) {
+  try {
+    if (!transceiver || !transceiver.setCodecPreferences) return;
+    const caps = (RTCRtpReceiver.getCapabilities && RTCRtpReceiver.getCapabilities('video'))
+      || (RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('video'));
+    if (!caps || !caps.codecs) return;
+    const rank = (c) => {
+      const m = c.mimeType.toLowerCase();
+      if (m === 'video/vp8') return 0;
+      if (m === 'video/h264') return 1;
+      return 2; // keep everything else, just after the preferred two
+    };
+    const ordered = [...caps.codecs].sort((a, b) => rank(a) - rank(b));
+    transceiver.setCodecPreferences(ordered);
+  } catch { /* leave default negotiation */ }
+}
+
 // Pure mapping of RTCPeerConnection.connectionState to user-facing text.
 export function describeConnectionState(state) {
   switch (state) {
@@ -17,7 +38,8 @@ export function describeConnectionState(state) {
 
 export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onControl, onConnectionState }) {
   const pc = new RTCPeerConnection({ iceServers });
-  pc.addTransceiver('video', { direction: 'recvonly' });
+  const videoTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
+  preferVideoCodecs(videoTransceiver);
   // Input rides an unreliable + unordered channel: a dropped packet must never
   // stall the cursor (global constraint).
   const inputChannel = pc.createDataChannel('input', { ordered: false, maxRetransmits: 0 });
@@ -37,16 +59,28 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
   pc.addEventListener('icecandidate', (e) => {
     if (e.candidate) sendSignal(MSG.CANDIDATE, { candidate: e.candidate });
   });
-  // Surface connection state, and on a transient drop attempt a single ICE
-  // restart (re-gather candidates, possibly via TURN) before giving up.
-  pc.addEventListener('connectionstatechange', async () => {
+  // Surface connection state, and on a drop that PERSISTS attempt a single
+  // ICE restart (re-gather candidates, possibly via TURN) before giving up.
+  // P-6: debounced — WebRTC flaps disconnected->connected under transient
+  // loss, and restarting on every flap thrashes a recoverable link.
+  let iceRestartTimer = null;
+  const clearIceRestart = () => { if (iceRestartTimer) { clearTimeout(iceRestartTimer); iceRestartTimer = null; } };
+  pc.addEventListener('connectionstatechange', () => {
     if (onConnectionState) onConnectionState(pc.connectionState);
     if (pc.connectionState === 'disconnected') {
-      try {
-        const offer = await pc.createOffer({ iceRestart: true });
-        await pc.setLocalDescription(offer);
-        sendSignal(MSG.OFFER, { sdp: offer.sdp });
-      } catch {}
+      if (!iceRestartTimer) {
+        iceRestartTimer = setTimeout(async () => {
+          iceRestartTimer = null;
+          if (pc.connectionState !== 'disconnected') return; // recovered during the grace window
+          try {
+            const offer = await pc.createOffer({ iceRestart: true });
+            await pc.setLocalDescription(offer);
+            sendSignal(MSG.OFFER, { sdp: offer.sdp });
+          } catch {}
+        }, 2500);
+      }
+    } else {
+      clearIceRestart();
     }
   });
 
@@ -60,6 +94,6 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
     async handleCandidate(c) { try { await pc.addIceCandidate(c); } catch {} },
     sendInput(evt) { if (inputChannel.readyState === 'open') inputChannel.send(JSON.stringify(evt)); },
     sendControl(evt) { if (controlChannel.readyState === 'open') controlChannel.send(JSON.stringify(evt)); },
-    close: () => pc.close(),
+    close: () => { clearIceRestart(); pc.close(); },
   };
 }
