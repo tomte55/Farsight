@@ -1,9 +1,11 @@
 // packages/controller/src/main.js
 import { app, BrowserWindow, ipcMain } from 'electron';
+import { autoUpdater } from 'electron-updater';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
+import { createUpdater } from '@farsight/shared/updater';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function configFilePath() {
@@ -30,6 +32,9 @@ ipcMain.handle('set-signaling-url', (_e, url) => {
   }
 });
 
+let mainWindow = null;
+let ctrlUpdater = null;
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1280, height: 800,
@@ -41,6 +46,19 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWindow = win;
+  return win;
 }
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  ctrlUpdater = createUpdater({
+    updater: autoUpdater,
+    isPackaged: app.isPackaged,
+    onStatus: (ui) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updater:status', ui); },
+  });
+  ctrlUpdater.start();
+  ipcMain.handle('updater:check', () => { ctrlUpdater.checkNow(); return true; });
+  ipcMain.handle('updater:install', () => ctrlUpdater.installNow());
+  ipcMain.on('updater:set-session-active', (_e, active) => ctrlUpdater.setSessionActive(active));
+});
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
