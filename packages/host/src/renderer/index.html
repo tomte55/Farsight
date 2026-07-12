@@ -1,0 +1,62 @@
+<!-- packages/host/src/renderer/index.html -->
+<!doctype html>
+<meta charset="utf-8" />
+<title>Farsight Host</title>
+<link rel="stylesheet" href="../shared/farsight.css" />
+<!--
+  Import map: the renderer runs in Chromium and cannot resolve bare npm
+  specifiers. Map @farsight/shared/* to the real source files (relative to
+  this document) so the plan's `import ... from '@farsight/shared/...'`
+  statements resolve without a bundler.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "@farsight/shared/protocol": "../shared/protocol.js",
+    "@farsight/shared/signaling-url": "../shared/signaling-url.js",
+    "@farsight/shared/control-events": "../shared/control-events.js"
+  }
+}
+</script>
+<style>
+  /* Host-specific: reserve room for the fixed session bar when active. */
+  body.in-session .app { padding-top: 46px; }
+</style>
+
+<div class="sessionbar" id="banner" style="display:none">
+  <span>● Remote session active</span>
+  <button id="cut" class="btn btn-danger" style="padding:5px 12px">Disconnect</button>
+</div>
+
+<div id="setup" hidden>
+  <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
+  <div style="font-size:15px;font-weight:700;margin-bottom:3px">Set up your signaling server</div>
+  <div class="statusline" style="margin-top:0;margin-bottom:16px">Enter the address of your Farsight signaling server (wss://…).</div>
+  <div class="lbl">Signaling server URL</div>
+  <input id="signaling-url" class="input" placeholder="wss://signal.example.org" />
+  <button id="save-signaling" class="btn btn-primary" style="width:100%;margin-top:4px">Save</button>
+  <p id="setup-error" class="statusline" style="color:var(--danger-ink)"></p>
+</div>
+
+<div class="app">
+  <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
+
+  <div id="idle">
+    <div class="lbl">Your ID</div>
+    <div class="chip"><span id="host-id">…</span><button class="cbtn" data-copy="host-id">Copy</button></div>
+    <div class="lbl">Password</div>
+    <div class="chip"><span id="host-pw">…</span><button class="cbtn" data-copy="host-pw">Copy</button></div>
+    <div id="status-pill" class="pill ready"><span class="pd"></span><span id="status">Connecting to signaling…</span></div>
+    <button id="open-settings" class="btn" style="margin-top:8px">Change signaling server…</button>
+  </div>
+
+  <div id="consent" class="card attn" style="display:none">
+    <div style="font-size:14px;font-weight:700;margin-bottom:4px">Allow remote control?</div>
+    <div class="statusline" style="margin-top:0;margin-bottom:14px">A controller is requesting access to this computer. They will be able to see your screen and control it.</div>
+    <div style="display:flex;gap:9px">
+      <button id="allow" class="btn btn-primary" style="flex:1">Allow</button>
+      <button id="deny" class="btn btn-ghost" style="flex:1">Deny</button>
+    </div>
+  </div>
+</div>
+<script type="module" src="./renderer.js"></script>

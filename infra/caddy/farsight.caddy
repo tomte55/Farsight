@@ -1,0 +1,9 @@
+# infra/caddy/farsight.caddy
+# Append this block to your Caddyfile. Caddy auto-provisions the Let's Encrypt
+# cert and upgrades the WebSocket, giving the required WSS endpoint.
+# flush_interval -1 disables response buffering for low-latency signaling.
+signal.example.org {
+	reverse_proxy 127.0.0.1:8090 {
+		flush_interval -1
+	}
+}

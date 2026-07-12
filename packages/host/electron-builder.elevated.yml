@@ -1,0 +1,9 @@
+# packages/host/electron-builder.elevated.yml
+# Optional elevated build variant. The default build remains least-privilege
+# (`asInvoker`); this variant requests highestAvailable so the host can drive
+# windows owned by elevated processes. Extends the base config created in Task 5.5.
+extends: electron-builder.yml
+appId: org.farsight.host.elevated
+productName: Farsight Host (Elevated)
+win:
+  requestedExecutionLevel: highestAvailable

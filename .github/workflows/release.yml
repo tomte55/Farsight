@@ -1,0 +1,83 @@
+name: Release
+
+# Cut a release by pushing a version tag, e.g.:
+#   git tag v1.0.0 && git push origin v1.0.0
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # create the GitHub Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history + tags, so the changelog can diff against the previous tag
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set app versions from tag
+        id: ver
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          npm pkg set version="$VERSION" -w @farsight/host -w @farsight/controller
+
+      - name: Build host installer
+        run: npm run dist -w @farsight/host
+
+      - name: Build controller installer
+        run: npm run dist -w @farsight/controller
+
+      - name: List built artifacts
+        shell: bash
+        run: ls -la packages/host/dist packages/controller/dist || true
+
+      - name: Generate changelog
+        shell: bash
+        run: |
+          CURRENT="${GITHUB_REF_NAME}"
+          # Previous tag by version order (the entry right after CURRENT in the desc-sorted list).
+          PREV=$(git tag --sort=-v:refname | grep -A1 "^${CURRENT}$" | tail -1)
+          {
+            echo "## What's changed"
+            echo
+            if [ -n "$PREV" ] && [ "$PREV" != "$CURRENT" ]; then
+              git log --no-merges --pretty=format:'- %s (%h)' "${PREV}..${CURRENT}"
+              echo
+              echo
+              echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${CURRENT}"
+            else
+              echo "- Initial release."
+            fi
+            echo
+            echo "---"
+            echo
+            echo "### Downloads"
+            echo "- **Farsight Host** — the machine to be controlled."
+            echo "- **Farsight Controller** — where you sit to control it."
+            echo
+            echo 'Unsigned build: on first run Windows SmartScreen may warn ("More info" → "Run anyway").'
+          } > RELEASE_BODY.md
+          echo "----- generated release body -----"
+          cat RELEASE_BODY.md
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Farsight ${{ github.ref_name }}
+          body_path: RELEASE_BODY.md
+          files: |
+            packages/host/dist/*.exe
+            packages/controller/dist/*.exe
+          fail_on_unmatched_files: true

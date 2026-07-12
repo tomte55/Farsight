@@ -1,0 +1,11 @@
+{
+  "name": "@farsight/signaling-server",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": { "start": "node src/server.js" },
+  "dependencies": {
+    "@farsight/shared": "*",
+    "ws": "^8.18.0"
+  }
+}

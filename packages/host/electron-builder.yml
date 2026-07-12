@@ -1,0 +1,14 @@
+# packages/host/electron-builder.yml
+appId: org.farsight.host
+productName: Farsight Host
+# Pinned so electron-builder doesn't need to resolve the hoisted (workspace) electron.
+electronVersion: 33.4.11
+directories: { output: dist }
+win:
+  target: nsis
+  # Code signing: provide CSC_LINK + CSC_KEY_PASSWORD env at build time.
+  requestedExecutionLevel: asInvoker   # least privilege: never auto-elevate
+files:
+  # Shared modules are vendored into src/shared by scripts/vendor-shared.mjs
+  # (predist), so the renderer resolves them via a stable relative path.
+  - "src/**/*"

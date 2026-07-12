@@ -1,0 +1,11 @@
+# packages/signaling-server/docker-compose.yml
+services:
+  farsight-signaling:
+    build:
+      context: ../..            # repo root
+      dockerfile: packages/signaling-server/Dockerfile
+    container_name: farsight-signaling
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8090:8080"   # bind localhost only; Caddy proxies to it

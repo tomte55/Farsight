@@ -1,0 +1,20 @@
+{
+  "name": "@farsight/host",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "prestart": "node ../../scripts/vendor-shared.mjs",
+    "start": "electron .",
+    "predist": "node ../../scripts/vendor-shared.mjs",
+    "dist": "electron-builder --config electron-builder.yml"
+  },
+  "dependencies": {
+    "@farsight/shared": "*",
+    "@nut-tree-fork/nut-js": "^4.2.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^24.13.3"
+  }
+}

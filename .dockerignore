@@ -1,0 +1,11 @@
+# Keep build context lean and never bake secrets or deps into image layers.
+# Runtime secrets are provided via env_file at container start, not COPYed in.
+**/.env
+**/.env.*
+!**/.env.example
+node_modules
+**/node_modules
+dist
+out
+.git
+*.log

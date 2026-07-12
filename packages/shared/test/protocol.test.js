@@ -1,0 +1,29 @@
+// packages/shared/test/protocol.test.js
+import { expect, test } from 'vitest';
+import { MSG, buildMessage, parseMessage } from '../src/protocol.js';
+
+test('buildMessage merges type and payload', () => {
+  expect(buildMessage(MSG.CONNECT, { targetId: '123', password: 'x' }))
+    .toEqual({ type: 'connect', targetId: '123', password: 'x' });
+});
+
+test('parseMessage round-trips a valid message', () => {
+  const raw = JSON.stringify(buildMessage(MSG.OFFER, { sdp: 'v=0' }));
+  expect(parseMessage(raw)).toEqual({ type: 'offer', sdp: 'v=0' });
+});
+
+test('parseMessage rejects non-JSON', () => {
+  expect(() => parseMessage('not json')).toThrow('malformed message');
+});
+
+test('parseMessage rejects unknown type', () => {
+  expect(() => parseMessage(JSON.stringify({ type: 'hack' }))).toThrow('malformed message');
+});
+
+test('parseMessage rejects missing type', () => {
+  expect(() => parseMessage(JSON.stringify({ sdp: 'v=0' }))).toThrow('malformed message');
+});
+
+test('ICE_SERVERS is a known type', () => {
+  expect(parseMessage(JSON.stringify({ type: 'ice_servers', iceServers: [] })).type).toBe('ice_servers');
+});

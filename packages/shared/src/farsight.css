@@ -1,0 +1,102 @@
+/* packages/shared/src/farsight.css
+   Aurora design language — shared by the host and controller renderers.
+   Vendored to packages/<app>/src/shared/ by scripts/vendor-shared.mjs and
+   linked as ../shared/farsight.css. No web fonts / remote assets (CSP-safe). */
+:root {
+  --bg: #12121c;
+  --bg2: #0d0d16;
+  --panel: #1b1b2b;
+  --line: #2a2a40;
+  --ink: #f2eeff;
+  --sub: #a7a3c4;
+  --acc: #7c5cff;
+  --acc2: #4aa8ff;
+  --danger-ink: #ff8fa3;
+  --danger-bg: #3a1620;
+  --danger-line: #5a2030;
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
+  -webkit-user-select: none;
+  user-select: none;
+}
+.app { padding: 20px; }
+
+/* Wordmark */
+.wm { display: flex; align-items: center; gap: 9px; margin-bottom: 18px; }
+.wm .glyph {
+  width: 24px; height: 24px; border-radius: 6px;
+  background: linear-gradient(135deg, var(--acc), var(--acc2));
+  display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 13px;
+}
+.wm .name { font-weight: 700; font-size: 15px; letter-spacing: .01em; }
+
+/* Labels + credential chips */
+.lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .13em; color: var(--sub); margin-bottom: 5px; }
+.chip {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 13px; border-radius: 9px;
+  background: var(--panel); border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 18px; font-weight: 600; letter-spacing: .05em;
+  margin-bottom: 13px;
+}
+.chip .cbtn {
+  font-family: system-ui, sans-serif; font-size: 11px; font-weight: 600;
+  padding: 4px 9px; border-radius: 6px; border: none; cursor: pointer;
+  background: #272740; color: #b3a4ff; -webkit-user-select: none; user-select: none;
+}
+.chip .cbtn:active { background: #33335a; }
+
+/* Status pills */
+.pill { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 999px; }
+.pill .pd { width: 7px; height: 7px; border-radius: 50%; }
+.pill.ready { background: rgba(124,92,255,.16); color: #b3a4ff; }
+.pill.ready .pd { background: var(--acc); }
+.pill.active { background: rgba(74,168,255,.16); color: #9ccaff; }
+.pill.active .pd { background: var(--acc2); }
+
+/* Buttons */
+.btn { border: none; border-radius: 9px; padding: 10px 16px; font-family: system-ui, sans-serif; font-size: 13px; font-weight: 700; cursor: pointer; }
+.btn-primary { background: linear-gradient(135deg, var(--acc), var(--acc2)); color: #fff; }
+.btn-ghost { background: transparent; border: 1px solid var(--line); color: var(--sub); }
+.btn-danger { background: var(--danger-bg); color: var(--danger-ink); border: 1px solid var(--danger-line); }
+
+/* Inputs */
+.input {
+  width: 100%; padding: 11px 13px; border-radius: 9px;
+  background: var(--panel); border: 1px solid var(--line); color: var(--ink);
+  font-family: var(--mono); font-size: 14px; margin-bottom: 11px;
+  -webkit-user-select: text; user-select: text;
+}
+.input::placeholder { color: #6a6785; }
+.input:focus { outline: none; border-color: var(--acc); }
+
+/* Cards (consent panel / connect card) */
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 16px; }
+.card.attn { border-color: var(--acc); }
+
+/* Status text line */
+.statusline { font-size: 12.5px; color: var(--sub); margin-top: 10px; }
+
+/* Host active-session bar */
+.sessionbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 14px; background: var(--bg2); border-bottom: 1px solid var(--line);
+  font-size: 12.5px; font-weight: 600; color: #9ccaff;
+}
+
+/* Controller in-session overlay */
+.overlay { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; }
+.overlay[hidden] { display: none; }
+.veil { position: absolute; inset: 0; background: rgba(10,10,18,.72); backdrop-filter: blur(2px); }
+.toast { position: relative; text-align: center; max-width: 380px; padding: 0 24px; }
+.toast .glyphc { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; margin: 0 auto 12px; font-size: 20px; }
+.toast h2 { font-size: 17px; margin: 0 0 5px; }
+.toast p { font-size: 12.5px; color: var(--sub); margin: 0 0 15px; }
+.toast .row { display: flex; gap: 9px; justify-content: center; }
