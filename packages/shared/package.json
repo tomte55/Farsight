@@ -9,6 +9,8 @@
     "./control-events": "./src/control-events.js",
     "./password": "./src/password.js",
     "./credentials": "./src/credentials.js",
+    "./credentials-format": "./src/credentials-format.js",
+    "./version": "./src/version.js",
     "./host-id": "./src/host-id.js",
     "./turn": "./src/turn.js",
     "./signaling-url": "./src/signaling-url.js",

@@ -76,7 +76,7 @@ export function createSignalingServer({ port, config } = {}) {
     // for normal ICE-candidate bursts, tight enough to stop message floods.
     const bucket = createTokenBucket({ capacity: cfg.msgBurst, refillPerSec: cfg.msgPerSec });
 
-    socket.farsight = { id: null, password: null, peerSocket: null, ip, registered: false, bucket };
+    socket.farsight = { id: null, password: null, peerSocket: null, ip, registered: false, bucket, version: null };
 
     // R-2: close a socket that neither registers (host) nor pairs (controller)
     // within the idle window, so half-open sockets can't accumulate.
@@ -110,6 +110,10 @@ export function createSignalingServer({ port, config } = {}) {
           clearIdle();
           // Session password is generated client-side and held in memory only.
           socket.farsight.password = typeof msg.password === 'string' ? msg.password : null;
+          // SP1: record the host's app version so it can be relayed to a
+          // connecting controller (and, later, surfaced to the console). Only a
+          // string is kept — anything else is ignored.
+          socket.farsight.version = typeof msg.version === 'string' ? msg.version : null;
           registry.add(id, socket);
           send(socket, MSG.REGISTERED, { id });
           log.event('register', { id });
@@ -121,6 +125,9 @@ export function createSignalingServer({ port, config } = {}) {
           // password, or success — every outcome counts) is capped by a
           // uniform response that leaks nothing about which IDs are live.
           const ipKey = socket.farsight.ip;
+          // SP1: record the controller's app version (string only) so it can be
+          // relayed to the host on the CONNECT it receives.
+          socket.farsight.version = typeof msg.version === 'string' ? msg.version : null;
           if (connectLimiter.isLocked(ipKey)) { send(socket, MSG.ERROR, { reason: 'rate_limited' }); break; }
           connectLimiter.recordFailure(ipKey);
           const target = registry.get(msg.targetId);
@@ -144,9 +151,11 @@ export function createSignalingServer({ port, config } = {}) {
           // R-1: issue ephemeral TURN/ICE credentials only after successful auth —
           // to the controller (post-auth) and to the host right before CONNECT.
           const ice = iceServersFor(cfg);
-          send(socket, MSG.ICE_SERVERS, { iceServers: ice });
+          // SP1: relay each peer's app version to the other (undefined when the
+          // peer is an older build that sent none — JSON omits the field).
+          send(socket, MSG.ICE_SERVERS, { iceServers: ice, peerVersion: target.farsight.version || undefined });
           send(target, MSG.ICE_SERVERS, { iceServers: ice });
-          send(target, MSG.CONNECT, {}); // tell host a controller wants in
+          send(target, MSG.CONNECT, { peerVersion: socket.farsight.version || undefined }); // tell host a controller wants in
           log.event('connect', { targetId: msg.targetId });
           break;
         }
