@@ -27,3 +27,9 @@ test('parseMessage rejects missing type', () => {
 test('ICE_SERVERS is a known type', () => {
   expect(parseMessage(JSON.stringify({ type: 'ice_servers', iceServers: [] })).type).toBe('ice_servers');
 });
+
+test('UPDATE_PASSWORD is a known type', () => {
+  expect(MSG.UPDATE_PASSWORD).toBe('update_password');
+  expect(parseMessage(JSON.stringify({ type: 'update_password', password: 'k7m9pq' })).type)
+    .toBe('update_password');
+});

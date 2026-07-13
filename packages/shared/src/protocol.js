@@ -8,6 +8,7 @@ export const MSG = Object.freeze({
   CANDIDATE: 'candidate',
   ICE_SERVERS: 'ice_servers',
   PEER_DISCONNECTED: 'peer_disconnected',
+  UPDATE_PASSWORD: 'update_password',
   ERROR: 'error',
 });
 
