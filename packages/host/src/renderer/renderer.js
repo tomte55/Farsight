@@ -42,7 +42,7 @@ document.addEventListener('click', (e) => { if (!settingsMenu.contains(e.target)
 document.getElementById('menu-check-updates').addEventListener('click', () => window.farsightIpc.checkForUpdates());
 
 // Copy buttons on the ID/password chips (clipboard is allowed in the renderer).
-for (const btn of document.querySelectorAll('.cbtn')) {
+for (const btn of document.querySelectorAll('.cbtn[data-copy]')) {
   btn.addEventListener('click', async () => {
     const el = document.getElementById(btn.dataset.copy);
     const text = el.dataset.copyValue || el.textContent;
