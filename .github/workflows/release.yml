@@ -14,11 +14,11 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # full history + tags, so the changelog can diff against the previous tag
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 20
 
@@ -77,7 +77,7 @@ jobs:
           cat RELEASE_BODY.md
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: Farsight ${{ github.ref_name }}
           body_path: RELEASE_BODY.md
