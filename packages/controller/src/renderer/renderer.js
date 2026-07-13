@@ -5,6 +5,7 @@ import { domEventToInput, videoContentRect } from '../input-capture.js';
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL } from '@farsight/shared/control-events';
 import { isValidHostId } from '@farsight/shared/host-id';
+import { normalizeHostId, normalizePassword } from '@farsight/shared/credentials-format';
 import {
   CHUNK_SIZE, MAX_FILE_SIZE, metaFrame, endFrame, parseFrame, sanitizeFilename, createReceiver,
 } from '@farsight/shared/file-transfer';
@@ -320,8 +321,8 @@ function doReconnect() {
 
 document.getElementById('go').addEventListener('click', async () => {
   if (!signalingUrl) return;
-  const targetId = idInput.value.trim();
-  const password = document.getElementById('host-pw').value.trim();
+  const targetId = normalizeHostId(idInput.value);
+  const password = normalizePassword(document.getElementById('host-pw').value);
   lastCreds.targetId = targetId;
   lastCreds.password = password;
   sessionClosing = false; // fresh attempt — clear any prior host-ended state

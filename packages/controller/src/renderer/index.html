@@ -24,7 +24,8 @@
     "@farsight/shared/signaling-url": "../shared/signaling-url.js",
     "@farsight/shared/input-events": "../shared/input-events.js",
     "@farsight/shared/control-events": "../shared/control-events.js",
-    "@farsight/shared/file-transfer": "../shared/file-transfer.js"
+    "@farsight/shared/file-transfer": "../shared/file-transfer.js",
+    "@farsight/shared/credentials-format": "../shared/credentials-format.js"
   }
 }
 </script>
@@ -79,9 +80,9 @@
     <div style="font-size:15px;font-weight:700;margin-bottom:3px">Connect to a host</div>
     <div class="statusline" style="margin-top:0;margin-bottom:16px">Enter the ID and password shown on the host.</div>
     <div class="lbl">Host ID</div>
-    <input id="host-id" class="input" placeholder="Host ID (9 digits)" />
+    <input id="host-id" class="input" placeholder="947 188 129" />
     <div class="lbl">Password</div>
-    <input id="host-pw" class="input" placeholder="Password (xxxx-xxxx-xxxx)" />
+    <input id="host-pw" class="input" placeholder="Password" />
     <button id="go" class="btn btn-primary" style="width:100%;margin-top:4px">Connect</button>
     <p id="status" class="statusline"></p>
   </div>
