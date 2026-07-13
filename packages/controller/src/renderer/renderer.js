@@ -5,7 +5,8 @@ import { domEventToInput, videoContentRect } from '../input-capture.js';
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL } from '@farsight/shared/control-events';
 import { isValidHostId } from '@farsight/shared/host-id';
-import { normalizeHostId, normalizePassword } from '@farsight/shared/credentials-format';
+import { normalizeHostId, passwordCandidates } from '@farsight/shared/credentials-format';
+import { isOlder } from '@farsight/shared/version';
 import {
   CHUNK_SIZE, MAX_FILE_SIZE, metaFrame, endFrame, parseFrame, sanitizeFilename, createReceiver,
 } from '@farsight/shared/file-transfer';
@@ -252,11 +253,27 @@ document.getElementById('menu-change-server').addEventListener('click', async ()
 });
 refreshSignalingUrl();
 
-// Paint the subtle build-version label in the bottom-left corner.
+// Paint the subtle build-version label in the bottom-left corner. Also cache
+// our own version for the SP1 version-aware handshake (sent on CONNECT and
+// compared against the host's relayed version).
+let appVersion = null;
 window.farsightIpc.getAppVersion().then((v) => {
+  appVersion = v || null;
   const el = document.getElementById('version-tag');
   if (el && v) el.textContent = `v${v}`;
 });
+
+// SP1: reflect the host's app version (relayed by the server on ICE_SERVERS)
+// in the session bar, with a subtle note when the host is behind us — the
+// groundwork the SP2 console turns into a one-click remote update.
+const hostVersionEl = document.getElementById('host-version');
+function showHostVersion(hostVersion) {
+  if (!hostVersionEl) return;
+  if (typeof hostVersion !== 'string' || !hostVersion) { hostVersionEl.textContent = ''; return; }
+  const behind = isOlder(hostVersion, appVersion);
+  hostVersionEl.textContent = behind ? `Host v${hostVersion} · update available` : `Host v${hostVersion}`;
+  hostVersionEl.classList.toggle('outdated', behind);
+}
 
 const ERROR_TEXT = {
   host_offline: 'Host is offline.',
@@ -322,13 +339,21 @@ function doReconnect() {
 document.getElementById('go').addEventListener('click', async () => {
   if (!signalingUrl) return;
   const targetId = normalizeHostId(idInput.value);
-  const password = normalizePassword(document.getElementById('host-pw').value);
+  const typedPassword = document.getElementById('host-pw').value;
+  // SP1 compat shim: try the normalized password first, then the raw typed
+  // value (pre-v1.4 hosts registered the dashed literal). We advance through
+  // these only on a bad_password reply, so a current host never triggers a retry.
+  const candidates = passwordCandidates(typedPassword);
+  let pwIndex = 0;
   lastCreds.targetId = targetId;
-  lastCreds.password = password;
+  lastCreds.password = typedPassword; // raw typed → Reconnect reproduces the same candidates
   sessionClosing = false; // fresh attempt — clear any prior host-ended state
   if (!isValidHostId(targetId)) { statusEl.textContent = 'Invalid ID.'; return; }
-  if (!password) { statusEl.textContent = 'Enter the host password.'; return; }
+  if (candidates.length === 0) { statusEl.textContent = 'Enter the host password.'; return; }
+  if (hostVersionEl) hostVersionEl.textContent = ''; // clear any stale note from a prior session
   statusEl.textContent = 'Connecting…';
+  // SP1: announce our app version so the host (and server) learn who's connecting.
+  const sendConnect = () => signal.send(MSG.CONNECT, { targetId, password: candidates[pwIndex], version: appVersion || undefined });
 
   // R-1: the server issues ICE/TURN servers only after successful auth. Build
   // the peer (and offer) once they arrive so the connection can use TURN.
@@ -421,10 +446,26 @@ document.getElementById('go').addEventListener('click', async () => {
   };
 
   signal = createSignalingClient(signalingUrl, {
-    [MSG.ICE_SERVERS]: (m) => startPeer(m.iceServers || []),
+    [MSG.ICE_SERVERS]: (m) => {
+      // Reaching ICE_SERVERS means auth succeeded — lock in the winning password
+      // candidate (so Reconnect uses it directly) and surface the host's version.
+      lastCreds.password = candidates[pwIndex];
+      showHostVersion(m.peerVersion);
+      startPeer(m.iceServers || []);
+    },
     [MSG.ANSWER]: (m) => peer.handleAnswer(m.sdp),
     [MSG.CANDIDATE]: (m) => peer.handleCandidate(m.candidate),
-    [MSG.ERROR]: (m) => { statusEl.textContent = ERROR_TEXT[m.reason] || `Error: ${m.reason}`; },
+    [MSG.ERROR]: (m) => {
+      // Compat shim: a bad_password may just mean this host predates the v1.4
+      // password normalization — retry once with the next candidate before failing.
+      if (m.reason === 'bad_password' && pwIndex + 1 < candidates.length) {
+        pwIndex += 1;
+        statusEl.textContent = 'Connecting…';
+        sendConnect();
+        return;
+      }
+      statusEl.textContent = ERROR_TEXT[m.reason] || `Error: ${m.reason}`;
+    },
     [MSG.PEER_DISCONNECTED]: () => {
       setActive(false);
       stopStatsPoll();
@@ -439,5 +480,5 @@ document.getElementById('go').addEventListener('click', async () => {
   await signal.ready;
   // Host reacts to CONNECT (prepares its stream). On success the server sends
   // ICE_SERVERS, which triggers peer creation + OFFER above.
-  signal.send(MSG.CONNECT, { targetId, password });
+  sendConnect();
 });

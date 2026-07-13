@@ -375,6 +375,8 @@ window.farsightIpc.onPanicUnavailable(() => {
 // here; it is sent on REGISTER so the signaling server can gate controllers.
 const sessionPassword = await window.farsightIpc.getSessionPassword();
 document.getElementById('host-pw').textContent = sessionPassword;
+// SP1: our own app version, announced on REGISTER (version-aware handshake).
+const appVersion = await window.farsightIpc.getAppVersion();
 
 function startSignaling(signalingUrl) {
   signal = createSignalingClient(signalingUrl, {
@@ -382,7 +384,9 @@ function startSignaling(signalingUrl) {
     // R-1: the server sends ICE servers right before CONNECT, only after the
     // controller authenticated. Store them for the peer built on consent.
     [MSG.ICE_SERVERS]: (m) => { iceServers = m.iceServers || []; },
-    [MSG.CONNECT]: () => { session.requestConsent(); window.farsightIpc.requestAttention(); statusEl.textContent = 'A controller wants to connect.'; },
+    // SP1: the server relays the controller's app version on CONNECT — surface
+    // it so the consent prompt shows who (and which version) is asking.
+    [MSG.CONNECT]: (m) => { session.requestConsent(); window.farsightIpc.requestAttention(); statusEl.textContent = m && typeof m.peerVersion === 'string' ? `A controller (v${m.peerVersion}) wants to connect.` : 'A controller wants to connect.'; },
     [MSG.OFFER]: async (m) => {
       if (peer) { await peer.handleOffer(m.sdp); remoteReady = true; flushCandidates(); }
       else { pendingOffer = m.sdp; }
@@ -396,7 +400,7 @@ function startSignaling(signalingUrl) {
       session.end();
       statusEl.textContent = 'Peer disconnected.';
     },
-  }, { password: sessionPassword });
+  }, { password: sessionPassword, version: appVersion });
 }
 
 // First-run setup / settings: the signaling URL is configured via IPC, never

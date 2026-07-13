@@ -25,7 +25,8 @@
     "@farsight/shared/input-events": "../shared/input-events.js",
     "@farsight/shared/control-events": "../shared/control-events.js",
     "@farsight/shared/file-transfer": "../shared/file-transfer.js",
-    "@farsight/shared/credentials-format": "../shared/credentials-format.js"
+    "@farsight/shared/credentials-format": "../shared/credentials-format.js",
+    "@farsight/shared/version": "../shared/version.js"
   }
 }
 </script>
@@ -48,6 +49,10 @@
     background: var(--panel); color: var(--ink); border: 1px solid var(--line);
     border-radius: 7px; padding: 5px 8px; font-size: 12.5px;
   }
+  /* Host-version note in the session bar: muted by default; amber when the host
+     lags behind this build (SP1 groundwork for SP2's one-click remote update). */
+  #host-version { opacity: .7; }
+  #host-version.outdated { opacity: 1; color: var(--warn, #f0b429); }
 </style>
 
 <div id="version-tag" aria-hidden="true"></div>
@@ -95,6 +100,7 @@
   <div class="sessionbar">
     <span>Remote session</span>
     <span style="display:flex;gap:10px;align-items:center">
+      <span id="host-version" class="qstat"></span>
       <span id="quality" class="qstat"></span>
       <select id="monitors" style="display:none"></select>
       <button id="send-file" class="btn" style="padding:5px 10px">Send file…</button>

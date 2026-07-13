@@ -2,10 +2,12 @@
 import { MSG, buildMessage, parseMessage } from '@farsight/shared/protocol';
 import { assertSecureSignalingUrl } from '@farsight/shared/signaling-url';
 
-export function createSignalingClient(url, handlers, { password } = {}) {
+export function createSignalingClient(url, handlers, { password, version } = {}) {
   assertSecureSignalingUrl(url); // R-3: refuse plaintext ws:// off-localhost
   const ws = new WebSocket(url);
-  ws.addEventListener('open', () => ws.send(JSON.stringify(buildMessage(MSG.REGISTER, { password }))));
+  // SP1: announce our app version on REGISTER so the server can relay it to a
+  // connecting controller (and later surface it to the console).
+  ws.addEventListener('open', () => ws.send(JSON.stringify(buildMessage(MSG.REGISTER, { password, version }))));
   ws.addEventListener('message', (ev) => {
     let msg;
     try { msg = parseMessage(ev.data); } catch { return; }
