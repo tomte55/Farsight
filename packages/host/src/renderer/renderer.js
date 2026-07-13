@@ -9,6 +9,7 @@ import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
 import {
   CHUNK_SIZE, MAX_FILE_SIZE, metaFrame, endFrame, parseFrame, sanitizeFilename, createReceiver,
 } from '@farsight/shared/file-transfer';
+import { formatHostId } from '@farsight/shared/credentials-format';
 
 // Bound on receiveState.chunks.length: legit transfers use CHUNK_SIZE chunks
 // (~6400 for a 100 MB file), so this bounds the array against a peer sending
@@ -42,7 +43,8 @@ document.getElementById('menu-check-updates').addEventListener('click', () => wi
 // Copy buttons on the ID/password chips (clipboard is allowed in the renderer).
 for (const btn of document.querySelectorAll('.cbtn')) {
   btn.addEventListener('click', async () => {
-    const text = document.getElementById(btn.dataset.copy).textContent;
+    const el = document.getElementById(btn.dataset.copy);
+    const text = el.dataset.copyValue || el.textContent;
     try { await navigator.clipboard.writeText(text); const old = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = old; }, 1200); } catch { /* ignore */ }
   });
 }
@@ -357,7 +359,7 @@ document.getElementById('host-pw').textContent = sessionPassword;
 
 function startSignaling(signalingUrl) {
   signal = createSignalingClient(signalingUrl, {
-    [MSG.REGISTERED]: (m) => { idEl.textContent = m.id; window.farsightIpc.setHostId(m.id); statusEl.textContent = 'Ready. Waiting for a controller.'; },
+    [MSG.REGISTERED]: (m) => { idEl.textContent = formatHostId(m.id); idEl.dataset.copyValue = m.id; window.farsightIpc.setHostId(m.id); statusEl.textContent = 'Ready. Waiting for a controller.'; },
     // R-1: the server sends ICE servers right before CONNECT, only after the
     // controller authenticated. Store them for the peer built on consent.
     [MSG.ICE_SERVERS]: (m) => { iceServers = m.iceServers || []; },
