@@ -1,7 +1,7 @@
 // packages/controller/src/renderer/renderer.js
 import { createSignalingClient } from '../signaling-client.js';
 import { createControllerPeer, describeConnectionState } from '../peer.js';
-import { domEventToInput } from '../input-capture.js';
+import { domEventToInput, videoContentRect } from '../input-capture.js';
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL } from '@farsight/shared/control-events';
 import { isValidHostId } from '@farsight/shared/host-id';
@@ -388,7 +388,7 @@ document.getElementById('go').addEventListener('click', async () => {
             rafId = 0;
             if (!pendingMove || !peer) { pendingMove = null; return; }
             const e = pendingMove; pendingMove = null;
-            const rect = video.getBoundingClientRect();
+            const rect = videoContentRect(video.getBoundingClientRect(), video.videoWidth, video.videoHeight);
             const evt = domEventToInput(e, rect);
             if (evt && peer) peer.sendInput(evt);
           };
@@ -397,7 +397,7 @@ document.getElementById('go').addEventListener('click', async () => {
             if (e.type === 'mousemove') { pendingMove = e; if (!rafId) rafId = requestAnimationFrame(flushMove); return; }
             if (pendingMove) { if (rafId) cancelAnimationFrame(rafId); flushMove(); } // preserve order: last move before this event
             if (['mousedown', 'mouseup', 'wheel'].includes(e.type)) e.preventDefault();
-            const rect = video.getBoundingClientRect();
+            const rect = videoContentRect(video.getBoundingClientRect(), video.videoWidth, video.videoHeight);
             const evt = domEventToInput(e, rect);
             if (evt) peer.sendInput(evt);
           };
