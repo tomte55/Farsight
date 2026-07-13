@@ -162,6 +162,14 @@ export function createSignalingServer({ port, config } = {}) {
           if (peer) send(peer, msg.type, { candidate: msg.candidate });
           break;
         }
+        case MSG.UPDATE_PASSWORD: {
+          // A registered host rotates its OWN session password. Only mutates
+          // this socket's registration; ignored from unregistered sockets.
+          if (socket.farsight.registered && typeof msg.password === 'string') {
+            socket.farsight.password = msg.password;
+          }
+          break;
+        }
         default:
           break;
       }
