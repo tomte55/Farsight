@@ -2,10 +2,10 @@
 import { expect, test } from 'vitest';
 import { generateSessionPassword, constantTimeEqual } from '../src/password.js';
 
-test('password has expected shape and unambiguous alphabet', () => {
+test('password is 6 chars from the unambiguous alphabet, no separators', () => {
   for (let i = 0; i < 50; i++) {
     const p = generateSessionPassword();
-    expect(p).toMatch(/^[23456789abcdefghjkmnpqrstuvwxyz]{4}-[23456789abcdefghjkmnpqrstuvwxyz]{4}-[23456789abcdefghjkmnpqrstuvwxyz]{4}$/);
+    expect(p).toMatch(/^[23456789abcdefghjkmnpqrstuvwxyz]{6}$/);
   }
 });
 

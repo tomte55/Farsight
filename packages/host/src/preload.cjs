@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   getScreenSource: () => ipcRenderer.invoke('get-screen-source'),
   getScreenSize: () => ipcRenderer.invoke('get-screen-size'),
   getSessionPassword: () => ipcRenderer.invoke('get-session-password'),
+  regenerateSessionPassword: () => ipcRenderer.invoke('regenerate-session-password'),
   listDisplays: () => ipcRenderer.invoke('list-displays'),
   getScreenSourceFor: (displayId) => ipcRenderer.invoke('get-screen-source-for', displayId),
   selectInjectorDisplay: (index) => ipcRenderer.invoke('select-injector-display', index),

@@ -3,14 +3,10 @@ import { randomInt, timingSafeEqual } from 'node:crypto';
 
 const ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'; // 31 unambiguous chars
 
-function group() {
-  let s = '';
-  for (let i = 0; i < 4; i++) s += ALPHABET[randomInt(0, ALPHABET.length)];
-  return s;
-}
-
 export function generateSessionPassword() {
-  return `${group()}-${group()}-${group()}`;
+  let s = '';
+  for (let i = 0; i < 6; i++) s += ALPHABET[randomInt(0, ALPHABET.length)];
+  return s;
 }
 
 export function constantTimeEqual(a, b) {

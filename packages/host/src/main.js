@@ -38,7 +38,7 @@ const TRAY_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAA
 
 // Per-launch session password. Generated in the trusted main process (node:crypto)
 // and handed to the renderer via IPC — the sandboxed renderer can't run node:crypto.
-const sessionPassword = generateSessionPassword();
+let sessionPassword = generateSessionPassword();
 
 // Input injection uses nut.js, a native Node addon that cannot load in the
 // sandboxed renderer. The renderer forwards validated-shape input events over
@@ -151,6 +151,15 @@ ipcMain.handle('get-screen-size', () => {
 
 // The renderer displays the session password and sends it on REGISTER.
 ipcMain.handle('get-session-password', () => sessionPassword);
+
+// Rotate the session password on demand (renderer's manual button or idle
+// timer). Regenerate in the trusted main process, refresh the tray label, and
+// return the new value so the renderer can display it and push UPDATE_PASSWORD.
+ipcMain.handle('regenerate-session-password', () => {
+  sessionPassword = generateSessionPassword();
+  refreshTrayMenu();
+  return sessionPassword;
+});
 
 // Build version for the subtle bottom-left label; app.getVersion() reads the
 // packaged package.json version (set from the git tag by the release CI).
