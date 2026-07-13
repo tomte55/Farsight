@@ -13,4 +13,5 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   pickFile: () => ipcRenderer.invoke('pick-file'),
   saveFile: (arg) => ipcRenderer.invoke('save-file', arg),
   reportError: (entry) => ipcRenderer.send('log:renderer', entry),
+  openLogs: () => ipcRenderer.invoke('open-logs'),
 });

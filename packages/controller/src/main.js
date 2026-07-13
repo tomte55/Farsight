@@ -1,5 +1,5 @@
 // packages/controller/src/main.js
-import { app, BrowserWindow, ipcMain, clipboard, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, clipboard, dialog, shell } from 'electron';
 // electron-updater is CommonJS: a named ESM import fails in the packaged app's
 // ESM loader, so use the default import + destructure interop.
 import electronUpdater from 'electron-updater';
@@ -123,5 +123,6 @@ app.whenReady().then(() => {
   ipcMain.handle('updater:check', () => { ctrlUpdater.checkNow(); return true; });
   ipcMain.handle('updater:install', () => ctrlUpdater.installNow());
   ipcMain.on('updater:set-session-active', (_e, active) => ctrlUpdater.setSessionActive(active));
+  ipcMain.handle('open-logs', () => shell.openPath(path.join(app.getPath('userData'), 'logs')));
 });
 app.on('window-all-closed', () => { log?.info('controller quitting'); if (process.platform !== 'darwin') app.quit(); });

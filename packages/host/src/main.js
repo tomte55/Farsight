@@ -1,5 +1,5 @@
 // packages/host/src/main.js
-import { app, BrowserWindow, desktopCapturer, screen, ipcMain, globalShortcut, Tray, Menu, nativeImage, clipboard, dialog } from 'electron';
+import { app, BrowserWindow, desktopCapturer, screen, ipcMain, globalShortcut, Tray, Menu, nativeImage, clipboard, dialog, shell } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInjector } from './input-injector.js';
@@ -93,6 +93,7 @@ function refreshTrayMenu() {
     updateVersion: latestUpdateUi.version,
     onRestartUpdate: () => hostUpdater && hostUpdater.installNow(),
     onCheckUpdates: () => hostUpdater && hostUpdater.checkNow(),
+    onOpenLogs: () => shell.openPath(path.join(app.getPath('userData'), 'logs')),
   })));
 }
 
