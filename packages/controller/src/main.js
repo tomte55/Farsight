@@ -7,6 +7,8 @@ const { autoUpdater } = electronUpdater;
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync } from 'node:fs';
+import * as nodeFs from 'node:fs';
+import { createAppLogger } from '@farsight/shared/app-log';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
 import { createUpdater } from '@farsight/shared/updater';
 import { MAX_FILE_SIZE } from '@farsight/shared/file-transfer';
@@ -65,6 +67,7 @@ ipcMain.handle('save-file', async (_e, arg) => {
 
 let mainWindow = null;
 let ctrlUpdater = null;
+let log = null;   // root logger; assigned on app ready, referenced as log?.*
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -83,6 +86,26 @@ function createWindow() {
   return win;
 }
 app.whenReady().then(() => {
+  ({ log } = createAppLogger({
+    filePath: path.join(app.getPath('userData'), 'logs', 'main.log'),
+    fs: nodeFs,
+    dirname: path.dirname,
+    isPackaged: app.isPackaged,
+    env: process.env,
+    mirror: app.isPackaged ? null : (line) => console.log(line),
+  }));
+  log.info('controller starting');
+
+  process.on('uncaughtException', (err) => log?.error(`uncaughtException: ${err?.stack || err}`));
+  process.on('unhandledRejection', (reason) => log?.error(`unhandledRejection: ${reason?.stack || reason}`));
+  app.on('render-process-gone', (_e, _wc, d) => log?.error(`render-process-gone: ${d?.reason}`));
+  app.on('child-process-gone', (_e, d) => log?.error(`child-process-gone: ${d?.type} ${d?.reason}`));
+
+  ipcMain.on('log:renderer', (_e, entry) => {
+    const level = ['debug', 'info', 'warn', 'error'].includes(entry?.level) ? entry.level : 'error';
+    log?.child('renderer')[level](String(entry?.msg ?? ''));
+  });
+
   createWindow();
   ctrlUpdater = createUpdater({
     updater: autoUpdater,

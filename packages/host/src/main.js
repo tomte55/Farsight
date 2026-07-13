@@ -10,6 +10,8 @@ import { generateSessionPassword } from '@farsight/shared/password';
 import { windowAttentionPlan } from './window-attention.js';
 import { buildTrayMenuTemplate } from './tray-menu.js';
 import { readFileSync, writeFileSync } from 'node:fs';
+import * as nodeFs from 'node:fs';
+import { createAppLogger } from '@farsight/shared/app-log';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
 import { MAX_FILE_SIZE } from '@farsight/shared/file-transfer';
 // electron-updater is CommonJS: a named ESM import fails in the packaged app's
@@ -25,6 +27,7 @@ let hostId = '';
 let quitting = false;
 let hostUpdater = null;
 let latestUpdateUi = { showRestartPrompt: false, checking: false, message: '', version: null };
+let log = null;   // root logger; assigned on app ready, referenced as log?.*
 // 16×16 Aurora gradient PNG (violet→blue, rounded). Inline data URL so the tray
 // needs no external icon asset (packaging-safe).
 const TRAY_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAmUlEQVR4nKXT4QrBYBiG4ef4RCKRLKyxsLCwsEitpKSkpKSkpJzlLXIE33sA189LKw+lLbT0Yd6BJIRZHyYRxCMYxzCcQpTAYAG9FMI1dDcoyJArJsjA3yILpr0DWXBzD7Jg7wCy4MYRZMH1E8iCa2eQBVcvIAuuXEEWXL6BLLh0B1lw8QGy4MIT9F/lhPMv9Cv5XeWCc2/0AR9g1yt6gn/UAAAAAElFTkSuQmCC';
@@ -221,6 +224,26 @@ ipcMain.handle('updater:install', () => hostUpdater ? hostUpdater.installNow() :
 ipcMain.on('updater:set-session-active', (_e, active) => { if (hostUpdater) hostUpdater.setSessionActive(active); });
 
 app.whenReady().then(() => {
+  ({ log } = createAppLogger({
+    filePath: path.join(app.getPath('userData'), 'logs', 'main.log'),
+    fs: nodeFs,
+    dirname: path.dirname,
+    isPackaged: app.isPackaged,
+    env: process.env,
+    mirror: app.isPackaged ? null : (line) => console.log(line),
+  }));
+  log.info('host starting');
+
+  process.on('uncaughtException', (err) => log?.error(`uncaughtException: ${err?.stack || err}`));
+  process.on('unhandledRejection', (reason) => log?.error(`unhandledRejection: ${reason?.stack || reason}`));
+  app.on('render-process-gone', (_e, _wc, d) => log?.error(`render-process-gone: ${d?.reason}`));
+  app.on('child-process-gone', (_e, d) => log?.error(`child-process-gone: ${d?.type} ${d?.reason}`));
+
+  ipcMain.on('log:renderer', (_e, entry) => {
+    const level = ['debug', 'info', 'warn', 'error'].includes(entry?.level) ? entry.level : 'error';
+    log?.child('renderer')[level](String(entry?.msg ?? ''));
+  });
+
   createWindow();
   createTray();
   mainWindow.on('focus', () => mainWindow.flashFrame(false));

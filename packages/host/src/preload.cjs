@@ -28,4 +28,5 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   writeClipboard: (text) => ipcRenderer.send('clipboard-write', text),
   pickFile: () => ipcRenderer.invoke('pick-file'),
   saveFile: (arg) => ipcRenderer.invoke('save-file', arg),
+  reportError: (entry) => ipcRenderer.send('log:renderer', entry),
 });
