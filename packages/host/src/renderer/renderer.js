@@ -10,6 +10,7 @@ import {
   CHUNK_SIZE, MAX_FILE_SIZE, metaFrame, endFrame, parseFrame, sanitizeFilename, createReceiver,
 } from '@farsight/shared/file-transfer';
 import { formatHostId } from '@farsight/shared/credentials-format';
+import { createIdleRotator } from '@farsight/shared/idle-rotator';
 
 // Bound on receiveState.chunks.length: legit transfers use CHUNK_SIZE chunks
 // (~6400 for a 100 MB file), so this bounds the array against a peer sending
@@ -50,6 +51,20 @@ for (const btn of document.querySelectorAll('.cbtn')) {
 }
 let peer = null;
 let signal = null;
+let rotator = null;
+const PW_ROTATE_MS = 60 * 60 * 1000; // rotate the session password hourly while idle
+const pwEl = document.getElementById('host-pw');
+// Rotate the on-screen session password and push it to the signaling server so
+// the server accepts the new value. Used by the manual button and the idle timer.
+async function rotatePassword() {
+  const next = await window.farsightIpc.regenerateSessionPassword();
+  pwEl.textContent = next;
+  if (signal) signal.send(MSG.UPDATE_PASSWORD, { password: next });
+}
+document.getElementById('regen-pw').addEventListener('click', async () => {
+  await rotatePassword();
+  if (rotator) rotator.kick();
+});
 let displays = [];
 let currentStream = null;
 let iceServers = []; // R-1: received via ICE_SERVERS (after the controller authenticates)
@@ -264,6 +279,10 @@ const session = createSession({
     bannerEl.style.display = st === 'active' ? 'flex' : 'none';
     document.body.classList.toggle('in-session', st === 'active');
     if (st === 'active') startClipboardSync();
+    if (rotator) {
+      if (st === 'pending_consent' || st === 'active') rotator.pause();
+      else if (st === 'idle') rotator.resumeAfterSession();
+    }
   },
 });
 
@@ -414,4 +433,6 @@ if (!signalingUrl) {
   appEl.style.display = 'block';
   setupEl.hidden = true;
   startSignaling(signalingUrl);
+  rotator = createIdleRotator({ intervalMs: PW_ROTATE_MS, onRotate: rotatePassword });
+  rotator.start();
 }

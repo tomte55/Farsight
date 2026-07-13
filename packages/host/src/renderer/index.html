@@ -25,7 +25,8 @@
     "@farsight/shared/signaling-url": "../shared/signaling-url.js",
     "@farsight/shared/control-events": "../shared/control-events.js",
     "@farsight/shared/file-transfer": "../shared/file-transfer.js",
-    "@farsight/shared/credentials-format": "../shared/credentials-format.js"
+    "@farsight/shared/credentials-format": "../shared/credentials-format.js",
+    "@farsight/shared/idle-rotator": "../shared/idle-rotator.js"
   }
 }
 </script>
@@ -74,7 +75,7 @@
     <div class="lbl">Your ID</div>
     <div class="chip"><span id="host-id">…</span><button class="cbtn" data-copy="host-id">Copy</button></div>
     <div class="lbl">Password</div>
-    <div class="chip"><span id="host-pw">…</span><button class="cbtn" data-copy="host-pw">Copy</button></div>
+    <div class="chip"><span id="host-pw">…</span><button class="cbtn" data-copy="host-pw">Copy</button><button id="regen-pw" class="cbtn" title="Regenerate password" aria-label="Regenerate password">↻</button></div>
     <div id="status-pill" class="pill ready"><span class="pd"></span><span id="status">Connecting to signaling…</span></div>
   </div>
 
