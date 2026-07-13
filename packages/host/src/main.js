@@ -9,6 +9,8 @@ import { listDisplays } from './capture.js';
 import { generateSessionPassword } from '@farsight/shared/password';
 import { windowAttentionPlan } from './window-attention.js';
 import { buildTrayMenuTemplate } from './tray-menu.js';
+import { createLifecycle } from './lifecycle.js';
+import { revealWindow } from './reveal-window.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import * as nodeFs from 'node:fs';
 import { createAppLogger } from '@farsight/shared/app-log';
@@ -24,7 +26,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let mainWindow = null;
 let tray = null;
 let hostId = '';
-let quitting = false;
+// Centralizes the "is the app really quitting?" latch shared by the window
+// close-guard and every quit path (tray Quit, auto-update install).
+const lifecycle = createLifecycle();
 let hostUpdater = null;
 let latestUpdateUi = { showRestartPrompt: false, checking: false, message: '', version: null };
 let log = null;   // root logger; assigned on app ready, referenced as log?.*
@@ -74,9 +78,10 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   // Attended-access: the app must keep running to receive connections, so
   // closing the window hides it to the tray instead of quitting. A real quit
-  // (tray Quit) sets `quitting` first.
+  // (from any path) latches lifecycle.beginQuit() via app 'before-quit' first,
+  // so shouldHideOnClose() returns false and the window is allowed to close.
   win.on('close', (e) => {
-    if (!quitting) { e.preventDefault(); win.hide(); }
+    if (lifecycle.shouldHideOnClose()) { e.preventDefault(); win.hide(); }
   });
   mainWindow = win;
   return win;
@@ -87,8 +92,8 @@ function refreshTrayMenu() {
   tray.setContextMenu(Menu.buildFromTemplate(buildTrayMenuTemplate({
     id: hostId,
     password: sessionPassword,
-    onShow: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } },
-    onQuit: () => { quitting = true; app.quit(); },
+    onShow: () => revealWindow(mainWindow),
+    onQuit: () => { lifecycle.beginQuit(); app.quit(); },
     updateReady: latestUpdateUi.showRestartPrompt,
     updateVersion: latestUpdateUi.version,
     onRestartUpdate: () => hostUpdater && hostUpdater.installNow(),
@@ -101,7 +106,7 @@ function createTray() {
   const icon = nativeImage.createFromDataURL(TRAY_ICON_DATA_URL);
   tray = new Tray(icon);
   tray.setToolTip('Farsight Host');
-  tray.on('click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } });
+  tray.on('click', () => revealWindow(mainWindow));
   refreshTrayMenu();
 }
 
@@ -239,7 +244,23 @@ ipcMain.handle('updater:check', () => { if (hostUpdater) hostUpdater.checkNow();
 ipcMain.handle('updater:install', () => hostUpdater ? hostUpdater.installNow() : { ok: false, reason: 'not-downloaded' });
 ipcMain.on('updater:set-session-active', (_e, active) => { if (hostUpdater) hostUpdater.setSessionActive(active); });
 
+// Single-instance lock: because the window hides to the tray on close, the app
+// looks "closed" while still running — so re-launching it (or the auto-updater
+// relaunching after an install) would otherwise spawn a SECOND process with its
+// own tray icon. The first launch owns the lock; any later launch hands off via
+// 'second-instance' to reveal the running window, then exits.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) app.quit();
+app.on('second-instance', () => revealWindow(mainWindow));
+// Any genuine quit — tray "Quit", autoUpdater.quitAndInstall(), or the
+// autoInstallOnAppQuit fallback — routes through app 'before-quit', which
+// latches quitting BEFORE the window gets its 'close' event. Without this the
+// close-guard preventDefaults the quit, the process stays alive, and the update
+// installer can't shut the running app down.
+app.on('before-quit', () => lifecycle.beginQuit());
+
 app.whenReady().then(() => {
+  if (!gotSingleInstanceLock) return;   // losing instance: never create a window/tray
   ({ log } = createAppLogger({
     filePath: path.join(app.getPath('userData'), 'logs', 'main.log'),
     fs: nodeFs,
@@ -303,4 +324,4 @@ app.whenReady().then(() => {
   hostUpdater.start();
 });
 app.on('will-quit', () => { log?.info('host quitting'); globalShortcut.unregisterAll(); });
-app.on('window-all-closed', () => { if (quitting && process.platform !== 'darwin') app.quit(); });
+app.on('window-all-closed', () => { if (lifecycle.isQuitting() && process.platform !== 'darwin') app.quit(); });
