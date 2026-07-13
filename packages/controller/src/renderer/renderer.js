@@ -229,6 +229,7 @@ const settingsMenu = document.getElementById('settings-menu');
 settingsCog.addEventListener('click', (e) => { e.stopPropagation(); settingsMenu.classList.toggle('open'); });
 document.addEventListener('click', (e) => { if (!settingsMenu.contains(e.target) && e.target !== settingsCog) settingsMenu.classList.remove('open'); });
 document.getElementById('menu-check-updates').addEventListener('click', () => window.farsightIpc.checkForUpdates());
+document.getElementById('menu-open-logs').addEventListener('click', () => { settingsMenu.classList.remove('open'); window.farsightIpc.openLogs(); });
 
 async function refreshSignalingUrl() {
   signalingUrl = await window.farsightIpc.getSignalingUrl();

@@ -15,7 +15,10 @@
     "./config": "./src/config.js",
     "./file-transfer": "./src/file-transfer.js",
     "./update-policy": "./src/update-policy.js",
-    "./updater": "./src/updater.js"
+    "./updater": "./src/updater.js",
+    "./log": "./src/log.js",
+    "./log-file-sink": "./src/log-file-sink.js",
+    "./app-log": "./src/app-log.js"
   },
   "dependencies": {
     "argon2": "^0.41.1"

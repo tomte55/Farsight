@@ -79,3 +79,22 @@ user-driven OS Save dialog — nothing is written to disk without the receiving
 user picking a location. This is within the attended-control trust model (the
 controller already has full input/screen access, and the host user has
 already granted consent).
+
+## Logs
+Each app writes a rotating, human-readable log to its per-user data directory:
+
+- Host: `%APPDATA%\Farsight Host\logs\main.log`
+- Controller: `%APPDATA%\Farsight Controller\logs\main.log`
+
+(In an unpackaged dev run the folder is the scoped package name, e.g.
+`%APPDATA%\@farsight\host\logs\main.log`.) The file rotates at 2 MB and keeps two
+generations (`main.log` + `main.log.1`); reach it from the host tray
+("Open logs folder") or the controller Settings menu.
+
+Logs capture lifecycle/session events, IPC and handler errors, main-process
+crashes and unhandled rejections, and forwarded renderer errors. By design they
+**never contain secrets**: the session password, SDP/ICE candidates, clipboard
+text, and file-transfer contents are never logged — clipboard/file operations
+log byte counts only, and every line is truncated to 2000 chars as a backstop.
+The default level is `info` (packaged) / `debug` (dev); override with
+`FARSIGHT_LOG_LEVEL` (`debug`|`info`|`warn`|`error`).

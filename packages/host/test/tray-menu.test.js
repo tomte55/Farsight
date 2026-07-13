@@ -6,7 +6,8 @@ test('builds Show / credentials / Quit with wired callbacks', () => {
   const onShow = vi.fn();
   const onQuit = vi.fn();
   const onCheckUpdates = vi.fn();
-  const t = buildTrayMenuTemplate({ id: '410 682 937', password: 'k7m2-9xqp-4vwt', onShow, onQuit, updateReady: false, onRestartUpdate(){}, onCheckUpdates });
+  const onOpenLogs = vi.fn();
+  const t = buildTrayMenuTemplate({ id: '410 682 937', password: 'k7m2-9xqp-4vwt', onShow, onQuit, updateReady: false, onRestartUpdate(){}, onCheckUpdates, onOpenLogs });
 
   const labels = t.map((i) => i.label).filter(Boolean);
   expect(labels).toEqual([
@@ -14,6 +15,7 @@ test('builds Show / credentials / Quit with wired callbacks', () => {
     'ID: 410 682 937',
     'Password: k7m2-9xqp-4vwt',
     'Check for updates',
+    'Open logs folder',
     'Quit',
   ]);
 
@@ -21,13 +23,16 @@ test('builds Show / credentials / Quit with wired callbacks', () => {
   expect(t.find((i) => i.label === 'ID: 410 682 937').enabled).toBe(false);
   expect(t.find((i) => i.label === 'Password: k7m2-9xqp-4vwt').enabled).toBe(false);
 
-  // Separators present between groups.
+  // Separators present between groups (unchanged at 3).
   expect(t.filter((i) => i.type === 'separator').length).toBe(3);
 
   t.find((i) => i.label === 'Show Farsight').click();
   t.find((i) => i.label === 'Quit').click();
   expect(onShow).toHaveBeenCalledOnce();
   expect(onQuit).toHaveBeenCalledOnce();
+
+  t.find((i) => i.label === 'Open logs folder').click();
+  expect(onOpenLogs).toHaveBeenCalledOnce();
 });
 
 test('shows placeholders before the id is registered', () => {

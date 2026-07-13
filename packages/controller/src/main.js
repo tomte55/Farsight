@@ -1,5 +1,5 @@
 // packages/controller/src/main.js
-import { app, BrowserWindow, ipcMain, clipboard, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, clipboard, dialog, shell } from 'electron';
 // electron-updater is CommonJS: a named ESM import fails in the packaged app's
 // ESM loader, so use the default import + destructure interop.
 import electronUpdater from 'electron-updater';
@@ -7,6 +7,8 @@ const { autoUpdater } = electronUpdater;
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync } from 'node:fs';
+import * as nodeFs from 'node:fs';
+import { createAppLogger } from '@farsight/shared/app-log';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
 import { createUpdater } from '@farsight/shared/updater';
 import { MAX_FILE_SIZE } from '@farsight/shared/file-transfer';
@@ -50,8 +52,8 @@ ipcMain.handle('pick-file', async () => {
   if (r.canceled || !r.filePaths[0]) return null;
   const p = r.filePaths[0];
   let buf;
-  try { buf = readFileSync(p); } catch (err) { return { error: err.message }; }
-  if (buf.length > MAX_FILE_SIZE) return { error: 'File is larger than the 100 MB transfer limit.' };
+  try { buf = readFileSync(p); } catch (err) { log?.child('ipc').warn(`pick-file read failed: ${err.message}`); return { error: err.message }; }
+  if (buf.length > MAX_FILE_SIZE) { log?.child('ipc').info('pick-file rejected: over size limit'); return { error: 'File is larger than the 100 MB transfer limit.' }; }
   return { name: path.basename(p), size: buf.length, bytes: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length) };
 });
 ipcMain.handle('save-file', async (_e, arg) => {
@@ -60,11 +62,12 @@ ipcMain.handle('save-file', async (_e, arg) => {
   const r = await dialog.showSaveDialog({ defaultPath: path.basename(String(name || 'download')) });
   if (r.canceled || !r.filePath) return { ok: false };
   try { writeFileSync(r.filePath, Buffer.from(bytes)); return { ok: true }; }
-  catch (err) { return { ok: false, error: err.message }; }
+  catch (err) { log?.child('ipc').warn(`save-file write failed: ${err.message}`); return { ok: false, error: err.message }; }
 });
 
 let mainWindow = null;
 let ctrlUpdater = null;
+let log = null;   // root logger; assigned on app ready, referenced as log?.*
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -83,15 +86,43 @@ function createWindow() {
   return win;
 }
 app.whenReady().then(() => {
+  ({ log } = createAppLogger({
+    filePath: path.join(app.getPath('userData'), 'logs', 'main.log'),
+    fs: nodeFs,
+    dirname: path.dirname,
+    isPackaged: app.isPackaged,
+    env: process.env,
+    mirror: app.isPackaged ? null : (line) => console.log(line),
+  }));
+  log.info('controller starting');
+
+  process.on('uncaughtException', (err) => log?.error(`uncaughtException: ${err?.stack || err}`));
+  process.on('unhandledRejection', (reason) => log?.error(`unhandledRejection: ${reason?.stack || reason}`));
+  app.on('render-process-gone', (_e, _wc, d) => log?.error(`render-process-gone: ${d?.reason}`));
+  app.on('child-process-gone', (_e, d) => log?.error(`child-process-gone: ${d?.type} ${d?.reason}`));
+
+  ipcMain.on('log:renderer', (_e, entry) => {
+    const level = ['debug', 'info', 'warn', 'error'].includes(entry?.level) ? entry.level : 'error';
+    log?.child('renderer')[level](String(entry?.msg ?? ''));
+  });
+
   createWindow();
+  autoUpdater.logger = {
+    info: (m) => log?.child('updater').info(String(m)),
+    warn: (m) => log?.child('updater').warn(String(m)),
+    error: (m) => log?.child('updater').error(String(m)),
+    debug: (m) => log?.child('updater').debug(String(m)),
+  };
   ctrlUpdater = createUpdater({
     updater: autoUpdater,
     isPackaged: app.isPackaged,
+    log: (level, msg) => { const l = log?.child('updater'); if (l && l[level]) l[level](msg); },
     onStatus: (ui) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updater:status', ui); },
   });
   ctrlUpdater.start();
   ipcMain.handle('updater:check', () => { ctrlUpdater.checkNow(); return true; });
   ipcMain.handle('updater:install', () => ctrlUpdater.installNow());
   ipcMain.on('updater:set-session-active', (_e, active) => ctrlUpdater.setSessionActive(active));
+  ipcMain.handle('open-logs', () => shell.openPath(path.join(app.getPath('userData'), 'logs')));
 });
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('window-all-closed', () => { log?.info('controller quitting'); if (process.platform !== 'darwin') app.quit(); });
