@@ -17,3 +17,17 @@ export function formatHostId(id) {
 export function normalizePassword(input) {
   return String(input ?? '').toLowerCase().replace(NON_PW, '');
 }
+
+// Ordered, de-duplicated list of password values to try for a typed entry.
+// The normalized form (current v1.4+ format) is tried first; the raw typed
+// value is a compat fallback for pre-v1.4 hosts that registered the dashed
+// literal shown on screen (normalizePassword would strip those separators and
+// never match). Empty/whitespace-only input yields no candidates.
+export function passwordCandidates(input) {
+  const raw = String(input ?? '').trim();
+  const out = [];
+  const norm = normalizePassword(raw);
+  if (norm) out.push(norm);
+  if (raw && raw !== norm) out.push(raw);
+  return out;
+}
