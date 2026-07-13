@@ -39,6 +39,10 @@ ipcMain.handle('set-signaling-url', (_e, url) => {
 });
 
 // Clipboard sync: the renderer polls/writes the OS clipboard via these handlers.
+// Build version for the subtle bottom-left label; app.getVersion() reads the
+// packaged package.json version (set from the git tag by the release CI).
+ipcMain.handle('get-app-version', () => app.getVersion());
+
 ipcMain.handle('clipboard-read', () => clipboard.readText());
 ipcMain.on('clipboard-write', (_e, text) => { if (typeof text === 'string' && text.length <= 100000) clipboard.writeText(text); });
 

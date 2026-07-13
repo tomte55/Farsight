@@ -144,3 +144,16 @@ body {
    in-session Disconnect control. (host sets body.in-session on state change;
    controller's setActive() toggles the same class.) */
 body.in-session .cog, body.in-session .menu { display: none; }
+
+/* Subtle build-version label pinned to the bottom-left corner. Non-interactive
+   (pointer-events:none) so it never intercepts clicks, and low-contrast so it
+   stays out of the way. Populated by the renderer from app.getVersion(). */
+#version-tag {
+  position: fixed; bottom: 6px; left: 8px; z-index: 40;
+  font-size: 11px; color: var(--sub); opacity: .45;
+  pointer-events: none; user-select: none;
+}
+/* Host only: the panic-warning banner is a full-width, opaque bar pinned to
+   bottom:0 with a higher z-index. When it's showing, lift the version label
+   above it so it stays visible instead of hiding behind the banner. */
+#panic-warning:not([hidden]) ~ #version-tag { bottom: 62px; }

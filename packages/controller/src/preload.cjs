@@ -2,6 +2,7 @@
 // CommonJS because the renderer runs with sandbox: true (R-7).
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('farsightIpc', {
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   getSignalingUrl: () => ipcRenderer.invoke('get-signaling-url'),
   setSignalingUrl: (url) => ipcRenderer.invoke('set-signaling-url', url),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),

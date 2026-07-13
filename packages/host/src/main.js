@@ -147,6 +147,10 @@ ipcMain.handle('get-screen-size', () => {
 // The renderer displays the session password and sends it on REGISTER.
 ipcMain.handle('get-session-password', () => sessionPassword);
 
+// Build version for the subtle bottom-left label; app.getVersion() reads the
+// packaged package.json version (set from the git tag by the release CI).
+ipcMain.handle('get-app-version', () => app.getVersion());
+
 // Signaling-server config: persisted per-user in userData/config.json (0600).
 // The renderer reads/writes it via IPC; env FARSIGHT_SIGNALING_URL overrides.
 function configFilePath() {

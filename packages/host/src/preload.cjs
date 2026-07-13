@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   setHostId: (id) => ipcRenderer.send('set-host-id', id),
   onPanic: (cb) => ipcRenderer.on('panic', () => cb()),
   onPanicUnavailable: (cb) => ipcRenderer.on('panic-unavailable', () => cb()),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   getSignalingUrl: () => ipcRenderer.invoke('get-signaling-url'),
   setSignalingUrl: (url) => ipcRenderer.invoke('set-signaling-url', url),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
