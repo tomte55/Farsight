@@ -15,11 +15,22 @@ test('downloaded + active session → NO prompt, deferred message', () => {
   expect(s.message).toBe('Update 1.2.0 will install after this session.');
 });
 
-test('checking / downloading / error / idle produce status only, never a prompt', () => {
+test('checking / downloading / idle produce status only, never a prompt', () => {
   expect(updateUiState({ status: 'checking', sessionActive: false })).toMatchObject({ showRestartPrompt: false, checking: true, message: 'Checking for updates…' });
   expect(updateUiState({ status: 'downloading', sessionActive: false })).toMatchObject({ showRestartPrompt: false, message: 'Downloading update…' });
-  expect(updateUiState({ status: 'error', sessionActive: false })).toMatchObject({ showRestartPrompt: false, message: "Couldn't check for updates." });
   expect(updateUiState({ status: 'idle', sessionActive: false })).toMatchObject({ showRestartPrompt: false, message: 'Up to date.' });
+});
+
+test('check-failure and download-failure carry distinct messages', () => {
+  // The check itself failed (couldn't reach the feed).
+  expect(updateUiState({ status: 'check-error', sessionActive: false }))
+    .toMatchObject({ showRestartPrompt: false, message: "Couldn't check for updates." });
+  // The check SUCCEEDED (an update was found) but the download failed.
+  expect(updateUiState({ status: 'download-error', sessionActive: false, version: '2.0.0' }))
+    .toMatchObject({ showRestartPrompt: false, message: 'Update 2.0.0 was found, but the download failed.' });
+  // Download failure with no known version still reads sensibly.
+  expect(updateUiState({ status: 'download-error', sessionActive: false }).message)
+    .toBe('An update was found, but the download failed.');
 });
 
 test('available (not yet downloaded) → status message, never a prompt', () => {

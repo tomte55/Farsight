@@ -8,7 +8,12 @@ export const UPDATE_STATUS = {
   AVAILABLE: 'available',
   DOWNLOADING: 'downloading',
   DOWNLOADED: 'downloaded',
-  ERROR: 'error',
+  // Two distinct failure modes — the electron-updater 'error' event fires for
+  // both, but they mean very different things to the user: CHECK_ERROR = we
+  // couldn't even reach/parse the update feed; DOWNLOAD_ERROR = we DID find an
+  // update, but fetching the installer failed (e.g. a 404 on the asset).
+  CHECK_ERROR: 'check-error',
+  DOWNLOAD_ERROR: 'download-error',
 };
 
 // Given the updater status + whether a session is active, decide what the UI
@@ -28,7 +33,12 @@ export function updateUiState({ status, sessionActive, version, downloaded } = {
       case 'checking': message = 'Checking for updates…'; break;
       case 'downloading': message = 'Downloading update…'; break;
       case 'available': message = `Update ${v} available…`; break;
-      case 'error': message = "Couldn't check for updates."; break;
+      case 'download-error':
+        // The check worked — an update exists — but we couldn't fetch it.
+        message = v ? `Update ${v} was found, but the download failed.` : 'An update was found, but the download failed.';
+        break;
+      case 'check-error': message = "Couldn't check for updates."; break;
+      case 'error': message = "Couldn't check for updates."; break;   // generic fallback
       default: message = 'Up to date.';
     }
   }

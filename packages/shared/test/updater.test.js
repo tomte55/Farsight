@@ -73,11 +73,33 @@ test('periodic check fires on the interval', () => {
   vi.useRealTimers();
 });
 
-test('a rejected check surfaces an error status, not a throw', async () => {
+test('a rejected check surfaces a check-failure status, not a throw', async () => {
   const u = fakeUpdater();
   u.checkForUpdates = vi.fn(() => Promise.reject(new Error('no feed')));
   const onStatus = vi.fn();
-  createUpdater({ updater: u, isPackaged: true, onStatus }).start();
+  const log = vi.fn();
+  createUpdater({ updater: u, isPackaged: true, onStatus, log }).start();
   await Promise.resolve(); await Promise.resolve();    // let the rejection settle
   expect(onStatus.mock.calls.at(-1)[0].message).toBe("Couldn't check for updates.");
+  expect(log).toHaveBeenCalledWith('error', expect.stringContaining('no feed'));
+});
+
+test('an error while checking is a check-failure; an error after finding an update is a download-failure', () => {
+  // Check phase: error arrives before any update-available → "couldn't check".
+  const c = fakeUpdater();
+  const onCheck = vi.fn();
+  createUpdater({ updater: c, isPackaged: true, onStatus: onCheck }).start();
+  c.emit('checking-for-update');
+  c.emit('error', new Error('ENOTFOUND signal host'));
+  expect(onCheck.mock.calls.at(-1)[0].message).toBe("Couldn't check for updates.");
+
+  // Download phase: check succeeded (update-available), THEN the download errors.
+  const d = fakeUpdater();
+  const onDl = vi.fn();
+  const log = vi.fn();
+  createUpdater({ updater: d, isPackaged: true, onStatus: onDl, log }).start();
+  d.emit('update-available', { version: '2.0.0' });
+  d.emit('error', new Error('HTTP 404 on .exe'));
+  expect(onDl.mock.calls.at(-1)[0].message).toBe('Update 2.0.0 was found, but the download failed.');
+  expect(log).toHaveBeenCalledWith('error', expect.stringContaining('404'));
 });
