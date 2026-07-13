@@ -52,8 +52,8 @@ ipcMain.handle('pick-file', async () => {
   if (r.canceled || !r.filePaths[0]) return null;
   const p = r.filePaths[0];
   let buf;
-  try { buf = readFileSync(p); } catch (err) { return { error: err.message }; }
-  if (buf.length > MAX_FILE_SIZE) return { error: 'File is larger than the 100 MB transfer limit.' };
+  try { buf = readFileSync(p); } catch (err) { log?.child('ipc').warn(`pick-file read failed: ${err.message}`); return { error: err.message }; }
+  if (buf.length > MAX_FILE_SIZE) { log?.child('ipc').info('pick-file rejected: over size limit'); return { error: 'File is larger than the 100 MB transfer limit.' }; }
   return { name: path.basename(p), size: buf.length, bytes: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length) };
 });
 ipcMain.handle('save-file', async (_e, arg) => {
@@ -62,7 +62,7 @@ ipcMain.handle('save-file', async (_e, arg) => {
   const r = await dialog.showSaveDialog({ defaultPath: path.basename(String(name || 'download')) });
   if (r.canceled || !r.filePath) return { ok: false };
   try { writeFileSync(r.filePath, Buffer.from(bytes)); return { ok: true }; }
-  catch (err) { return { ok: false, error: err.message }; }
+  catch (err) { log?.child('ipc').warn(`save-file write failed: ${err.message}`); return { ok: false, error: err.message }; }
 });
 
 let mainWindow = null;
@@ -107,9 +107,16 @@ app.whenReady().then(() => {
   });
 
   createWindow();
+  autoUpdater.logger = {
+    info: (m) => log?.child('updater').info(String(m)),
+    warn: (m) => log?.child('updater').warn(String(m)),
+    error: (m) => log?.child('updater').error(String(m)),
+    debug: (m) => log?.child('updater').debug(String(m)),
+  };
   ctrlUpdater = createUpdater({
     updater: autoUpdater,
     isPackaged: app.isPackaged,
+    log: (level, msg) => { const l = log?.child('updater'); if (l && l[level]) l[level](msg); },
     onStatus: (ui) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updater:status', ui); },
   });
   ctrlUpdater.start();
@@ -117,4 +124,4 @@ app.whenReady().then(() => {
   ipcMain.handle('updater:install', () => ctrlUpdater.installNow());
   ipcMain.on('updater:set-session-active', (_e, active) => ctrlUpdater.setSessionActive(active));
 });
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('window-all-closed', () => { log?.info('controller quitting'); if (process.platform !== 'darwin') app.quit(); });

@@ -107,6 +107,7 @@ function createTray() {
 // Bring the window to attention when a controller asks to connect. The renderer
 // forwards CONNECT via 'request-attention'; we apply the pure windowAttentionPlan.
 ipcMain.on('request-attention', () => {
+  log?.child('session').info('attention requested by incoming connection');
   const win = mainWindow;
   if (!win) return;
   const plan = windowAttentionPlan({
@@ -122,14 +123,19 @@ ipcMain.on('request-attention', () => {
 });
 
 // The renderer reports its registered id so the tray can display it.
-ipcMain.on('set-host-id', (_e, id) => { hostId = String(id || ''); refreshTrayMenu(); });
+ipcMain.on('set-host-id', (_e, id) => { hostId = String(id || ''); log?.child('session').info('host id registered'); refreshTrayMenu(); });
 
 // Provide the primary screen source id to the renderer on request.
 ipcMain.handle('get-screen-source', async () => {
-  const sources = await desktopCapturer.getSources({ types: ['screen'] });
-  const primaryId = screen.getPrimaryDisplay().id;
-  const src = sources.find((s) => String(s.display_id) === String(primaryId)) ?? sources[0];
-  return src ? src.id : null;
+  try {
+    const sources = await desktopCapturer.getSources({ types: ['screen'] });
+    const primaryId = screen.getPrimaryDisplay().id;
+    const src = sources.find((s) => String(s.display_id) === String(primaryId)) ?? sources[0];
+    return src ? src.id : null;
+  } catch (err) {
+    log?.child('ipc').warn(`screen-source failed: ${err.message}`);
+    return null;
+  }
 });
 
 ipcMain.handle('get-screen-size', () => {
@@ -172,9 +178,14 @@ ipcMain.handle('list-displays', () => listDisplays(screen));
 
 // Resolve the desktopCapturer source id for a given display id (monitor switch).
 ipcMain.handle('get-screen-source-for', async (_e, displayId) => {
-  const sources = await desktopCapturer.getSources({ types: ['screen'] });
-  const s = sources.find((x) => String(x.display_id) === String(displayId));
-  return s ? s.id : (sources[0] ? sources[0].id : null);
+  try {
+    const sources = await desktopCapturer.getSources({ types: ['screen'] });
+    const s = sources.find((x) => String(x.display_id) === String(displayId));
+    return s ? s.id : (sources[0] ? sources[0].id : null);
+  } catch (err) {
+    log?.child('ipc').warn(`screen-source failed: ${err.message}`);
+    return null;
+  }
 });
 
 // Point the main-process injector at the selected monitor's DIP bounds so
@@ -204,8 +215,8 @@ ipcMain.handle('pick-file', async () => {
   if (r.canceled || !r.filePaths[0]) return null;
   const p = r.filePaths[0];
   let buf;
-  try { buf = readFileSync(p); } catch (err) { return { error: err.message }; }
-  if (buf.length > MAX_FILE_SIZE) return { error: 'File is larger than the 100 MB transfer limit.' };
+  try { buf = readFileSync(p); } catch (err) { log?.child('ipc').warn(`pick-file read failed: ${err.message}`); return { error: err.message }; }
+  if (buf.length > MAX_FILE_SIZE) { log?.child('ipc').info('pick-file rejected: over size limit'); return { error: 'File is larger than the 100 MB transfer limit.' }; }
   return { name: path.basename(p), size: buf.length, bytes: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length) };
 });
 ipcMain.handle('save-file', async (_e, arg) => {
@@ -214,7 +225,7 @@ ipcMain.handle('save-file', async (_e, arg) => {
   const r = await dialog.showSaveDialog({ defaultPath: path.basename(String(name || 'download')) });
   if (r.canceled || !r.filePath) return { ok: false };
   try { writeFileSync(r.filePath, Buffer.from(bytes)); return { ok: true }; }
-  catch (err) { return { ok: false, error: err.message }; }
+  catch (err) { log?.child('ipc').warn(`save-file write failed: ${err.message}`); return { ok: false, error: err.message }; }
 });
 
 // Auto-update: the renderer can trigger a manual check/install, and reports
@@ -257,18 +268,27 @@ app.whenReady().then(() => {
   // wired up before its first await, so it is guaranteed to be registered by
   // the time did-finish-load fires.
   const panicOk = registerPanicKey(globalShortcut, 'CommandOrControl+Alt+F12', () => {
+    log?.child('session').warn('panic hotkey fired — killing session');
     if (mainWindow) mainWindow.webContents.send('panic');
   });
   if (!panicOk) {
     console.warn('[panic] Failed to register Ctrl+Alt+F12 — another app may own it. The instant-kill override is NOT active.');
+    log?.child('session').warn('panic hotkey unavailable — another app owns Ctrl+Alt+F12');
     mainWindow.webContents.on('did-finish-load', () => {
       if (mainWindow) mainWindow.webContents.send('panic-unavailable');
     });
   }
 
+  autoUpdater.logger = {
+    info: (m) => log?.child('updater').info(String(m)),
+    warn: (m) => log?.child('updater').warn(String(m)),
+    error: (m) => log?.child('updater').error(String(m)),
+    debug: (m) => log?.child('updater').debug(String(m)),
+  };
   hostUpdater = createUpdater({
     updater: autoUpdater,
     isPackaged: app.isPackaged,
+    log: (level, msg) => { const l = log?.child('updater'); if (l && l[level]) l[level](msg); },
     onStatus: (ui) => {
       latestUpdateUi = ui;
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updater:status', ui);
@@ -277,5 +297,5 @@ app.whenReady().then(() => {
   });
   hostUpdater.start();
 });
-app.on('will-quit', () => globalShortcut.unregisterAll());
+app.on('will-quit', () => { log?.info('host quitting'); globalShortcut.unregisterAll(); });
 app.on('window-all-closed', () => { if (quitting && process.platform !== 'darwin') app.quit(); });
