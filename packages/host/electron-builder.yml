@@ -3,6 +3,12 @@ appId: org.farsight.host
 productName: Farsight Host
 # Pinned so electron-builder doesn't need to resolve the hoisted (workspace) electron.
 electronVersion: 33.4.11
+# Space-free artifact name (productName has a space). Without this, the on-disk
+# file, the feed url in latest-host.yml, and the uploaded GitHub asset end up with
+# three different names (spaces / dashes / dots) — electron-updater 404s on the
+# download and the app shows "Couldn't check for updates." Guarded by
+# test/artifact-name.test.js.
+artifactName: Farsight-Host-Setup-${version}.${ext}
 directories: { output: dist }
 win:
   target: nsis
