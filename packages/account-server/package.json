@@ -1,0 +1,10 @@
+{
+  "name": "@farsight/account-server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted account/identity service (SP2): accounts, devices (the fleet), presence. Sibling to the signaling server. Node + TypeScript.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
