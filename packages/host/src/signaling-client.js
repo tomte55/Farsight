@@ -13,7 +13,7 @@ export function createSignalingClient(url, handlers, { password } = {}) {
     if (fn) fn(msg);
   });
   return {
-    send: (type, payload) => ws.send(JSON.stringify(buildMessage(type, payload))),
+    send: (type, payload) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(buildMessage(type, payload))); },
     close: () => ws.close(),
   };
 }

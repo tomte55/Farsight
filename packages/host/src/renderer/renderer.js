@@ -378,7 +378,7 @@ document.getElementById('host-pw').textContent = sessionPassword;
 
 function startSignaling(signalingUrl) {
   signal = createSignalingClient(signalingUrl, {
-    [MSG.REGISTERED]: (m) => { idEl.textContent = formatHostId(m.id); idEl.dataset.copyValue = m.id; window.farsightIpc.setHostId(m.id); statusEl.textContent = 'Ready. Waiting for a controller.'; },
+    [MSG.REGISTERED]: (m) => { idEl.textContent = formatHostId(m.id); idEl.dataset.copyValue = m.id; window.farsightIpc.setHostId(m.id); statusEl.textContent = 'Ready. Waiting for a controller.'; signal.send(MSG.UPDATE_PASSWORD, { password: pwEl.textContent }); },
     // R-1: the server sends ICE servers right before CONNECT, only after the
     // controller authenticated. Store them for the peer built on consent.
     [MSG.ICE_SERVERS]: (m) => { iceServers = m.iceServers || []; },
