@@ -398,6 +398,12 @@ document.getElementById('menu-change-server').addEventListener('click', async ()
   setupEl.hidden = false;
 });
 
+// Paint the subtle build-version label in the bottom-left corner.
+window.farsightIpc.getAppVersion().then((v) => {
+  const el = document.getElementById('version-tag');
+  if (el && v) el.textContent = `v${v}`;
+});
+
 const signalingUrl = await window.farsightIpc.getSignalingUrl();
 if (!signalingUrl) {
   appEl.style.display = 'none';      // first run: hide the normal host view...

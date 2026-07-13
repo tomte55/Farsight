@@ -251,6 +251,12 @@ document.getElementById('menu-change-server').addEventListener('click', async ()
 });
 refreshSignalingUrl();
 
+// Paint the subtle build-version label in the bottom-left corner.
+window.farsightIpc.getAppVersion().then((v) => {
+  const el = document.getElementById('version-tag');
+  if (el && v) el.textContent = `v${v}`;
+});
+
 const ERROR_TEXT = {
   host_offline: 'Host is offline.',
   bad_password: 'Wrong password.',
