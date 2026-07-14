@@ -15,6 +15,7 @@
     "./turn": "./src/turn.js",
     "./signaling-url": "./src/signaling-url.js",
     "./account-client": "./src/account-client.js",
+    "./account-session": "./src/account-session.js",
     "./config": "./src/config.js",
     "./file-transfer": "./src/file-transfer.js",
     "./update-policy": "./src/update-policy.js",
