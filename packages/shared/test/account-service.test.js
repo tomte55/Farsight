@@ -5,7 +5,7 @@
 // Electron safeStorage + node:fs.
 
 import { describe, expect, test } from 'vitest';
-import { createAccountService, DEFAULT_ACCOUNT_URL } from '../src/account.js';
+import { createAccountService, DEFAULT_ACCOUNT_URL } from '../src/account-service.js';
 
 // A tiny fake account server over fetch: routes by URL suffix.
 function fakeFetch(routes) {
