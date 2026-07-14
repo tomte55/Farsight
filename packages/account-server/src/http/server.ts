@@ -92,7 +92,12 @@ export function createAccountServer(opts: CreateServerOptions): Server {
         }
       }
 
-      const response = await handleRequest(opts.ctx, { method: req.method ?? 'GET', path, body });
+      const response = await handleRequest(opts.ctx, {
+        method: req.method ?? 'GET',
+        path,
+        body,
+        headers: req.headers,
+      });
       log('request', { ip, method: req.method, path, status: response.status });
       send(res, response.status, response.body);
     } catch (e) {

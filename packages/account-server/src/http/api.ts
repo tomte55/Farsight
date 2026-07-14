@@ -9,7 +9,13 @@ import type { EmailTransport } from '../email.js';
 import type { FlowDeps } from '../flow-context.js';
 import { registerUser, verifyEmail, resendVerification } from '../registration.js';
 import { requestPasswordReset, confirmPasswordReset } from '../password-reset.js';
-import { login, rotateSession, type SessionDeps } from '../session.js';
+import { login, rotateSession, authenticate, revokeDevice, type SessionDeps } from '../session.js';
+import {
+  beginTotpEnrollment,
+  confirmTotpEnrollment,
+  disableTotp,
+  type TwoFactorDeps,
+} from '../two-factor.js';
 
 export interface ApiContext {
   prisma: PrismaClient;
@@ -23,6 +29,7 @@ export interface ApiRequest {
   method: string;
   path: string;
   body: unknown; // parsed JSON, or undefined
+  headers?: Record<string, string | string[] | undefined>;
 }
 
 export interface ApiResponse {
@@ -48,6 +55,26 @@ function flowDeps(ctx: ApiContext): FlowDeps {
 }
 function sessionDeps(ctx: ApiContext): SessionDeps {
   return { prisma: ctx.prisma, secret: ctx.secret, now: ctx.now() };
+}
+function twoFactorDeps(ctx: ApiContext): TwoFactorDeps {
+  return { prisma: ctx.prisma, now: ctx.now() };
+}
+
+const unauthorized = (): ApiResponse => json(401, { error: 'unauthorized' });
+
+// Resolve the caller's account from a Bearer access token, enforcing the full
+// session check (signature/expiry + tokenVersion + device revocation). Returns
+// the userId, or a 401 response to short-circuit.
+async function requireAuth(
+  ctx: ApiContext,
+  req: ApiRequest,
+): Promise<{ userId: string } | ApiResponse> {
+  const header = req.headers?.['authorization'] ?? req.headers?.['Authorization'];
+  const value = Array.isArray(header) ? header[0] : header;
+  const match = /^Bearer (.+)$/.exec(value ?? '');
+  if (!match) return unauthorized();
+  const res = await authenticate(sessionDeps(ctx), match[1]!);
+  return res.ok ? { userId: res.userId } : unauthorized();
 }
 
 const handlers: Record<string, Handler> = {
@@ -110,6 +137,42 @@ const handlers: Record<string, Handler> = {
     if (!refreshToken) return badRequest();
     const res = await rotateSession(sessionDeps(ctx), refreshToken);
     return res.ok ? ok({ accessToken: res.accessToken }) : json(401, { error: res.reason });
+  },
+
+  // ── authenticated self-management (Bearer access token) ──────────────────
+  'POST /2fa/begin': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    const { secret, otpauthUri } = await beginTotpEnrollment(twoFactorDeps(ctx), auth.userId);
+    return ok({ secret, otpauthUri });
+  },
+
+  'POST /2fa/confirm': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    const code = str(req.body, 'code');
+    if (!code) return badRequest();
+    const res = await confirmTotpEnrollment(twoFactorDeps(ctx), auth.userId, code);
+    return res.ok ? ok({ recoveryCodes: res.recoveryCodes }) : badRequest(res.reason);
+  },
+
+  'POST /2fa/disable': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    await disableTotp(twoFactorDeps(ctx), auth.userId);
+    return ok();
+  },
+
+  'POST /devices/revoke': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    const deviceId = str(req.body, 'deviceId');
+    if (!deviceId) return badRequest();
+    // Only your own devices — don't reveal whether someone else's id exists.
+    const device = await ctx.prisma.device.findUnique({ where: { id: deviceId } });
+    if (!device || device.userId !== auth.userId) return json(404, { error: 'not_found' });
+    await revokeDevice(sessionDeps(ctx), { deviceId });
+    return ok();
   },
 };
 
