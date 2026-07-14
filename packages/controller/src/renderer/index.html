@@ -53,12 +53,41 @@
      lags behind this build (SP1 groundwork for SP2's one-click remote update). */
   #host-version { opacity: .7; }
   #host-version.outdated { opacity: 1; color: var(--warn, #f0b429); }
+
+  /* Saved-hosts console (SP2). Full-height centered panel, hidden by default;
+     #account[hidden] out-specifies the display rule so hiding wins (mirrors
+     #setup). */
+  #account { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+  #account[hidden] { display: none; }
+  .acct-wrap { width: 440px; max-width: 100%; }
+  .acct-title { font-size: 15px; font-weight: 700; margin-bottom: 3px; }
+  .acct-opt { color: var(--sub); font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .acct-links { display: flex; justify-content: space-between; margin-top: 13px; }
+  .linkbtn { background: none; border: none; color: var(--acc2); font: inherit; font-size: 12.5px; cursor: pointer; padding: 0; }
+  .linkbtn:hover { text-decoration: underline; }
+  .acct-back { display: block; margin: 15px auto 0; color: var(--sub); }
+  .fleet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+  .fleet-head-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  /* Each saved host: presence dot · name/meta · right-aligned status/version. */
+  .host-row { display: flex; align-items: center; gap: 13px; padding: 13px 2px; border-top: 1px solid var(--line); }
+  .host-row:first-child { border-top: none; }
+  .host-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: #39395400; box-shadow: inset 0 0 0 2px #3a3a52; }
+  .host-row.online .host-dot { background: var(--acc2); box-shadow: 0 0 9px rgba(74,168,255,.65); }
+  .host-main { flex: 1; min-width: 0; }
+  .host-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .host-meta { font-size: 11.5px; color: var(--sub); margin-top: 3px; font-family: var(--mono); }
+  .host-right { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
+  .host-status { font-size: 11px; color: var(--sub); }
+  .host-row.online .host-status { color: #9ccaff; }
+  .host-badge { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: rgba(240,180,41,.14); color: #f0b429; text-transform: uppercase; letter-spacing: .06em; }
+  .fleet-empty { text-align: center; color: var(--sub); font-size: 12.5px; padding: 30px 12px; line-height: 1.65; }
 </style>
 
 <div id="version-tag" aria-hidden="true"></div>
 
 <button id="settings-cog" class="cog" title="Settings" aria-label="Settings">⚙</button>
 <div id="settings-menu" class="menu">
+  <button id="menu-fleet">My fleet…</button>
   <button id="menu-change-server">Change signaling server…</button>
   <button id="menu-check-updates">Check for updates</button>
   <button id="menu-open-logs">Open logs folder</button>
@@ -93,6 +122,45 @@
     <input id="host-pw" class="input" placeholder="Password" />
     <button id="go" class="btn btn-primary" style="width:100%;margin-top:4px">Connect</button>
     <p id="status" class="statusline"></p>
+  </div>
+</div>
+
+<div id="account" hidden>
+  <div class="acct-wrap">
+    <!-- Signed out: sign in to reach your fleet -->
+    <div id="acct-signin" class="card">
+      <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
+      <div class="acct-title">Sign in to your fleet</div>
+      <div class="statusline" style="margin-top:0;margin-bottom:16px">See your saved hosts — who's online and what version they run.</div>
+      <div class="lbl">Email</div>
+      <input id="acct-email" class="input" type="email" placeholder="you@example.com" autocomplete="username" />
+      <div class="lbl">Password</div>
+      <input id="acct-password" class="input" type="password" placeholder="Password" autocomplete="current-password" />
+      <div class="lbl">Two-factor code <span class="acct-opt">— if you enabled it</span></div>
+      <input id="acct-code" class="input" inputmode="numeric" placeholder="123 456" autocomplete="one-time-code" />
+      <button id="acct-signin-btn" class="btn btn-primary" style="width:100%;margin-top:4px">Sign in</button>
+      <p id="acct-signin-error" class="statusline" style="color:var(--danger-ink)"></p>
+      <div class="acct-links">
+        <button id="acct-forgot" class="linkbtn">Forgot password?</button>
+        <button id="acct-register" class="linkbtn">Create account</button>
+      </div>
+    </div>
+    <!-- Signed in: the saved-hosts fleet -->
+    <div id="acct-fleet" class="card" hidden>
+      <div class="fleet-head">
+        <div>
+          <div class="acct-title">Your fleet</div>
+          <div id="fleet-sub" class="statusline" style="margin-top:2px"></div>
+        </div>
+        <div class="fleet-head-actions">
+          <button id="fleet-refresh" class="btn btn-ghost" style="padding:7px 12px">Refresh</button>
+          <button id="acct-signout" class="btn btn-ghost" style="padding:7px 12px">Sign out</button>
+        </div>
+      </div>
+      <div id="fleet-list"></div>
+      <p id="fleet-error" class="statusline" style="color:var(--danger-ink)"></p>
+    </div>
+    <button id="acct-close" class="linkbtn acct-back">← Back to connect</button>
   </div>
 </div>
 

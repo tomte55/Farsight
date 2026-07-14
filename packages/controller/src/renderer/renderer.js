@@ -482,3 +482,167 @@ document.getElementById('go').addEventListener('click', async () => {
   // ICE_SERVERS, which triggers peer creation + OFFER above.
   sendConnect();
 });
+
+// ── Saved-hosts console (SP2) ────────────────────────────────────────────────
+// A panel over the connect screen: sign in to the account service, then see the
+// fleet — each saved host's presence and version, with an "update available"
+// note when it lags this build (the SP1 host-version note, promoted). All
+// account work happens in main (window.farsightIpc.account*); the renderer only
+// renders and never touches the password beyond passing it through.
+const accountEl = document.getElementById('account');
+const acctSignin = document.getElementById('acct-signin');
+const acctFleet = document.getElementById('acct-fleet');
+const acctEmail = document.getElementById('acct-email');
+const acctPassword = document.getElementById('acct-password');
+const acctCode = document.getElementById('acct-code');
+const acctSigninBtn = document.getElementById('acct-signin-btn');
+const acctSigninError = document.getElementById('acct-signin-error');
+const fleetList = document.getElementById('fleet-list');
+const fleetSub = document.getElementById('fleet-sub');
+const fleetError = document.getElementById('fleet-error');
+
+const setMsg = (el, text, ok = false) => { el.textContent = text; el.style.color = ok ? 'var(--acc2)' : 'var(--danger-ink)'; };
+
+function openFleet() {
+  connectEl.style.display = 'none';
+  setupEl.hidden = true;
+  accountEl.hidden = false;
+  refreshAccountView();
+}
+function closeFleet() {
+  accountEl.hidden = true;
+  connectEl.style.display = '';
+}
+
+async function refreshAccountView() {
+  const { signedIn } = await window.farsightIpc.accountStatus();
+  acctSignin.hidden = signedIn;
+  acctFleet.hidden = !signedIn;
+  if (signedIn) loadFleet();
+}
+
+const SIGNIN_ERRORS = {
+  bad_credentials: 'Wrong email or password.',
+  email_unverified: 'Verify your email first — check your inbox.',
+  totp_required: 'Enter your two-factor code.',
+  totp_invalid: 'That code didn’t work — try again.',
+  network_error: 'Can’t reach the account server.',
+};
+async function doSignIn() {
+  setMsg(acctSigninError, '');
+  const email = acctEmail.value.trim();
+  const password = acctPassword.value;
+  const code = acctCode.value.replace(/\s+/g, '') || undefined;
+  if (!email || !password) { setMsg(acctSigninError, 'Enter your email and password.'); return; }
+  acctSigninBtn.disabled = true;
+  acctSigninBtn.textContent = 'Signing in…';
+  const res = await window.farsightIpc.accountLogin({ email, password, deviceName: 'Controller', code });
+  acctSigninBtn.disabled = false;
+  acctSigninBtn.textContent = 'Sign in';
+  if (res.ok) {
+    acctPassword.value = '';
+    acctCode.value = '';
+    refreshAccountView();
+  } else {
+    setMsg(acctSigninError, SIGNIN_ERRORS[res.error] || 'Sign-in failed. Try again.');
+  }
+}
+
+const REGISTER_ERRORS = {
+  email_taken: 'That email already has an account — sign in instead.',
+  weak_password: 'Choose a stronger password (at least 8 characters).',
+  network_error: 'Can’t reach the account server.',
+};
+async function doRegister() {
+  const email = acctEmail.value.trim();
+  const password = acctPassword.value;
+  if (!email || !password) { setMsg(acctSigninError, 'Enter an email and password to create your account.'); return; }
+  const res = await window.farsightIpc.accountRegister({ email, password });
+  if (res.ok) setMsg(acctSigninError, 'Account created — check your email to verify, then sign in.', true);
+  else setMsg(acctSigninError, REGISTER_ERRORS[res.error] || 'Couldn’t create the account.');
+}
+async function doForgot() {
+  const email = acctEmail.value.trim();
+  if (!email) { setMsg(acctSigninError, 'Enter your email first, then choose Forgot password.'); return; }
+  await window.farsightIpc.accountRequestPasswordReset({ email });
+  setMsg(acctSigninError, 'If that email has an account, a reset link is on its way.', true);
+}
+
+async function loadFleet() {
+  setMsg(fleetError, '');
+  const res = await window.farsightIpc.accountFleet();
+  if (!res.ok) {
+    if (res.error === 'not_signed_in') { refreshAccountView(); return; }
+    setMsg(fleetError, 'Couldn’t load your fleet. Check your connection.');
+    return;
+  }
+  renderFleet(res.data.devices || []);
+}
+function renderFleet(devices) {
+  const online = devices.filter((d) => d.online).length;
+  fleetSub.textContent = devices.length ? `${devices.length} device${devices.length > 1 ? 's' : ''} · ${online} online` : '';
+  fleetList.replaceChildren();
+  if (!devices.length) {
+    const empty = document.createElement('div');
+    empty.className = 'fleet-empty';
+    empty.textContent = 'No devices yet. Install Farsight on a machine and sign in there to add it to your fleet.';
+    fleetList.appendChild(empty);
+    return;
+  }
+  for (const d of devices) fleetList.appendChild(hostRow(d));
+}
+function hostRow(d) {
+  const row = document.createElement('div');
+  row.className = 'host-row' + (d.online ? ' online' : '');
+
+  const dot = document.createElement('div');
+  dot.className = 'host-dot';
+
+  const main = document.createElement('div');
+  main.className = 'host-main';
+  const name = document.createElement('div');
+  name.className = 'host-name';
+  name.textContent = d.name || 'Unnamed device';
+  const meta = document.createElement('div');
+  meta.className = 'host-meta';
+  meta.textContent = [d.appVersion ? `v${d.appVersion}` : 'version unknown', lastSeenText(d)].filter(Boolean).join(' · ');
+  main.append(name, meta);
+
+  const right = document.createElement('div');
+  right.className = 'host-right';
+  if (d.appVersion && appVersion && isOlder(d.appVersion, appVersion)) {
+    const badge = document.createElement('span');
+    badge.className = 'host-badge';
+    badge.textContent = 'Update available';
+    right.appendChild(badge);
+  }
+  const status = document.createElement('span');
+  status.className = 'host-status';
+  status.textContent = d.online ? 'Online' : 'Offline';
+  right.appendChild(status);
+
+  row.append(dot, main, right);
+  return row;
+}
+function lastSeenText(d) {
+  if (d.online || !d.lastSeenAt) return d.online ? '' : 'never seen';
+  const then = new Date(d.lastSeenAt).getTime();
+  if (!then) return '';
+  const mins = Math.floor((Date.now() - then) / 60000);
+  if (mins < 1) return 'seen just now';
+  if (mins < 60) return `seen ${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `seen ${hrs}h ago`;
+  return `seen ${Math.floor(hrs / 24)}d ago`;
+}
+
+document.getElementById('menu-fleet').addEventListener('click', () => { settingsMenu.classList.remove('open'); openFleet(); });
+document.getElementById('acct-close').addEventListener('click', closeFleet);
+document.getElementById('acct-signout').addEventListener('click', async () => { await window.farsightIpc.accountLogout(); refreshAccountView(); });
+document.getElementById('fleet-refresh').addEventListener('click', loadFleet);
+acctSigninBtn.addEventListener('click', doSignIn);
+document.getElementById('acct-register').addEventListener('click', doRegister);
+document.getElementById('acct-forgot').addEventListener('click', doForgot);
+for (const el of [acctPassword, acctCode, acctEmail]) {
+  el.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSignIn(); });
+}
