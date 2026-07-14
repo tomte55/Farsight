@@ -15,4 +15,11 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   saveFile: (arg) => ipcRenderer.invoke('save-file', arg),
   reportError: (entry) => ipcRenderer.send('log:renderer', entry),
   openLogs: () => ipcRenderer.invoke('open-logs'),
+  // Account / saved-hosts console (SP2)
+  accountStatus: () => ipcRenderer.invoke('account:status'),
+  accountLogin: (input) => ipcRenderer.invoke('account:login', input),
+  accountLogout: () => ipcRenderer.invoke('account:logout'),
+  accountRegister: (input) => ipcRenderer.invoke('account:register', input),
+  accountRequestPasswordReset: (input) => ipcRenderer.invoke('account:request-password-reset', input),
+  accountFleet: () => ipcRenderer.invoke('account:fleet'),
 });

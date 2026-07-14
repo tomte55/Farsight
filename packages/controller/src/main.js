@@ -1,5 +1,5 @@
 // packages/controller/src/main.js
-import { app, BrowserWindow, ipcMain, clipboard, dialog, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, clipboard, dialog, shell, safeStorage } from 'electron';
 // electron-updater is CommonJS: a named ESM import fails in the packaged app's
 // ESM loader, so use the default import + destructure interop.
 import electronUpdater from 'electron-updater';
@@ -12,7 +12,31 @@ import { createAppLogger } from '@farsight/shared/app-log';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
 import { createUpdater } from '@farsight/shared/updater';
 import { MAX_FILE_SIZE } from '@farsight/shared/file-transfer';
+import { createAccountService, DEFAULT_ACCOUNT_URL } from './account.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Account service (SP2 saved-hosts console) — lazily built so safeStorage /
+// app.getPath are ready. The refresh token is stored encrypted under userData;
+// the account URL defaults to the deployed service (env-overridable for dev).
+let accountService = null;
+function getAccountService() {
+  if (!accountService) {
+    accountService = createAccountService({
+      baseUrl: process.env.FARSIGHT_ACCOUNT_URL || DEFAULT_ACCOUNT_URL,
+      safeStorage,
+      fs: nodeFs,
+      filePath: path.join(app.getPath('userData'), 'account-token.enc'),
+      fetch: globalThis.fetch,
+    });
+  }
+  return accountService;
+}
+ipcMain.handle('account:status', () => getAccountService().status());
+ipcMain.handle('account:login', (_e, input) => getAccountService().login(input));
+ipcMain.handle('account:logout', () => getAccountService().logout());
+ipcMain.handle('account:register', (_e, input) => getAccountService().register(input));
+ipcMain.handle('account:request-password-reset', (_e, input) => getAccountService().requestPasswordReset(input));
+ipcMain.handle('account:fleet', () => getAccountService().fleet());
 
 function configFilePath() {
   return path.join(app.getPath('userData'), 'config.json');
