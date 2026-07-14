@@ -31,4 +31,14 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   pickFile: () => ipcRenderer.invoke('pick-file'),
   saveFile: (arg) => ipcRenderer.invoke('save-file', arg),
   reportError: (entry) => ipcRenderer.send('log:renderer', entry),
+
+  // Account enrollment (SP2): sign in on the host to link this machine to your
+  // account (§4.3 local-login consent gate) and report presence. Mirrors the
+  // controller's console bridge; all account work happens in main.
+  accountStatus: () => ipcRenderer.invoke('account:status'),
+  accountLogin: (input) => ipcRenderer.invoke('account:login', input),
+  accountLogout: () => ipcRenderer.invoke('account:logout'),
+  accountRegister: (input) => ipcRenderer.invoke('account:register', input),
+  accountRequestPasswordReset: (input) => ipcRenderer.invoke('account:request-password-reset', input),
+  accountFleet: () => ipcRenderer.invoke('account:fleet'),
 });

@@ -1,6 +1,7 @@
 // packages/host/src/main.js
-import { app, BrowserWindow, desktopCapturer, screen, ipcMain, globalShortcut, Tray, Menu, nativeImage, clipboard, dialog, shell } from 'electron';
+import { app, BrowserWindow, desktopCapturer, screen, ipcMain, globalShortcut, Tray, Menu, nativeImage, clipboard, dialog, shell, safeStorage } from 'electron';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInjector } from './input-injector.js';
 import { createNutFacade } from './nut-facade.js';
@@ -21,8 +22,37 @@ import { MAX_FILE_SIZE } from '@farsight/shared/file-transfer';
 import electronUpdater from 'electron-updater';
 const { autoUpdater } = electronUpdater;
 import { createUpdater } from '@farsight/shared/updater';
+import { createAccountService, DEFAULT_ACCOUNT_URL } from '@farsight/shared/account-service';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Account service (SP2 enrollment) — lazily built so safeStorage / app.getPath
+// are ready. Signing in on the host links it as a Device under the owner's
+// account (§4.3: local login is the consent gate) and heartbeats presence so it
+// shows online + versioned in the controller's fleet console. The refresh token
+// is stored encrypted under userData; the account URL defaults to the deployed
+// service (env-overridable for dev). deviceName defaults to the machine hostname
+// so the console labels this host by its machine name.
+let accountService = null;
+function getAccountService() {
+  if (!accountService) {
+    accountService = createAccountService({
+      baseUrl: process.env.FARSIGHT_ACCOUNT_URL || DEFAULT_ACCOUNT_URL,
+      safeStorage,
+      fs: nodeFs,
+      filePath: path.join(app.getPath('userData'), 'account-token.enc'),
+      fetch: globalThis.fetch,
+      version: app.getVersion(),
+    });
+  }
+  return accountService;
+}
+ipcMain.handle('account:status', () => getAccountService().status());
+ipcMain.handle('account:login', (_e, input) => getAccountService().login({ deviceName: os.hostname(), ...input }));
+ipcMain.handle('account:logout', () => getAccountService().logout());
+ipcMain.handle('account:register', (_e, input) => getAccountService().register(input));
+ipcMain.handle('account:request-password-reset', (_e, input) => getAccountService().requestPasswordReset(input));
+ipcMain.handle('account:fleet', () => getAccountService().fleet());
 let mainWindow = null;
 let tray = null;
 let hostId = '';
