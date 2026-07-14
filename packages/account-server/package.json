@@ -6,7 +6,9 @@
   "description": "Self-hosted account/identity service (SP2): accounts, devices (the fleet), presence. Sibling to the signaling server. Node + TypeScript.",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "prisma:generate": "prisma generate"
+    "prisma:generate": "prisma generate",
+    "build": "tsc",
+    "start": "node dist/main.js"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",
