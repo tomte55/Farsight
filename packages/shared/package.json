@@ -17,6 +17,7 @@
     "./account-client": "./src/account-client.js",
     "./account-session": "./src/account-session.js",
     "./account-token-store": "./src/account-token-store.js",
+    "./account-heartbeat": "./src/account-heartbeat.js",
     "./config": "./src/config.js",
     "./file-transfer": "./src/file-transfer.js",
     "./update-policy": "./src/update-policy.js",
