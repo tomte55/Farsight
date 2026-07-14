@@ -27,6 +27,7 @@ function getAccountService() {
       fs: nodeFs,
       filePath: path.join(app.getPath('userData'), 'account-token.enc'),
       fetch: globalThis.fetch,
+      version: app.getVersion(), // reported to the fleet console via the presence heartbeat
     });
   }
   return accountService;
