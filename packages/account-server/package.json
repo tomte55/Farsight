@@ -5,13 +5,16 @@
   "type": "module",
   "description": "Self-hosted account/identity service (SP2): accounts, devices (the fleet), presence. Sibling to the signaling server. Node + TypeScript.",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prisma:generate": "prisma generate"
   },
   "dependencies": {
+    "@prisma/client": "^5.22.0",
     "argon2": "^0.41.1"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
+    "prisma": "^5.22.0",
     "typescript": "^5.9.3"
   }
 }

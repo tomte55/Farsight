@@ -1,0 +1,102 @@
+// Farsight account-server persistence (SP2, vision §4.4).
+// Prisma + SQLite — the self-hosted account service's data model. This is the
+// trust root for the fleet: accounts, one-time email/reset tokens, linked
+// devices (the fleet), and account-to-account contacts.
+//
+// SQLite has no native enums → status fields are plain String with a documented
+// value set. Token *values* are never stored — only their SHA-256 hash (see
+// src/one-time-token.ts); a DB leak therefore cannot forge valid links.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// A person's account. The master key to their fleet (§4.3), so hashing is
+/// argon2id (src/password-hash.ts) and revocation is version-based.
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  /// Null until the email is confirmed via a one-time verification token.
+  emailVerifiedAt DateTime?
+  /// Bumped to revoke every outstanding token globally (sign-out-everywhere /
+  /// on password change) — Gusto's token-versioning pattern.
+  tokenVersion Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  emailVerifications EmailVerification[]
+  passwordResets     PasswordReset[]
+  devices            Device[]
+  contactsRequested  Contact[]           @relation("ContactRequester")
+  contactsReceived   Contact[]           @relation("ContactAddressee")
+}
+
+/// One-time email-verification token (24h TTL, single-use, invalidated on
+/// resend). Only the hash is stored; consume = delete the row.
+model EmailVerification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+/// One-time password-reset token — same mechanism as EmailVerification.
+model PasswordReset {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+/// An installed app instance bound to an account — a fleet member. A linked
+/// headless host is just a Device. Revoking (revokedAt) kills its tokens and
+/// unlinks the host.
+model Device {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  /// Account-issued device public key, set at enrollment (S2.6); null until linked.
+  publicKey  String?
+  /// Last-known app version for presence/remote-update (SP1 host version); null until seen.
+  appVersion String?
+  /// Presence: last time this device checked in; null until first seen (S2.5).
+  lastSeenAt DateTime?
+  /// Non-null once the device is revoked (unlink a host / kill a lost device).
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+}
+
+/// Account-to-account contact (the middle trust tier, §4.4). Established via an
+/// invite/accept code. status ∈ {"pending","accepted"}; addressee is null until
+/// the invite is accepted.
+model Contact {
+  id          String    @id @default(cuid())
+  requesterId String
+  requester   User      @relation("ContactRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  addresseeId String?
+  addressee   User?     @relation("ContactAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
+  inviteCode  String    @unique
+  status      String    @default("pending")
+  createdAt   DateTime  @default(now())
+  respondedAt DateTime?
+
+  @@index([requesterId])
+  @@index([addresseeId])
+}
