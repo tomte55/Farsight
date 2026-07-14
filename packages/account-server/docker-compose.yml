@@ -1,0 +1,19 @@
+# packages/account-server/docker-compose.yml
+# Sibling to the signaling server. Binds localhost only; Caddy terminates TLS for
+# auth.sovexa.org and proxies to it. SQLite lives on a named volume so the
+# account data survives rebuilds. Secrets come from .env (never committed).
+services:
+  farsight-account:
+    build:
+      context: ../..                                  # repo root
+      dockerfile: packages/account-server/Dockerfile
+    container_name: farsight-account
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - farsight-account-data:/data
+    ports:
+      - "127.0.0.1:8091:8090"                         # localhost only; Caddy proxies to it
+
+volumes:
+  farsight-account-data:
