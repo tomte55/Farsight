@@ -43,6 +43,8 @@ Authenticated (`Authorization: Bearer <accessToken>`):
 | POST | `/2fa/begin` | → `{secret, otpauthUri}` (staged, not yet active) |
 | POST | `/2fa/confirm` | `{code}` → `{recoveryCodes}` (activates 2FA) |
 | POST | `/2fa/disable` | → 200 |
+| POST | `/devices/heartbeat` | `{version?}` → 200 (calling device reports its own liveness/version) |
+| GET | `/devices` | → `{devices:[{id,name,appVersion,lastSeenAt,online}]}` — the owner's fleet (S2.5 presence) |
 | POST | `/devices/revoke` | `{deviceId}` → 200 (own devices only; else 404) |
 
 The node:http adapter adds a request-body size cap (413), JSON guard (400),

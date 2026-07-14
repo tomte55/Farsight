@@ -16,6 +16,7 @@ import {
   disableTotp,
   type TwoFactorDeps,
 } from '../two-factor.js';
+import { heartbeat, listFleet, type PresenceDeps } from '../presence.js';
 
 export interface ApiContext {
   prisma: PrismaClient;
@@ -59,22 +60,25 @@ function sessionDeps(ctx: ApiContext): SessionDeps {
 function twoFactorDeps(ctx: ApiContext): TwoFactorDeps {
   return { prisma: ctx.prisma, now: ctx.now() };
 }
+function presenceDeps(ctx: ApiContext): PresenceDeps {
+  return { prisma: ctx.prisma, now: ctx.now() };
+}
 
 const unauthorized = (): ApiResponse => json(401, { error: 'unauthorized' });
 
-// Resolve the caller's account from a Bearer access token, enforcing the full
-// session check (signature/expiry + tokenVersion + device revocation). Returns
-// the userId, or a 401 response to short-circuit.
+// Resolve the caller from a Bearer access token, enforcing the full session
+// check (signature/expiry + tokenVersion + device revocation). Returns the
+// caller's userId + deviceId, or a 401 response to short-circuit.
 async function requireAuth(
   ctx: ApiContext,
   req: ApiRequest,
-): Promise<{ userId: string } | ApiResponse> {
+): Promise<{ userId: string; deviceId: string } | ApiResponse> {
   const header = req.headers?.['authorization'] ?? req.headers?.['Authorization'];
   const value = Array.isArray(header) ? header[0] : header;
   const match = /^Bearer (.+)$/.exec(value ?? '');
   if (!match) return unauthorized();
   const res = await authenticate(sessionDeps(ctx), match[1]!);
-  return res.ok ? { userId: res.userId } : unauthorized();
+  return res.ok ? { userId: res.userId, deviceId: res.deviceId } : unauthorized();
 }
 
 const handlers: Record<string, Handler> = {
@@ -173,6 +177,23 @@ const handlers: Record<string, Handler> = {
     if (!device || device.userId !== auth.userId) return json(404, { error: 'not_found' });
     await revokeDevice(sessionDeps(ctx), { deviceId });
     return ok();
+  },
+
+  // ── presence (S2.5): the device reports liveness; the owner lists the fleet ─
+  'POST /devices/heartbeat': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    // The calling device reports its own liveness + optional current version.
+    const version = str(req.body, 'version');
+    await heartbeat(presenceDeps(ctx), { deviceId: auth.deviceId, version });
+    return ok();
+  },
+
+  'GET /devices': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    const devices = await listFleet(presenceDeps(ctx), { userId: auth.userId });
+    return ok({ devices });
   },
 };
 
