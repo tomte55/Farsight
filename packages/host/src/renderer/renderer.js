@@ -423,6 +423,93 @@ document.getElementById('menu-change-server').addEventListener('click', async ()
   setupEl.hidden = false;
 });
 
+// ── Account enrollment panel (SP2) ───────────────────────────────────────────
+// Sign in on the host to link this machine to your account: it becomes a Device
+// in your fleet, heartbeats presence, and can be remotely updated. A leaner
+// panel than the controller's console — no fleet list, just link / unlink. All
+// account work happens in main (window.farsightIpc.account*).
+const accountEl = document.getElementById('account');
+const acctSignin = document.getElementById('acct-signin');
+const acctLinked = document.getElementById('acct-linked');
+const acctEmail = document.getElementById('acct-email');
+const acctPassword = document.getElementById('acct-password');
+const acctCode = document.getElementById('acct-code');
+const acctSigninBtn = document.getElementById('acct-signin-btn');
+const acctSigninError = document.getElementById('acct-signin-error');
+const setMsg = (el, text, ok = false) => { el.textContent = text; el.style.color = ok ? 'var(--acc2)' : 'var(--danger-ink)'; };
+
+function openAccount() {
+  appEl.style.display = 'none';
+  setupEl.hidden = true;
+  accountEl.hidden = false;
+  refreshAccountView();
+}
+function closeAccount() {
+  accountEl.hidden = true;
+  appEl.style.display = 'block';
+}
+async function refreshAccountView() {
+  const { signedIn } = await window.farsightIpc.accountStatus();
+  acctSignin.hidden = signedIn;
+  acctLinked.hidden = !signedIn;
+  setMsg(acctSigninError, '');
+}
+
+const SIGNIN_ERRORS = {
+  bad_credentials: 'Wrong email or password.',
+  email_unverified: 'Verify your email first — check your inbox.',
+  totp_required: 'Enter your two-factor code.',
+  totp_invalid: 'That code didn’t work — try again.',
+  network_error: 'Can’t reach the account server.',
+};
+async function doSignIn() {
+  setMsg(acctSigninError, '');
+  const email = acctEmail.value.trim();
+  const password = acctPassword.value;
+  const code = acctCode.value.replace(/\s+/g, '') || undefined;
+  if (!email || !password) { setMsg(acctSigninError, 'Enter your email and password.'); return; }
+  acctSigninBtn.disabled = true;
+  acctSigninBtn.textContent = 'Signing in…';
+  // deviceName defaults to the machine hostname in main; omitted here.
+  const res = await window.farsightIpc.accountLogin({ email, password, code });
+  acctSigninBtn.disabled = false;
+  acctSigninBtn.textContent = 'Sign in & link';
+  if (res.ok) {
+    acctPassword.value = '';
+    acctCode.value = '';
+    refreshAccountView();
+  } else {
+    setMsg(acctSigninError, SIGNIN_ERRORS[res.error] || 'Sign-in failed. Try again.');
+  }
+}
+
+const REGISTER_ERRORS = {
+  email_taken: 'That email already has an account — sign in instead.',
+  weak_password: 'Choose a stronger password (at least 8 characters).',
+  network_error: 'Can’t reach the account server.',
+};
+async function doRegister() {
+  const email = acctEmail.value.trim();
+  const password = acctPassword.value;
+  if (!email || !password) { setMsg(acctSigninError, 'Enter an email and password to create your account.'); return; }
+  const res = await window.farsightIpc.accountRegister({ email, password });
+  if (res.ok) setMsg(acctSigninError, 'Account created — check your email to verify, then sign in.', true);
+  else setMsg(acctSigninError, REGISTER_ERRORS[res.error] || 'Couldn’t create the account.');
+}
+async function doForgot() {
+  const email = acctEmail.value.trim();
+  if (!email) { setMsg(acctSigninError, 'Enter your email first, then choose Forgot password.'); return; }
+  await window.farsightIpc.accountRequestPasswordReset({ email });
+  setMsg(acctSigninError, 'If that email has an account, a reset link is on its way.', true);
+}
+
+document.getElementById('menu-account').addEventListener('click', () => { settingsMenu.classList.remove('open'); openAccount(); });
+document.getElementById('acct-close').addEventListener('click', closeAccount);
+document.getElementById('acct-signout').addEventListener('click', async () => { await window.farsightIpc.accountLogout(); refreshAccountView(); });
+acctSigninBtn.addEventListener('click', doSignIn);
+document.getElementById('acct-register').addEventListener('click', doRegister);
+document.getElementById('acct-forgot').addEventListener('click', doForgot);
+
 // Paint the subtle build-version label in the bottom-left corner.
 window.farsightIpc.getAppVersion().then((v) => {
   const el = document.getElementById('version-tag');
@@ -440,3 +527,8 @@ if (!signalingUrl) {
   rotator = createIdleRotator({ intervalMs: PW_ROTATE_MS, onRotate: rotatePassword });
   rotator.start();
 }
+
+// Resume a persisted account session on launch so a linked host starts reporting
+// presence immediately (heartbeat), without the user opening the account panel.
+// No stored token → no network call; status() just returns signed-out.
+window.farsightIpc.accountStatus();

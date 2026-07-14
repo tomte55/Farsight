@@ -33,6 +33,15 @@
 <style>
   /* Host-specific: reserve room for the fixed session bar when active. */
   body.in-session .app { padding-top: 46px; }
+  /* Account link panel (SP2 enrollment) — mirrors the controller console. */
+  .acct-title { font-size: 15px; font-weight: 700; margin-bottom: 3px; }
+  .acct-opt { color: var(--sub); font-weight: 400; text-transform: none; letter-spacing: 0; }
+  .acct-links { display: flex; justify-content: space-between; margin-top: 13px; }
+  .linkbtn { background: none; border: none; color: var(--acc2); font: inherit; font-size: 12.5px; cursor: pointer; padding: 0; }
+  .linkbtn:hover { text-decoration: underline; }
+  .acct-back { display: block; margin: 15px auto 0; color: var(--sub); }
+  .acct-linked-row { display: flex; align-items: center; gap: 11px; margin-bottom: 14px; }
+  .acct-linked-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: var(--acc2); box-shadow: 0 0 9px rgba(74,168,255,.65); }
 </style>
 
 <div id="panic-warning" hidden style="position:fixed;left:0;right:0;bottom:0;z-index:60;padding:9px 16px;background:var(--danger-bg);border-top:1px solid var(--danger-line);color:var(--danger-ink);font-size:13px;text-align:center">Panic hotkey (Ctrl+Alt+F12) is unavailable — another app may be using it. The instant-kill override is not active.</div>
@@ -48,6 +57,7 @@
 
 <button id="settings-cog" class="cog" title="Settings" aria-label="Settings">⚙</button>
 <div id="settings-menu" class="menu">
+  <button id="menu-account">Link to account…</button>
   <button id="menu-change-server">Change signaling server…</button>
   <button id="menu-check-updates">Check for updates</button>
   <div id="menu-status" class="menu-status"></div>
@@ -66,6 +76,35 @@
   <input id="signaling-url" class="input" placeholder="wss://signal.example.org" />
   <button id="save-signaling" class="btn btn-primary" style="width:100%;margin-top:4px">Save</button>
   <p id="setup-error" class="statusline" style="color:var(--danger-ink)"></p>
+</div>
+
+<div id="account" hidden>
+  <!-- Signed out: link this machine to your account -->
+  <div id="acct-signin" class="card" style="width:440px;max-width:100%;margin:0 auto">
+    <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
+    <div class="acct-title">Link this machine to your account</div>
+    <div class="statusline" style="margin-top:0;margin-bottom:16px">Sign in to add this computer to your fleet — it'll show up in your console, online and with its version, so you can keep it updated.</div>
+    <div class="lbl">Email</div>
+    <input id="acct-email" class="input" type="email" placeholder="you@example.com" autocomplete="username" />
+    <div class="lbl">Password</div>
+    <input id="acct-password" class="input" type="password" placeholder="Password" autocomplete="current-password" />
+    <div class="lbl">Two-factor code <span class="acct-opt">— if you enabled it</span></div>
+    <input id="acct-code" class="input" inputmode="numeric" placeholder="123 456" autocomplete="one-time-code" />
+    <button id="acct-signin-btn" class="btn btn-primary" style="width:100%;margin-top:4px">Sign in &amp; link</button>
+    <p id="acct-signin-error" class="statusline" style="color:var(--danger-ink)"></p>
+    <div class="acct-links">
+      <button id="acct-forgot" class="linkbtn">Forgot password?</button>
+      <button id="acct-register" class="linkbtn">Create account</button>
+    </div>
+  </div>
+  <!-- Signed in: this machine is linked -->
+  <div id="acct-linked" class="card" style="width:440px;max-width:100%;margin:0 auto" hidden>
+    <div class="acct-linked-row"><span class="acct-linked-dot"></span><div class="acct-title" style="margin:0">This machine is linked</div></div>
+    <div class="statusline" style="margin-top:0;margin-bottom:16px">It appears in your fleet console — online, with its version — so you can connect and keep it updated. Live control sessions still ask for your consent each time.</div>
+    <button id="acct-signout" class="btn btn-ghost" style="width:100%">Unlink this machine</button>
+    <p id="acct-linked-error" class="statusline" style="color:var(--danger-ink)"></p>
+  </div>
+  <button id="acct-close" class="linkbtn acct-back">← Back</button>
 </div>
 
 <div class="app">
