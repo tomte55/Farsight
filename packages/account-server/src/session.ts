@@ -8,6 +8,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { verifyPassword } from './password-hash.js';
 import { normalizeEmail } from './email.js';
+import { verifyTwoFactor } from './two-factor.js';
 import {
   issueAccessToken,
   issueRefreshToken,
@@ -24,7 +25,7 @@ export interface SessionDeps {
 
 export type LoginResult =
   | { ok: true; accessToken: string; refreshToken: string; deviceId: string }
-  | { ok: false; reason: 'bad_credentials' | 'email_unverified' };
+  | { ok: false; reason: 'bad_credentials' | 'email_unverified' | 'totp_required' | 'totp_invalid' };
 
 export type AuthResult =
   | { ok: true; userId: string; deviceId: string }
@@ -36,7 +37,7 @@ export type RotateResult =
 
 export async function login(
   deps: SessionDeps,
-  input: { email: string; password: string; deviceName: string },
+  input: { email: string; password: string; deviceName: string; code?: string },
 ): Promise<LoginResult> {
   const email = normalizeEmail(input.email);
   const user = await deps.prisma.user.findUnique({ where: { email } });
@@ -45,6 +46,13 @@ export async function login(
     return { ok: false, reason: 'bad_credentials' };
   }
   if (!user.emailVerifiedAt) return { ok: false, reason: 'email_unverified' };
+
+  // Second factor, only when the account has opted in (§4.4: optional 2FA).
+  if (user.totpEnabledAt) {
+    if (!input.code) return { ok: false, reason: 'totp_required' };
+    const tf = await verifyTwoFactor({ prisma: deps.prisma, now: deps.now }, user.id, input.code);
+    if (tf !== 'ok') return { ok: false, reason: 'totp_invalid' };
+  }
 
   const device = await deps.prisma.device.create({
     data: { userId: user.id, name: input.deviceName, lastSeenAt: new Date(deps.now) },

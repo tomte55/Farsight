@@ -27,14 +27,33 @@ model User {
   /// Bumped to revoke every outstanding token globally (sign-out-everywhere /
   /// on password change) — Gusto's token-versioning pattern.
   tokenVersion Int       @default(0)
+  /// TOTP shared secret (base32). Set at enrollment start; 2FA is only ACTIVE
+  /// once totpEnabledAt is set (confirmed with a valid code). Optional per §4.4.
+  totpSecret    String?
+  /// Non-null once 2FA is confirmed/active. Null = 2FA off (or mid-enrollment).
+  totpEnabledAt DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
   emailVerifications EmailVerification[]
   passwordResets     PasswordReset[]
   devices            Device[]
+  recoveryCodes      RecoveryCode[]
   contactsRequested  Contact[]           @relation("ContactRequester")
   contactsReceived   Contact[]           @relation("ContactAddressee")
+}
+
+/// One-time 2FA backup code. Only the SHA-256 hash is stored (see
+/// src/recovery-codes.ts); usedAt marks it consumed (single-use).
+model RecoveryCode {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
 }
 
 /// One-time email-verification token (24h TTL, single-use, invalidated on
