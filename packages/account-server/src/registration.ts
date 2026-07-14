@@ -3,18 +3,13 @@
 // unit-testable against a temp SQLite DB. The raw one-time token leaves only by
 // email; the DB stores its hash (see one-time-token.ts).
 
-import type { PrismaClient } from '@prisma/client';
 import { validatePassword } from './password-policy.js';
 import { hashPassword } from './password-hash.js';
 import { createToken, hashToken, checkToken } from './one-time-token.js';
-import { normalizeEmail, type EmailTransport } from './email.js';
+import { normalizeEmail } from './email.js';
+import type { FlowDeps } from './flow-context.js';
 
-export interface FlowDeps {
-  prisma: PrismaClient;
-  email: EmailTransport;
-  now: number; // epoch ms — injected for TTL + deterministic tests
-  baseUrl: string; // e.g. https://auth.sovexa.org — where the app hosts verify/reset links
-}
+export type { FlowDeps } from './flow-context.js';
 
 export type RegisterResult =
   | { ok: true; userId: string }
