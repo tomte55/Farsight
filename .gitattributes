@@ -1,0 +1,4 @@
+# Shell scripts run on Linux (Docker entrypoints, deploy scripts) — they MUST
+# stay LF even when checked out on Windows (core.autocrlf=true), or /bin/sh
+# chokes on the CRLF (`bad interpreter: /bin/sh^M`).
+*.sh text eol=lf
