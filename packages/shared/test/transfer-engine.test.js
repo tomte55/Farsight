@@ -38,3 +38,14 @@ test('isComplete true only when every file verified', () => {
   const rx = createReceiveJob({ manifest, have: { 0: 10, 1: 20 } });
   expect(rx.isComplete()).toBe(true);
 });
+
+test('received bytes clamp to file size and never exceed', () => {
+  // have larger than size clamps at init
+  const rx = createReceiveJob({ manifest, have: { 0: 999 } });
+  expect(rx.resumePlan()[0]).toEqual({ fileId: 0, haveBytes: 10 });
+  // onBytes beyond remaining clamps and returns fraction 1 (not > 1)
+  const rx2 = createReceiveJob({ manifest });
+  rx2.onFileBegin({ fileId: 1, offset: 0 });
+  expect(rx2.onBytes(1, 999)).toBe(1);
+  expect(rx2.resumePlan()[1]).toEqual({ fileId: 1, haveBytes: 20 });
+});
