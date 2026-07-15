@@ -122,3 +122,43 @@ test('createPartFile with resumeFrom 0 truncates a stale .part', async () => {
   await b.write(Buffer.from('X')); await b.close();
   expect(readFileSync(b.partPath)).toEqual(Buffer.from('X'));
 });
+
+import { finalizeReceivedFile } from '../src/transfer-io.js';
+import { existsSync } from 'node:fs';
+
+test('finalizeReceivedFile with a matching live hash renames .part and restores mtime', async () => {
+  const root = tmp();
+  const pf = await createPartFile({ destRoot: root, relPath: 'ok/file.bin', resumeFrom: 0, hashLive: true });
+  const data = Buffer.from('payload-bytes-1234');
+  await pf.write(data); await pf.fsync(); await pf.close();
+  const mtime = 1_700_000_000_000; // ms
+  const r = await finalizeReceivedFile({ partFile: pf, expectedHash: pf.liveDigest(), mtime });
+  expect(r.ok).toBe(true);
+  expect(existsSync(pf.partPath)).toBe(false);
+  expect(existsSync(pf.finalPath)).toBe(true);
+  expect(readFileSync(pf.finalPath)).toEqual(data);
+  // mtime restored (seconds granularity is enough to assert)
+  expect(Math.round(statSync(pf.finalPath).mtimeMs / 1000)).toBe(Math.round(mtime / 1000));
+});
+
+test('finalizeReceivedFile falls back to a completion read when there is no live hash', async () => {
+  const root = tmp();
+  const pf = await createPartFile({ destRoot: root, relPath: 'noh.bin', resumeFrom: 0, hashLive: false });
+  const data = Buffer.from('restart-path-bytes');
+  await pf.write(data); await pf.close();
+  const expected = createHash('sha256').update(data).digest('hex');
+  expect(pf.liveDigest()).toBeNull();
+  const r = await finalizeReceivedFile({ partFile: pf, expectedHash: expected, mtime: 1_700_000_000_000 });
+  expect(r.ok).toBe(true);
+  expect(existsSync(pf.finalPath)).toBe(true);
+});
+
+test('finalizeReceivedFile discards the .part on a hash mismatch', async () => {
+  const root = tmp();
+  const pf = await createPartFile({ destRoot: root, relPath: 'bad.bin', resumeFrom: 0, hashLive: true });
+  await pf.write(Buffer.from('corrupted')); await pf.close();
+  const r = await finalizeReceivedFile({ partFile: pf, expectedHash: 'deadbeef', mtime: 1 });
+  expect(r.ok).toBe(false);
+  expect(existsSync(pf.partPath)).toBe(false);
+  expect(existsSync(pf.finalPath)).toBe(false);
+});

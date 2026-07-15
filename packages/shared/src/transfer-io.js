@@ -2,7 +2,7 @@
 // SP3 (spec §6) MAIN-ONLY streamed-to-disk transfer io. Uses node:fs/crypto/path
 // like updater.js/device-keypair.js — NEVER imported by a sandboxed renderer.
 // Consumes the pure transfer-manifest.js for path safety.
-import { statfs, stat, readdir, open, mkdir } from 'node:fs/promises';
+import { statfs, stat, readdir, open, mkdir, rename, utimes, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { resolve, join, sep, basename, dirname } from 'node:path';
@@ -103,4 +103,19 @@ export async function createPartFile({ destRoot, relPath, resumeFrom, hashLive }
       return digest;
     },
   };
+}
+
+// Verify the received file's whole-file hash, then atomically publish it.
+// Live digest when available (continuous run); otherwise a single completion
+// read (spec §6.4). Mismatch discards the .part so the file re-requests from 0.
+export async function finalizeReceivedFile({ partFile, expectedHash, mtime }) {
+  const actual = partFile.liveDigest() ?? (await hashFile(partFile.partPath));
+  if (actual !== expectedHash) {
+    await rm(partFile.partPath, { force: true });
+    return { ok: false };
+  }
+  await rename(partFile.partPath, partFile.finalPath);
+  const secs = mtime / 1000;
+  await utimes(partFile.finalPath, secs, secs);
+  return { ok: true };
 }
