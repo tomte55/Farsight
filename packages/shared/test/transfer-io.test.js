@@ -52,3 +52,33 @@ test('hashFile of an empty file is the SHA-256 of empty input', async () => {
   writeFileSync(f, Buffer.alloc(0));
   expect(await hashFile(f)).toBe(createHash('sha256').digest('hex'));
 });
+
+import { walkSource } from '../src/transfer-io.js';
+import { mkdirSync } from 'node:fs';
+
+test('walkSource turns a single file into a one-entry manifest source', async () => {
+  const root = tmp();
+  const f = join(root, 'report.pdf');
+  writeFileSync(f, Buffer.alloc(1234));
+  const { entries, sources } = await walkSource([{ path: f }]);
+  expect(entries.length).toBe(1);
+  expect(entries[0].path).toBe('report.pdf');
+  expect(entries[0].size).toBe(1234);
+  expect(Number.isInteger(entries[0].mtime)).toBe(true);
+  expect(sources.get(entries[0].fileId)).toBe(f);
+});
+
+test('walkSource recurses a directory with posix relative paths under the dir name', async () => {
+  const root = tmp();
+  const src = join(root, 'game');
+  mkdirSync(join(src, 'data'), { recursive: true });
+  writeFileSync(join(src, 'a.txt'), Buffer.alloc(10));
+  writeFileSync(join(src, 'data', 'b.bin'), Buffer.alloc(20));
+  const { entries, sources } = await walkSource([{ path: src }]);
+  const paths = entries.map((e) => e.path).sort();
+  expect(paths).toEqual(['game/a.txt', 'game/data/b.bin']);
+  // Every entry maps back to a real absolute source path.
+  for (const e of entries) expect(typeof sources.get(e.fileId)).toBe('string');
+  // fileIds are unique and sequential from 0.
+  expect(new Set(entries.map((e) => e.fileId)).size).toBe(entries.length);
+});

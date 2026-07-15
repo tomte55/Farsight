@@ -2,10 +2,10 @@
 // SP3 (spec §6) MAIN-ONLY streamed-to-disk transfer io. Uses node:fs/crypto/path
 // like updater.js/device-keypair.js — NEVER imported by a sandboxed renderer.
 // Consumes the pure transfer-manifest.js for path safety.
-import { statfs } from 'node:fs/promises';
+import { statfs, stat, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { resolve, join, sep } from 'node:path';
+import { resolve, join, sep, basename } from 'node:path';
 import { sanitizeRelativePath } from './transfer-manifest.js';
 
 // SECURITY-CRITICAL (spec §6.3): a received relative path must be safe (Phase-1
@@ -38,4 +38,36 @@ export function hashFile(absPath) {
     rs.on('error', rej);
     rs.on('end', () => res(h.digest('hex')));
   });
+}
+
+// Walk each root (a file or a directory) into manifest entries. Directory roots
+// contribute paths rooted at the directory's own name (so "send this folder"
+// preserves the folder). Posix separators for the wire. Symlinks skipped.
+export async function walkSource(roots) {
+  const entries = [];
+  const sources = new Map();
+  let nextId = 0;
+  async function addFile(absPath, relPosix) {
+    const st = await stat(absPath);
+    const fileId = nextId++;
+    entries.push({ fileId, path: relPosix, size: st.size, mtime: Math.floor(st.mtimeMs) });
+    sources.set(fileId, absPath);
+  }
+  async function walkDir(absDir, relPrefix) {
+    const names = (await readdir(absDir, { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : 1));
+    for (const d of names) {
+      if (d.isSymbolicLink()) continue; // not followed in this plan
+      const abs = join(absDir, d.name);
+      const rel = relPrefix ? `${relPrefix}/${d.name}` : d.name;
+      if (d.isDirectory()) await walkDir(abs, rel);
+      else if (d.isFile()) await addFile(abs, rel);
+    }
+  }
+  for (const r of roots) {
+    const st = await stat(r.path);
+    const name = basename(r.path);
+    if (st.isDirectory()) await walkDir(r.path, name);
+    else if (st.isFile()) await addFile(r.path, name);
+  }
+  return { entries, sources };
 }
