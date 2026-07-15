@@ -24,6 +24,12 @@ const { autoUpdater } = electronUpdater;
 import { createUpdater } from '@farsight/shared/updater';
 import { shouldConverge } from '@farsight/shared/update-policy';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from '@farsight/shared/account-service';
+// SP3 file transfer (receive path): the orchestrator/queue/jobs-store pipeline
+// (createTransferService), fed by a dedicated transfer-worker BrowserWindow —
+// mirrors the controller's send-side wiring in packages/controller/src/main.js.
+import { createTransferWorker } from './transfer-worker.js';
+import { createTransferService } from '@farsight/shared/transfer-service';
+import { createJobsStore } from '@farsight/shared/jobs-store';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -63,6 +69,103 @@ ipcMain.handle('account:register', (_e, input) => getAccountService().register(i
 ipcMain.handle('account:resend-verification', (_e, input) => getAccountService().resendVerification(input));
 ipcMain.handle('account:request-password-reset', (_e, input) => getAccountService().requestPasswordReset(input));
 ipcMain.handle('account:fleet', () => getAccountService().fleet());
+
+// SP3 file transfer (receive path): the host is always the DESTINATION for a
+// pushed transfer — a peer's transfer-worker (see the controller's send-side
+// wiring) initiates; this host attaches by the unguessable sessionId relayed
+// via the signaling server's TRANSFER_REQUEST (renderer.js forwards it here as
+// 'transfer:incoming'). Each receive gets its own createTransferWorker() — a
+// dedicated hidden BrowserWindow + RTCPeerConnection + signaling socket,
+// independent of the main control session's peer (peer.js), so a transfer can
+// run alongside (or without) an active remote-control session. The jobs-store
+// persists progress under userData/transfers; received files land under
+// <Downloads>/Farsight/Received by default (no destination picker yet — a
+// documented Phase-2 refinement, see the report).
+let jobsStore = null;
+function getJobsStore() {
+  if (!jobsStore) jobsStore = createJobsStore({ dir: path.join(app.getPath('userData'), 'transfers') });
+  return jobsStore;
+}
+function receivedFilesDir() {
+  return path.join(app.getPath('downloads'), 'Farsight', 'Received');
+}
+
+// Consent round-trip: transfer-orchestrator's createReceiver calls
+// consent({manifest}) (no jobId — the real transfer jobId isn't assigned to
+// the orchestrator's local state until just before this call, and isn't
+// threaded through the consent callback's signature). We mint our own
+// short-lived correlation id per prompt so the renderer can reply to the
+// RIGHT modal even if a second offer somehow arrives while one is pending;
+// it is NOT the same id as the persisted job's jobId (that only exists once
+// the manifest is accepted) — see the NEEDS-LIVE-VERIFICATION note in the report.
+let consentCounter = 0;
+const pendingConsent = new Map(); // promptId -> resolve(boolean)
+function requestReceiveConsent({ manifest }) {
+  return new Promise((resolve) => {
+    if (!mainWindow || mainWindow.isDestroyed()) { resolve(false); return; }
+    consentCounter += 1;
+    const promptId = `c${consentCounter}-${Date.now().toString(36)}`;
+    pendingConsent.set(promptId, resolve);
+    mainWindow.webContents.send('transfer:consent-request', { jobId: promptId, manifest, destDir: receivedFilesDir() });
+    // Bring the window to the user's attention, same as an incoming control
+    // session's CONNECT — an unattended host would otherwise silently drop
+    // the offer (declined only because nobody saw the prompt in time).
+    bringWindowToAttention();
+  });
+}
+ipcMain.on('transfer:respond-consent', (_e, input) => {
+  const { jobId, accept } = input || {};
+  const resolve = pendingConsent.get(jobId);
+  if (!resolve) return;
+  pendingConsent.delete(jobId);
+  resolve(!!accept);
+});
+
+let transferService = null;
+function getTransferService() {
+  if (!transferService) {
+    const dir = receivedFilesDir();
+    try { nodeFs.mkdirSync(dir, { recursive: true }); } catch (err) { log?.child('transfer').warn(`could not create received-files dir: ${err.message}`); }
+    transferService = createTransferService({
+      store: getJobsStore(),
+      transferDir: dir,
+      consent: requestReceiveConsent,
+      // The host never initiates a transfer in this phase (no send UI here —
+      // that lives on the controller), so this only ever runs with the
+      // 'attach' role; rendezvous is { sessionId } (see 'transfer:incoming' below).
+      openChannel: async ({ rendezvous }) => {
+        const worker = createTransferWorker();
+        const stored = readStoredConfig();
+        const signalingUrl = resolveSignalingUrl({
+          envUrl: process.env.FARSIGHT_SIGNALING_URL,
+          storedUrl: stored.signalingUrl,
+        }).url;
+        worker.startRendezvous({ role: 'attach', signalingUrl, sessionId: rendezvous?.sessionId, version: app.getVersion() });
+        return { channel: worker.channel, close: async () => worker.close() };
+      },
+      onEvent: (ev) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('transfer:event', ev);
+      },
+    });
+  }
+  return transferService;
+}
+
+// The host renderer's signaling handler calls this when the server relays a
+// TRANSFER_REQUEST (a peer wants to push files at this machine). Fire-and-
+// forget: startReceive()'s promise only resolves once the whole job settles,
+// so awaiting it here would hang this handle() call for the entire transfer;
+// progress/consent instead flow through transfer:event / transfer:consent-request.
+ipcMain.handle('transfer:incoming', async (_e, input) => {
+  const sessionId = input && input.sessionId;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return { error: 'invalid_request' };
+  getTransferService().startReceive({ rendezvous: { sessionId } })
+    .catch((err) => log?.child('transfer').warn(`receive failed: ${err?.message || err}`));
+  return { ok: true };
+});
+
+ipcMain.handle('transfer:list', () => getTransferService().listJobs());
+
 let mainWindow = null;
 let tray = null;
 let hostId = '';
@@ -151,9 +254,10 @@ function createTray() {
   refreshTrayMenu();
 }
 
-// Bring the window to attention when a controller asks to connect. The renderer
-// forwards CONNECT via 'request-attention'; we apply the pure windowAttentionPlan.
-ipcMain.on('request-attention', () => {
+// Bring the window to attention when a controller (or a transfer offer — see
+// requestReceiveConsent above) asks for it. The renderer forwards a control
+// CONNECT via IPC 'request-attention'; we apply the pure windowAttentionPlan.
+function bringWindowToAttention() {
   log?.child('session').info('attention requested by incoming connection');
   const win = mainWindow;
   if (!win) return;
@@ -167,7 +271,8 @@ ipcMain.on('request-attention', () => {
   if (plan.raiseTemporarily) { win.setAlwaysOnTop(true); setTimeout(() => win.setAlwaysOnTop(false), 1500); }
   if (plan.focus) { win.moveTop(); win.focus(); }
   if (plan.flash) win.flashFrame(true);
-});
+}
+ipcMain.on('request-attention', () => bringWindowToAttention());
 
 // The renderer reports its registered id so the tray can display it.
 ipcMain.on('set-host-id', (_e, id) => { hostId = String(id || ''); getAccountService().setSignalingId(hostId); log?.child('session').info('host id registered'); refreshTrayMenu(); });

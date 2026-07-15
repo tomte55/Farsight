@@ -48,4 +48,15 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   connAuthSign: (message) => ipcRenderer.invoke('conn-auth:sign', message),
   connAuthVerify: (publicKey, message, signature) => ipcRenderer.invoke('conn-auth:verify', publicKey, message, signature),
   connAuthIsAccountKey: (publicKey) => ipcRenderer.invoke('conn-auth:is-account-key', publicKey),
+
+  // SP3 file transfer (receive path): the renderer forwards a signaling
+  // TRANSFER_REQUEST here so main can attach a transfer worker; main then
+  // round-trips consent (manifest preview) and pushes live progress. All
+  // fs/WebRTC-worker work happens in main, mirroring the controller's
+  // send-side bridge.
+  transferIncoming: (input) => ipcRenderer.invoke('transfer:incoming', input),
+  transferList: () => ipcRenderer.invoke('transfer:list'),
+  onTransferEvent: (cb) => ipcRenderer.on('transfer:event', (_e, ev) => cb(ev)),
+  onTransferConsent: (cb) => ipcRenderer.on('transfer:consent-request', (_e, req) => cb(req)),
+  respondConsent: (input) => ipcRenderer.send('transfer:respond-consent', input),
 });

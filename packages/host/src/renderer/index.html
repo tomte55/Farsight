@@ -44,6 +44,31 @@
   .acct-back { display: block; margin: 15px auto 0; color: var(--sub); }
   .acct-linked-row { display: flex; align-items: center; gap: 11px; margin-bottom: 14px; }
   .acct-linked-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: var(--acc2); box-shadow: 0 0 9px rgba(74,168,255,.65); }
+
+  /* SP3 file transfer (receive path): Transfers panel + incoming-consent modal.
+     Mirrors the controller's send-side panel styling (.host-row/.xfer-*, and
+     the shared .overlay/.veil from farsight.css for the consent modal). */
+  #transfers-panel { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+  #transfers-panel[hidden] { display: none; }
+  #transfers-panel .acct-wrap { width: 480px; max-width: 100%; }
+  .fleet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+  .fleet-head-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .fleet-empty { text-align: center; color: var(--sub); font-size: 12.5px; padding: 30px 12px; line-height: 1.65; }
+  .host-row { display: flex; align-items: center; gap: 13px; padding: 13px 2px; border-top: 1px solid var(--line); }
+  .host-row:first-child { border-top: none; }
+  .host-main { flex: 1; min-width: 0; }
+  .host-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .host-meta { font-size: 11.5px; color: var(--sub); margin-top: 3px; font-family: var(--mono); }
+  .xfer-row { flex-direction: column; align-items: stretch; gap: 6px; }
+  .xfer-row .host-main { display: flex; flex-direction: column; gap: 5px; }
+  .xfer-bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+  .xfer-bar-fill { height: 100%; background: linear-gradient(135deg, var(--acc), var(--acc2)); transition: width .2s ease; }
+  #transfer-consent .card { width: 420px; max-width: 92vw; max-height: 82vh; display: flex; flex-direction: column; overflow: hidden; }
+  .xfer-tree-wrap { max-height: 220px; overflow-y: auto; background: var(--bg2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; margin-top: 4px; }
+  .xfer-tree, .xfer-tree ul { list-style: none; margin: 0; padding-left: 16px; font-size: 12.5px; }
+  .xfer-tree { padding-left: 0; }
+  .xfer-tree-dir { font-weight: 600; margin: 5px 0; }
+  .xfer-tree-file { color: var(--sub); margin: 3px 0; font-family: var(--mono); font-size: 11.5px; }
 </style>
 
 <div id="panic-warning" hidden style="position:fixed;left:0;right:0;bottom:0;z-index:60;padding:9px 16px;background:var(--danger-bg);border-top:1px solid var(--danger-line);color:var(--danger-ink);font-size:13px;text-align:center">Panic hotkey (Ctrl+Alt+F12) is unavailable — another app may be using it. The instant-kill override is not active.</div>
@@ -60,6 +85,7 @@
 <button id="settings-cog" class="cog" title="Settings" aria-label="Settings">⚙</button>
 <div id="settings-menu" class="menu">
   <button id="menu-account">Link to account…</button>
+  <button id="menu-transfers">Transfers</button>
   <button id="menu-change-server">Change signaling server…</button>
   <button id="menu-check-updates">Check for updates</button>
   <div id="menu-status" class="menu-status"></div>
@@ -107,6 +133,45 @@
     <p id="acct-linked-error" class="statusline" style="color:var(--danger-ink)"></p>
   </div>
   <button id="acct-close" class="linkbtn acct-back">← Back</button>
+</div>
+
+<!-- SP3 file transfer (receive path): live/persisted status list, reached from
+     the settings menu. Populated from transfer:list + transfer:event — see
+     renderer.js's "SP3 file transfer" section. -->
+<div id="transfers-panel" hidden>
+  <div class="acct-wrap">
+    <div class="card">
+      <div class="fleet-head">
+        <div><div class="acct-title">Transfers</div></div>
+        <div class="fleet-head-actions">
+          <button id="transfers-refresh" class="btn btn-ghost" style="padding:7px 12px">Refresh</button>
+        </div>
+      </div>
+      <div id="transfers-list"></div>
+      <p id="transfers-empty" class="fleet-empty" hidden>No transfers yet. Files pushed to you by a peer will show up here.</p>
+    </div>
+    <button id="transfers-close" class="linkbtn acct-back">← Back</button>
+  </div>
+</div>
+
+<!-- SP3 file transfer (receive path): incoming-consent modal. Nothing is
+     written to disk until the user clicks Accept — main's requestReceiveConsent
+     awaits this round-trip (transfer:consent-request -> respondConsent). -->
+<div id="transfer-consent" class="overlay" hidden>
+  <div class="veil"></div>
+  <div class="card">
+    <div class="acct-title">Incoming files</div>
+    <div class="statusline" style="margin-top:0">A peer wants to send you files.</div>
+    <div id="transfer-consent-summary" class="statusline" style="margin-top:2px;color:var(--ink);font-weight:600"></div>
+    <div class="lbl" style="margin-top:12px">Save to</div>
+    <div id="transfer-consent-dest" class="statusline" style="margin-top:0;font-family:var(--mono);word-break:break-all"></div>
+    <div class="lbl" style="margin-top:12px">Contents</div>
+    <div id="transfer-consent-tree" class="xfer-tree-wrap"></div>
+    <div style="display:flex;gap:9px;margin-top:14px">
+      <button id="transfer-consent-accept" class="btn btn-primary" style="flex:1">Accept</button>
+      <button id="transfer-consent-reject" class="btn btn-ghost" style="flex:1">Reject</button>
+    </div>
+  </div>
 </div>
 
 <div class="app">

@@ -484,6 +484,12 @@ function startSignaling(signalingUrl) {
       session.end();
       statusEl.textContent = 'Peer disconnected.';
     },
+    // SP3 (receive path): a peer wants to push files at this host. Does NOT
+    // consume the control pairing/consent state above — a transfer can run
+    // alongside (or without) an active remote-control session. main attaches a
+    // dedicated transfer worker by sessionId and round-trips consent itself
+    // (see onTransferConsent below); nothing here blocks on that.
+    [MSG.TRANSFER_REQUEST]: (m) => { window.farsightIpc.transferIncoming({ sessionId: m.sessionId }); },
   }, { password: sessionPassword, version: appVersion, acceptsLinked: true });
 }
 
@@ -603,6 +609,169 @@ document.getElementById('acct-signout').addEventListener('click', async () => { 
 acctSigninBtn.addEventListener('click', doSignIn);
 document.getElementById('acct-register').addEventListener('click', doRegister);
 document.getElementById('acct-forgot').addEventListener('click', doForgot);
+
+// ── SP3 file transfer (receive path) ─────────────────────────────────────────
+// A peer pushes files at this host over a DEDICATED transfer-worker connection
+// (main.js's getTransferService/createTransferWorker), independent of the
+// active remote-control peer (peer.js). The MSG.TRANSFER_REQUEST handler above
+// tells main to attach; main asks THIS renderer for consent (manifest preview)
+// before anything touches disk, and pushes live progress via transfer:event.
+// Functional/plain styling for this phase — flagged as a follow-up polish item.
+const transfersPanelEl = document.getElementById('transfers-panel');
+const transfersListEl = document.getElementById('transfers-list');
+const transfersEmptyEl = document.getElementById('transfers-empty');
+const consentModalEl = document.getElementById('transfer-consent');
+const consentSummaryEl = document.getElementById('transfer-consent-summary');
+const consentDestEl = document.getElementById('transfer-consent-dest');
+const consentTreeEl = document.getElementById('transfer-consent-tree');
+
+function fmtBytes(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n)) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = n, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  return `${v.toFixed(i === 0 || v >= 10 ? 0 : 1)} ${units[i]}`;
+}
+
+// Build a nested folder/file tree from the manifest's flat, '/'-separated
+// paths (spec §6: entries carry sanitized posix-relative paths — see
+// transfer-manifest.js's sanitizeRelativePath), so the consent prompt can show
+// exactly what a peer wants to write to disk before we write any of it.
+function buildManifestTree(entries) {
+  const root = { dirs: new Map(), files: [] };
+  for (const e of entries || []) {
+    const parts = String(e.path || '').split('/').filter(Boolean);
+    const name = parts.pop();
+    if (!name) continue;
+    let node = root;
+    for (const seg of parts) {
+      if (!node.dirs.has(seg)) node.dirs.set(seg, { dirs: new Map(), files: [] });
+      node = node.dirs.get(seg);
+    }
+    node.files.push({ name, size: e.size });
+  }
+  return root;
+}
+function renderManifestTree(node) {
+  const ul = document.createElement('ul');
+  ul.className = 'xfer-tree';
+  for (const [name, child] of node.dirs) {
+    const li = document.createElement('li');
+    li.className = 'xfer-tree-dir';
+    li.textContent = `\u{1F4C1} ${name}`;
+    li.appendChild(renderManifestTree(child));
+    ul.appendChild(li);
+  }
+  for (const f of node.files) {
+    const li = document.createElement('li');
+    li.className = 'xfer-tree-file';
+    li.textContent = `${f.name} — ${fmtBytes(f.size)}`;
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+// main mints a short-lived correlation id per consent prompt (NOT the same as
+// the persisted job's real jobId — see main.js's requestReceiveConsent). Only
+// one prompt is shown at a time; a second offer arriving mid-prompt is a real
+// gap flagged in the report (NEEDS-LIVE-VERIFICATION).
+let pendingConsentId = null;
+window.farsightIpc.onTransferConsent((req) => {
+  if (!req || typeof req.jobId !== 'string' || !req.manifest) return;
+  pendingConsentId = req.jobId;
+  const manifest = req.manifest;
+  const n = manifest.totalFiles ?? (manifest.entries || []).length;
+  consentSummaryEl.textContent = `${n} file${n === 1 ? '' : 's'} · ${fmtBytes(manifest.totalBytes ?? 0)}`;
+  consentDestEl.textContent = req.destDir || '';
+  consentTreeEl.replaceChildren();
+  consentTreeEl.appendChild(renderManifestTree(buildManifestTree(manifest.entries)));
+  consentModalEl.hidden = false;
+});
+function respondToTransferConsent(accept) {
+  if (!pendingConsentId) return;
+  window.farsightIpc.respondConsent({ jobId: pendingConsentId, accept });
+  pendingConsentId = null;
+  consentModalEl.hidden = true;
+}
+document.getElementById('transfer-consent-accept').addEventListener('click', () => respondToTransferConsent(true));
+document.getElementById('transfer-consent-reject').addEventListener('click', () => respondToTransferConsent(false));
+
+// Compact transfers status list: jobId -> { jobId, manifest, state, progress,
+// createdAt }, seeded from transfer:list (persisted jobs-store records) and
+// kept live via transfer:event while a receive is actively running.
+const transferJobs = new Map();
+function transferJobRow(j) {
+  const row = document.createElement('div');
+  row.className = 'host-row xfer-row';
+  const main = document.createElement('div');
+  main.className = 'host-main';
+  const title = document.createElement('div');
+  title.className = 'host-name';
+  const n = (j.manifest && (j.manifest.totalFiles ?? (j.manifest.entries || []).length)) || 0;
+  title.textContent = `↓ Incoming — ${n} file${n === 1 ? '' : 's'}`;
+  const barWrap = document.createElement('div');
+  barWrap.className = 'xfer-bar';
+  const barFill = document.createElement('div');
+  barFill.className = 'xfer-bar-fill';
+  const fraction = (j.progress && typeof j.progress.fraction === 'number') ? j.progress.fraction : (j.state === 'done' ? 1 : 0);
+  barFill.style.width = `${Math.round(Math.min(1, Math.max(0, fraction)) * 100)}%`;
+  barWrap.appendChild(barFill);
+  const meta = document.createElement('div');
+  meta.className = 'host-meta';
+  meta.textContent = j.state || 'active';
+  main.append(title, barWrap, meta);
+  row.appendChild(main);
+  return row;
+}
+function renderTransfersList() {
+  const jobs = [...transferJobs.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  transfersListEl.replaceChildren();
+  transfersEmptyEl.hidden = jobs.length > 0;
+  for (const j of jobs) transfersListEl.appendChild(transferJobRow(j));
+}
+async function refreshTransfersList() {
+  let records = [];
+  try { records = await window.farsightIpc.transferList(); } catch { /* ignore — panel just stays empty */ }
+  for (const r of records) {
+    const existing = transferJobs.get(r.jobId) || {};
+    transferJobs.set(r.jobId, {
+      ...existing,
+      jobId: r.jobId,
+      manifest: existing.manifest || r.manifest,
+      state: existing.state === 'active' ? existing.state : (r.jobState || existing.state),
+      createdAt: r.createdAt || existing.createdAt,
+    });
+  }
+  renderTransfersList();
+}
+// Live progress push from main (transfer-service's onEvent, forwarded per
+// transfer-orchestrator's { type:'file-done'|'file-failed', fileId, progress }
+// shape plus jobId/direction). There is no distinct terminal event yet, so
+// completion is inferred from progress.fraction reaching 1, same caveat as the
+// controller's send-side panel — refreshTransfersList()'s jobState read is the
+// fallback source of truth for terminal states.
+window.farsightIpc.onTransferEvent((ev) => {
+  if (!ev || typeof ev.jobId !== 'string') return;
+  const existing = transferJobs.get(ev.jobId) || { jobId: ev.jobId, createdAt: Date.now() };
+  if (ev.progress) existing.progress = ev.progress;
+  existing.state = (existing.progress && existing.progress.fraction >= 1) ? 'done' : 'active';
+  transferJobs.set(ev.jobId, existing);
+  if (!transfersPanelEl.hidden) renderTransfersList();
+});
+function openTransfersPanel() {
+  appEl.style.display = 'none';
+  setupEl.hidden = true;
+  accountEl.hidden = true;
+  transfersPanelEl.hidden = false;
+  refreshTransfersList();
+}
+function closeTransfersPanel() {
+  transfersPanelEl.hidden = true;
+  appEl.style.display = 'block';
+}
+document.getElementById('menu-transfers').addEventListener('click', () => { settingsMenu.classList.remove('open'); openTransfersPanel(); });
+document.getElementById('transfers-close').addEventListener('click', closeTransfersPanel);
+document.getElementById('transfers-refresh').addEventListener('click', refreshTransfersList);
 
 // Paint the subtle build-version label in the bottom-left corner.
 window.farsightIpc.getAppVersion().then((v) => {
