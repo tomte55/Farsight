@@ -28,6 +28,10 @@ const video = document.getElementById('video');
 const setupEl = document.getElementById('setup');
 const urlInput = document.getElementById('signaling-url');
 const setupError = document.getElementById('setup-error');
+// SP3 file transfer panels (declared here so openFleet()/menu handlers below
+// can reference them; wired up at the bottom of this file).
+const sendPanelEl = document.getElementById('send-panel');
+const transfersPanelEl = document.getElementById('transfers-panel');
 let signalingUrl = null;
 let peer = null, signal = null;
 const overlayEl = document.getElementById('overlay');
@@ -251,6 +255,8 @@ document.getElementById('menu-change-server').addEventListener('click', async ()
   urlInput.value = (await window.farsightIpc.getSignalingUrl()) || '';
   connectEl.style.display = 'none';
   setupEl.hidden = false;
+  sendPanelEl.hidden = true;
+  transfersPanelEl.hidden = true;
 });
 refreshSignalingUrl();
 
@@ -592,6 +598,8 @@ function openFleet() {
   connectEl.style.display = 'none';
   setupEl.hidden = true;
   accountEl.hidden = false;
+  sendPanelEl.hidden = true;
+  transfersPanelEl.hidden = true;
   refreshAccountView();
 }
 function closeFleet() {
@@ -779,3 +787,181 @@ for (const el of [acctPassword, acctCode, acctEmail]) {
 // reporting presence immediately (heartbeat), without waiting for the fleet panel
 // to be opened. No stored token → no network call; status() just returns signed-out.
 window.farsightIpc.accountStatus();
+
+// ── SP3 file transfer (send path) ───────────────────────────────────────────
+// A "Send…" entry point (dial a peer by ID+password, pick files/folders, send)
+// and a "Transfers" panel (live progress + best-effort cancel), both reached
+// from the settings menu. This uses a DEDICATED transfer-worker connection
+// (main.js's getTransferService/createTransferWorker) — separate from the
+// active remote-control session's peer, so a send doesn't require (or
+// interfere with) an open control session. Receiving isn't wired into this UI
+// yet (main.js's consent always declines) — send-only for this phase.
+const sendHostId = document.getElementById('send-host-id');
+const sendHostPw = document.getElementById('send-host-pw');
+const sendBtn = document.getElementById('send-choose-btn');
+const sendStatusEl = document.getElementById('send-status');
+const transfersListEl = document.getElementById('transfers-list');
+const transfersEmptyEl = document.getElementById('transfers-empty');
+
+function hideTransferPanels() {
+  sendPanelEl.hidden = true;
+  transfersPanelEl.hidden = true;
+}
+function backToConnectFromTransfers() {
+  hideTransferPanels();
+  connectEl.style.display = '';
+}
+function openSendPanel() {
+  connectEl.style.display = 'none';
+  setupEl.hidden = true;
+  accountEl.hidden = true;
+  transfersPanelEl.hidden = true;
+  sendPanelEl.hidden = false;
+  sendStatusEl.textContent = '';
+}
+function openTransfersPanel() {
+  connectEl.style.display = 'none';
+  setupEl.hidden = true;
+  accountEl.hidden = true;
+  sendPanelEl.hidden = true;
+  transfersPanelEl.hidden = false;
+  refreshTransfersList();
+}
+
+// jobId -> { jobId, direction, target, manifest, progress, state, createdAt }.
+// Seeded from transferList() (persisted jobs-store records) and kept live via
+// onTransferEvent while this session's own sends are running. NOTE: the
+// jobs-store record's `peer` field is always `{}` (transfer-service.js doesn't
+// persist the target id/password), so a job loaded fresh from disk (e.g. after
+// an app restart) shows "Unknown peer" until this session sends to it again —
+// flagged in the report as a real gap, not something this UI phase can fix
+// without a transfer-service/jobs-store schema change.
+const transferJobs = new Map();
+
+function fmtCount(manifest) {
+  if (!manifest) return '';
+  const n = manifest.totalFiles ?? 0;
+  return `${n} file${n === 1 ? '' : 's'}`;
+}
+
+function jobRow(j) {
+  const row = document.createElement('div');
+  row.className = 'host-row xfer-row';
+
+  const main = document.createElement('div');
+  main.className = 'host-main';
+
+  const title = document.createElement('div');
+  title.className = 'host-name';
+  const arrow = j.direction === 'recv' ? '↓' : '↑';
+  title.textContent = `${arrow} ${(j.target && j.target.id) || 'Unknown peer'} — ${fmtCount(j.manifest)}`;
+
+  const barWrap = document.createElement('div');
+  barWrap.className = 'xfer-bar';
+  const barFill = document.createElement('div');
+  barFill.className = 'xfer-bar-fill';
+  const fraction = (j.progress && typeof j.progress.fraction === 'number') ? j.progress.fraction : (j.state === 'done' ? 1 : 0);
+  barFill.style.width = `${Math.round(Math.min(1, Math.max(0, fraction)) * 100)}%`;
+  barWrap.appendChild(barFill);
+
+  const meta = document.createElement('div');
+  meta.className = 'host-meta';
+  meta.textContent = j.state || 'active';
+
+  main.append(title, barWrap, meta);
+
+  const right = document.createElement('div');
+  right.className = 'host-right';
+  const active = !['done', 'canceled', 'error'].includes(j.state);
+  if (active) {
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-ghost';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.onclick = async () => {
+      cancelBtn.disabled = true;
+      try { await window.farsightIpc.transferCancel(j.jobId); } catch { /* best effort */ }
+      j.state = 'canceled';
+      renderTransfers();
+    };
+    right.appendChild(cancelBtn);
+  }
+
+  row.append(main, right);
+  return row;
+}
+
+function renderTransfers() {
+  const jobs = [...transferJobs.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  transfersListEl.replaceChildren();
+  transfersEmptyEl.hidden = jobs.length > 0;
+  for (const j of jobs) transfersListEl.appendChild(jobRow(j));
+}
+
+async function refreshTransfersList() {
+  let records = [];
+  try { records = await window.farsightIpc.transferList(); } catch { /* ignore — panel just stays empty */ }
+  for (const r of records) {
+    const existing = transferJobs.get(r.jobId) || {};
+    transferJobs.set(r.jobId, {
+      ...existing,
+      jobId: r.jobId,
+      direction: r.dir === 'recv' ? 'recv' : 'send',
+      manifest: existing.manifest || r.manifest,
+      // Prefer this session's live-tracked state over the persisted one while
+      // a send is actively running; otherwise trust the store's jobState.
+      state: existing.state === 'active' ? existing.state : (r.jobState || existing.state),
+      createdAt: r.createdAt || existing.createdAt,
+    });
+  }
+  renderTransfers();
+}
+
+// Live progress push from main (transfer-service's onEvent, forwarded per
+// transfer-orchestrator's { type:'file-sent', fileId, progress } shape plus
+// jobId/direction). There is currently no distinct "job done"/"job failed"
+// event — completion is inferred here from progress.fraction reaching 1 (see
+// the NEEDS-LIVE-VERIFICATION note in the report); refreshTransfersList()'s
+// jobState read is the fallback source of truth for terminal states.
+window.farsightIpc.onTransferEvent((ev) => {
+  if (!ev || typeof ev.jobId !== 'string') return;
+  const existing = transferJobs.get(ev.jobId) || { jobId: ev.jobId, direction: ev.direction, createdAt: Date.now() };
+  existing.direction = ev.direction || existing.direction;
+  if (ev.progress) existing.progress = ev.progress;
+  existing.state = (existing.progress && existing.progress.fraction >= 1) ? 'done' : 'active';
+  transferJobs.set(ev.jobId, existing);
+  if (!transfersPanelEl.hidden) renderTransfers();
+});
+
+async function doSend() {
+  const targetId = normalizeHostId(sendHostId.value);
+  const candidates = passwordCandidates(sendHostPw.value);
+  if (!isValidHostId(targetId)) { sendStatusEl.textContent = 'Invalid ID.'; return; }
+  if (candidates.length === 0) { sendStatusEl.textContent = 'Enter the host password.'; return; }
+  const paths = await window.farsightIpc.transferPickPaths();
+  if (!paths || paths.length === 0) return; // dialog cancelled — leave the form as-is
+  sendBtn.disabled = true;
+  sendStatusEl.textContent = 'Starting…';
+  try {
+    const res = await window.farsightIpc.transferSend({ target: { id: targetId, password: candidates[0] }, paths });
+    if (res && res.jobId) {
+      transferJobs.set(res.jobId, {
+        jobId: res.jobId, direction: 'send', target: { id: targetId },
+        manifest: res.manifest, state: 'active', createdAt: Date.now(),
+      });
+      sendStatusEl.textContent = `Sending to ${targetId}… (see Transfers)`;
+    } else {
+      sendStatusEl.textContent = (res && res.error) || 'Could not start the transfer.';
+    }
+  } catch {
+    sendStatusEl.textContent = 'Could not start the transfer.';
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
+sendBtn.addEventListener('click', doSend);
+
+document.getElementById('menu-send').addEventListener('click', () => { settingsMenu.classList.remove('open'); openSendPanel(); });
+document.getElementById('menu-transfers').addEventListener('click', () => { settingsMenu.classList.remove('open'); openTransfersPanel(); });
+document.getElementById('send-close').addEventListener('click', backToConnectFromTransfers);
+document.getElementById('transfers-close').addEventListener('click', backToConnectFromTransfers);
+document.getElementById('transfers-refresh').addEventListener('click', refreshTransfersList);

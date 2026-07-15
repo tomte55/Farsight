@@ -83,6 +83,18 @@
   .host-row.online .host-status { color: #9ccaff; }
   .host-badge { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: rgba(240,180,41,.14); color: #f0b429; text-transform: uppercase; letter-spacing: .06em; }
   .fleet-empty { text-align: center; color: var(--sub); font-size: 12.5px; padding: 30px 12px; line-height: 1.65; }
+
+  /* SP3 file transfer: Send panel + Transfers panel (send path only for now —
+     see main.js). Mirror #account's full-height centered panel, hidden by
+     default via the [hidden] attribute out-specifying the display rule. */
+  #send-panel, #transfers-panel { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+  #send-panel[hidden], #transfers-panel[hidden] { display: none; }
+  #transfers-panel .acct-wrap { width: 480px; }
+  .xfer-row { flex-direction: column; align-items: stretch; gap: 6px; }
+  .xfer-row .host-main { display: flex; flex-direction: column; gap: 5px; }
+  .xfer-row .host-right { justify-content: flex-end; }
+  .xfer-bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+  .xfer-bar-fill { height: 100%; background: linear-gradient(135deg, var(--acc), var(--acc2)); transition: width .2s ease; }
 </style>
 
 <div id="version-tag" aria-hidden="true"></div>
@@ -90,6 +102,8 @@
 <button id="settings-cog" class="cog" title="Settings" aria-label="Settings">⚙</button>
 <div id="settings-menu" class="menu">
   <button id="menu-fleet">My fleet…</button>
+  <button id="menu-send">Send files…</button>
+  <button id="menu-transfers">Transfers…</button>
   <button id="menu-change-server">Change signaling server…</button>
   <button id="menu-check-updates">Check for updates</button>
   <button id="menu-open-logs">Open logs folder</button>
@@ -163,6 +177,44 @@
       <p id="fleet-error" class="statusline" style="color:var(--danger-ink)"></p>
     </div>
     <button id="acct-close" class="linkbtn acct-back">← Back to connect</button>
+  </div>
+</div>
+
+<!-- SP3 file transfer: send files/folders to another Farsight device by ID +
+     password, over a DEDICATED transfer-worker connection (not the active
+     control session — see transfer-worker.js / main.js's getTransferService). -->
+<div id="send-panel" hidden>
+  <div class="acct-wrap">
+    <div class="card">
+      <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
+      <div class="acct-title">Send files</div>
+      <div class="statusline" style="margin-top:0;margin-bottom:16px">Send files or a folder directly to another Farsight device.</div>
+      <div class="lbl">Host ID</div>
+      <input id="send-host-id" class="input" placeholder="947 188 129" />
+      <div class="lbl">Password</div>
+      <input id="send-host-pw" class="input" placeholder="Password" />
+      <button id="send-choose-btn" class="btn btn-primary" style="width:100%;margin-top:4px">Send…</button>
+      <p id="send-status" class="statusline"></p>
+    </div>
+    <button id="send-close" class="linkbtn acct-back">← Back to connect</button>
+  </div>
+</div>
+
+<div id="transfers-panel" hidden>
+  <div class="acct-wrap">
+    <div class="card">
+      <div class="fleet-head">
+        <div>
+          <div class="acct-title">Transfers</div>
+        </div>
+        <div class="fleet-head-actions">
+          <button id="transfers-refresh" class="btn btn-ghost" style="padding:7px 12px">Refresh</button>
+        </div>
+      </div>
+      <div id="transfers-list"></div>
+      <p id="transfers-empty" class="fleet-empty" hidden>No transfers yet. Use “Send files…” to start one.</p>
+    </div>
+    <button id="transfers-close" class="linkbtn acct-back">← Back to connect</button>
   </div>
 </div>
 
