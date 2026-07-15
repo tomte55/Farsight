@@ -15,6 +15,7 @@ export function createHeartbeat({
   session,
   client,
   version,
+  getSignalingId,
   intervalMs = 30_000,
   setInterval: setI,
   clearInterval: clearI,
@@ -31,7 +32,10 @@ export function createHeartbeat({
     try {
       const token = await session.getAccessToken();
       if (!token) return;
-      await client.heartbeat({ accessToken: token, version });
+      // Connect-from-console rendezvous: report the current signaling id so the
+      // owner's console knows where to dial this device (undefined → omitted).
+      const signalingId = getSignalingId ? getSignalingId() : undefined;
+      await client.heartbeat({ accessToken: token, version, signalingId: signalingId || undefined });
     } catch {
       // swallow — the next tick tries again
     }

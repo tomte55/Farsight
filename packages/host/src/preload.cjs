@@ -42,4 +42,10 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   accountResendVerification: (input) => ipcRenderer.invoke('account:resend-verification', input),
   accountRequestPasswordReset: (input) => ipcRenderer.invoke('account:request-password-reset', input),
   accountFleet: () => ipcRenderer.invoke('account:fleet'),
+  // connect-from-console: E2E device-keypair handshake crypto (runs in main).
+  connAuthPublicKey: () => ipcRenderer.invoke('conn-auth:public-key'),
+  connAuthDeviceId: () => ipcRenderer.invoke('conn-auth:device-id'),
+  connAuthSign: (message) => ipcRenderer.invoke('conn-auth:sign', message),
+  connAuthVerify: (publicKey, message, signature) => ipcRenderer.invoke('conn-auth:verify', publicKey, message, signature),
+  connAuthIsAccountKey: (publicKey) => ipcRenderer.invoke('conn-auth:is-account-key', publicKey),
 });

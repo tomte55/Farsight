@@ -124,6 +124,9 @@ export function createAccountService({
     },
     // This device's public key (for the handshake HELLO/CHALLENGE).
     getPublicKey() { return ensureKeys().publicKey; },
+    // This install's account device id (null before login/resume). Bound into the
+    // handshake transcript so both peers agree on who's who.
+    getDeviceId() { return session.getDeviceId(); },
     // Sign the handshake transcript with this device's private key.
     signTranscript(message) { return signMessage(ensureKeys().privateKey, String(message)); },
     // Verify a peer's transcript signature.

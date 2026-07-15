@@ -43,3 +43,28 @@ describe('host account enrollment wiring', () => {
     }
   });
 });
+
+describe('host connect-from-console wiring (SP2 §4.4)', () => {
+  test('main constructs the account service with a device-key file path', () => {
+    expect(main).toMatch(/deviceKeyFilePath/);
+  });
+
+  test('main publishes the signaling id to the account service on registration', () => {
+    // set-host-id (renderer → main) must feed setSignalingId so the console can
+    // learn where to dial this host (rendezvous).
+    expect(main).toMatch(/set-host-id/);
+    expect(main).toMatch(/setSignalingId/);
+  });
+
+  test('main registers the connect-auth crypto IPC handlers', () => {
+    for (const ch of ['conn-auth:public-key', 'conn-auth:device-id', 'conn-auth:sign', 'conn-auth:verify', 'conn-auth:is-account-key']) {
+      expect(main).toContain(`'${ch}'`);
+    }
+  });
+
+  test('preload exposes the connect-auth bridge', () => {
+    for (const fn of ['connAuthPublicKey', 'connAuthDeviceId', 'connAuthSign', 'connAuthVerify', 'connAuthIsAccountKey']) {
+      expect(preload).toMatch(new RegExp(`\\b${fn}\\b`));
+    }
+  });
+});

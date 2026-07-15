@@ -41,12 +41,20 @@ function getAccountService() {
       safeStorage,
       fs: nodeFs,
       filePath: path.join(app.getPath('userData'), 'account-token.enc'),
+      deviceKeyFilePath: path.join(app.getPath('userData'), 'device-key.enc'),
       fetch: globalThis.fetch,
       version: app.getVersion(),
     });
   }
   return accountService;
 }
+// Connect-from-console (SP2 §4.4): main-only device-keypair crypto for the E2E
+// handshake, bridged to the renderer that drives the WebRTC 'auth' channel.
+ipcMain.handle('conn-auth:public-key', () => getAccountService().getPublicKey());
+ipcMain.handle('conn-auth:device-id', () => getAccountService().getDeviceId());
+ipcMain.handle('conn-auth:sign', (_e, message) => getAccountService().signTranscript(message));
+ipcMain.handle('conn-auth:verify', (_e, publicKey, message, signature) => getAccountService().verifyTranscript(publicKey, message, signature));
+ipcMain.handle('conn-auth:is-account-key', (_e, publicKey) => getAccountService().isAccountPublicKey(publicKey));
 ipcMain.handle('account:status', () => getAccountService().status());
 ipcMain.handle('account:login', (_e, input) => getAccountService().login({ deviceName: os.hostname(), ...input }));
 ipcMain.handle('account:logout', () => getAccountService().logout());
@@ -160,7 +168,7 @@ ipcMain.on('request-attention', () => {
 });
 
 // The renderer reports its registered id so the tray can display it.
-ipcMain.on('set-host-id', (_e, id) => { hostId = String(id || ''); log?.child('session').info('host id registered'); refreshTrayMenu(); });
+ipcMain.on('set-host-id', (_e, id) => { hostId = String(id || ''); getAccountService().setSignalingId(hostId); log?.child('session').info('host id registered'); refreshTrayMenu(); });
 
 // Provide the primary screen source id to the renderer on request.
 ipcMain.handle('get-screen-source', async () => {

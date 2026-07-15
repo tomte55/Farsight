@@ -38,6 +38,17 @@ describe('createHeartbeat', () => {
     expect(sched.setInterval).toHaveBeenCalledWith(expect.any(Function), 30_000);
   });
 
+  test('includes the current signalingId from the injected getter (rendezvous)', async () => {
+    const session = signedInSession('access-1');
+    const client = { heartbeat: vi.fn().mockResolvedValue({ ok: true, status: 204 }) };
+    const sched = fakeScheduler();
+    const hb = createHeartbeat({ session, client, version: '1.7.0', getSignalingId: () => '456789123', setInterval: sched.setInterval, clearInterval: sched.clearInterval });
+
+    await hb.beat();
+
+    expect(client.heartbeat).toHaveBeenCalledWith({ accessToken: 'access-1', version: '1.7.0', signalingId: '456789123' });
+  });
+
   test('each scheduled tick sends another heartbeat', async () => {
     const session = signedInSession('access-1');
     const client = { heartbeat: vi.fn().mockResolvedValue({ ok: true, status: 204 }) };
