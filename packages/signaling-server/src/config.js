@@ -15,5 +15,7 @@ export function loadConfig(env = process.env) {
     msgPerSec: Number(env.MSG_PER_SEC ?? 30),
     // L-1: per-source-IP CONNECT budget, to blunt the host-enumeration oracle.
     connectBurst: Number(env.CONNECT_BURST ?? 30),
+    // SP3 (spec §4.1): sweep a transfer session whose target never attaches.
+    sessionTimeoutMs: Number(env.SESSION_TIMEOUT_MS ?? 15000),
   };
 }

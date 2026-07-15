@@ -163,9 +163,17 @@ export function createSignalingServer({ port, config } = {}) {
             limiter.reset(key);
             let sessionId;
             do { sessionId = generateHostId(); } while (sessions.has(sessionId));
-            sessions.set(sessionId, { a: socket, b: null, targetId: msg.targetId });
+            const sess = { a: socket, b: null, targetId: msg.targetId, timer: null };
+            sessions.set(sessionId, sess);
             socket.farsight.transferSessionId = sessionId;
             clearIdle(); // the initiator is now settled into a session
+            sess.timer = setTimeout(() => {
+              if (sessions.get(sessionId) === sess && !sess.b) {
+                sessions.delete(sessionId);
+                send(socket, MSG.ERROR, { reason: 'transfer_timeout' });
+              }
+            }, cfg.sessionTimeoutMs ?? 15000);
+            if (sess.timer.unref) sess.timer.unref();
             send(target, MSG.TRANSFER_REQUEST, {
               sessionId,
               peerVersion: socket.farsight.version || undefined,
@@ -199,6 +207,7 @@ export function createSignalingServer({ port, config } = {}) {
           // unguessable sessionId (delivered only to the target via TRANSFER_REQUEST).
           const sess = sessions.get(msg.sessionId);
           if (!sess || sess.b) { send(socket, MSG.ERROR, { reason: 'no_session' }); break; }
+          if (sess.timer) { clearTimeout(sess.timer); sess.timer = null; }
           socket.farsight.version = typeof msg.version === 'string' ? msg.version : null;
           sess.b = socket;
           socket.farsight.transferSessionId = msg.sessionId;
@@ -242,6 +251,11 @@ export function createSignalingServer({ port, config } = {}) {
       limits.removeConn(ip);
       if (socket.farsight.registered) limits.removeReg(ip);
       if (socket.farsight.id) { log.event('disconnect', { id: socket.farsight.id }); registry.remove(socket.farsight.id); }
+      const sid = socket.farsight.transferSessionId;
+      if (sid) {
+        const sess = sessions.get(sid);
+        if (sess) { if (sess.timer) clearTimeout(sess.timer); sessions.delete(sid); }
+      }
       const peer = socket.farsight.peerSocket;
       if (peer) {
         send(peer, MSG.PEER_DISCONNECTED, {});

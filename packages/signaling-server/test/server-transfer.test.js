@@ -10,13 +10,13 @@ afterEach(async () => { if (srv) await srv.close(); });
 const cfg = (over) => ({ maxAttempts: 5, windowMs: 1000, turnSecret: '', turnTtlSeconds: 1, turnUri: '', ...over });
 
 test('CONNECT kind:transfer notifies the target with a sessionId', async () => {
-  srv = createSignalingServer({ port: 8191, config: cfg({ port: 8191 }) });
-  const host = await open('ws://127.0.0.1:8191');
+  srv = createSignalingServer({ port: 8281, config: cfg({ port: 8281 }) });
+  const host = await open('ws://127.0.0.1:8281');
   const hostRead = reader(host);
   host.send(JSON.stringify({ type: MSG.REGISTER, password: 'abcd-efgh-jkmn' }));
   const reg = await hostRead();
 
-  const sender = await open('ws://127.0.0.1:8191');
+  const sender = await open('ws://127.0.0.1:8281');
   sender.send(JSON.stringify({ type: MSG.CONNECT, targetId: reg.id, password: 'abcd-efgh-jkmn', kind: 'transfer' }));
 
   const req = await hostRead();
@@ -28,20 +28,20 @@ test('CONNECT kind:transfer notifies the target with a sessionId', async () => {
 });
 
 test('a transfer request coexists with an active control pairing (not busy)', async () => {
-  srv = createSignalingServer({ port: 8192, config: cfg({ port: 8192 }) });
-  const host = await open('ws://127.0.0.1:8192');
+  srv = createSignalingServer({ port: 8282, config: cfg({ port: 8282 }) });
+  const host = await open('ws://127.0.0.1:8282');
   const hostRead = reader(host);
   host.send(JSON.stringify({ type: MSG.REGISTER, password: 'pw' }));
   const reg = await hostRead();
 
-  const ctrl = await open('ws://127.0.0.1:8192');
+  const ctrl = await open('ws://127.0.0.1:8282');
   const ctrlRead = reader(ctrl);
   ctrl.send(JSON.stringify({ type: MSG.CONNECT, targetId: reg.id, password: 'pw' }));
   expect((await ctrlRead()).type).toBe(MSG.ICE_SERVERS);
   expect((await hostRead()).type).toBe(MSG.ICE_SERVERS);
   expect((await hostRead()).type).toBe(MSG.CONNECT);
 
-  const sender = await open('ws://127.0.0.1:8192');
+  const sender = await open('ws://127.0.0.1:8282');
   sender.send(JSON.stringify({ type: MSG.CONNECT, targetId: reg.id, password: 'pw', kind: 'transfer' }));
   expect((await hostRead()).type).toBe(MSG.TRANSFER_REQUEST);
 
@@ -49,13 +49,13 @@ test('a transfer request coexists with an active control pairing (not busy)', as
 });
 
 test('a transfer CONNECT with a bad password is rejected and opens no session', async () => {
-  srv = createSignalingServer({ port: 8195, config: cfg({ port: 8195 }) });
-  const host = await open('ws://127.0.0.1:8195');
+  srv = createSignalingServer({ port: 8283, config: cfg({ port: 8283 }) });
+  const host = await open('ws://127.0.0.1:8283');
   const hostRead = reader(host);
   host.send(JSON.stringify({ type: MSG.REGISTER, password: 'right' }));
   const reg = await hostRead();
 
-  const sender = await open('ws://127.0.0.1:8195');
+  const sender = await open('ws://127.0.0.1:8283');
   const senderRead = reader(sender);
   sender.send(JSON.stringify({ type: MSG.CONNECT, targetId: reg.id, password: 'wrong', kind: 'transfer' }));
   expect((await senderRead()).reason).toBe('bad_password');
@@ -64,20 +64,20 @@ test('a transfer CONNECT with a bad password is rejected and opens no session', 
 });
 
 test('ATTACH pairs the transfer sockets, both get ICE_SERVERS, and OFFER relays', async () => {
-  srv = createSignalingServer({ port: 8193, config: cfg({ port: 8193 }) });
-  const host = await open('ws://127.0.0.1:8193');
+  srv = createSignalingServer({ port: 8284, config: cfg({ port: 8284 }) });
+  const host = await open('ws://127.0.0.1:8284');
   const hostRead = reader(host);
   host.send(JSON.stringify({ type: MSG.REGISTER, password: 'pw' }));
   const reg = await hostRead();
 
-  const sender = await open('ws://127.0.0.1:8193');
+  const sender = await open('ws://127.0.0.1:8284');
   const senderRead = reader(sender);
   sender.send(JSON.stringify({ type: MSG.CONNECT, targetId: reg.id, password: 'pw', kind: 'transfer' }));
   const req = await hostRead();
   expect(req.type).toBe(MSG.TRANSFER_REQUEST);
 
   // The host opens its transfer worker socket and attaches to the session.
-  const worker = await open('ws://127.0.0.1:8193');
+  const worker = await open('ws://127.0.0.1:8284');
   const workerRead = reader(worker);
   worker.send(JSON.stringify({ type: MSG.ATTACH, sessionId: req.sessionId }));
 
@@ -94,10 +94,47 @@ test('ATTACH pairs the transfer sockets, both get ICE_SERVERS, and OFFER relays'
 });
 
 test('ATTACH to an unknown session is rejected', async () => {
-  srv = createSignalingServer({ port: 8194, config: cfg({ port: 8194 }) });
-  const w = await open('ws://127.0.0.1:8194');
+  srv = createSignalingServer({ port: 8285, config: cfg({ port: 8285 }) });
+  const w = await open('ws://127.0.0.1:8285');
   const wRead = reader(w);
   w.send(JSON.stringify({ type: MSG.ATTACH, sessionId: 'nope' }));
   expect((await wRead()).reason).toBe('no_session');
   w.close();
+});
+
+test('an unattached session times out and errors the initiator', async () => {
+  srv = createSignalingServer({ port: 8286, config: cfg({ port: 8286, sessionTimeoutMs: 80 }) });
+  const host = await open('ws://127.0.0.1:8286');
+  const hostRead = reader(host);
+  host.send(JSON.stringify({ type: MSG.REGISTER, password: 'pw' }));
+  const reg = await hostRead();
+
+  const sender = await open('ws://127.0.0.1:8286');
+  const senderRead = reader(sender);
+  sender.send(JSON.stringify({ type: MSG.CONNECT, targetId: reg.id, password: 'pw', kind: 'transfer' }));
+  expect((await hostRead()).type).toBe(MSG.TRANSFER_REQUEST);
+  expect((await senderRead()).reason).toBe('transfer_timeout');
+
+  host.close(); sender.close();
+});
+
+test('if the initiator drops before attach, the session is gone', async () => {
+  srv = createSignalingServer({ port: 8287, config: cfg({ port: 8287 }) });
+  const host = await open('ws://127.0.0.1:8287');
+  const hostRead = reader(host);
+  host.send(JSON.stringify({ type: MSG.REGISTER, password: 'pw' }));
+  const reg = await hostRead();
+
+  const sender = await open('ws://127.0.0.1:8287');
+  sender.send(JSON.stringify({ type: MSG.CONNECT, targetId: reg.id, password: 'pw', kind: 'transfer' }));
+  const req = await hostRead();
+  sender.close();
+  await new Promise((r) => { const t = setTimeout(r, 40); if (t.unref) t.unref(); });
+
+  const worker = await open('ws://127.0.0.1:8287');
+  const workerRead = reader(worker);
+  worker.send(JSON.stringify({ type: MSG.ATTACH, sessionId: req.sessionId }));
+  expect((await workerRead()).reason).toBe('no_session');
+
+  host.close(); worker.close();
 });
