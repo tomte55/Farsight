@@ -13,6 +13,13 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    # The account-server package pulls @prisma/client, whose postinstall runs
+    # `prisma generate` and downloads a query engine. This release only builds the
+    # two Electron installers (which never use Prisma), so skip that generate — it
+    # would otherwise slow/flake the build on a binaries.prisma.sh download it
+    # doesn't need. (Native builds like argon2 still run; only Prisma's is skipped.)
+    env:
+      PRISMA_SKIP_POSTINSTALL_GENERATE: '1'
     steps:
       - uses: actions/checkout@v7
         with:
