@@ -11,6 +11,16 @@ import {
 } from '@farsight/shared/file-transfer';
 import { formatHostId } from '@farsight/shared/credentials-format';
 import { createIdleRotator } from '@farsight/shared/idle-rotator';
+import { runConnectionAuth } from '@farsight/shared/connection-auth';
+
+// A fresh base64 nonce for the connect-from-console handshake (Web Crypto in the
+// renderer). 16 bytes → ample against replay within a single handshake.
+function authNonce() {
+  const b = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(b);
+  let s = ''; for (const x of b) s += String.fromCharCode(x);
+  return btoa(s);
+}
 
 // Bound on receiveState.chunks.length: legit transfers use CHUNK_SIZE chunks
 // (~6400 for a 100 MB file), so this bounds the array against a peer sending
@@ -90,6 +100,36 @@ async function getStreamForDisplay(display) {
 let remoteReady = false;
 let pendingOffer = null;
 const pendingCandidates = [];
+
+// Connect-from-console (SP2 §4.4): when the server flags a CONNECT as `linked`
+// (password-free, from one of the owner's own account devices), the controller is
+// authenticated end-to-end over the 'auth' data channel with device keypairs.
+// Until that handshake passes, input injection is BLOCKED (peerAuthed gates it),
+// so a linked peer can never drive the machine without proving it's the owner's
+// device. The classic id+password path leaves linkedConnect false and is untouched.
+let linkedConnect = false;
+let peerAuthed = false;
+
+async function runHostAuth(channel) {
+  try {
+    const fp = peer.getFingerprints();
+    await runConnectionAuth({
+      role: 'host', channel,
+      deviceId: await window.farsightIpc.connAuthDeviceId(),
+      publicKey: await window.farsightIpc.connAuthPublicKey(),
+      localFingerprint: fp.local, remoteFingerprint: fp.remote,
+      sign: (m) => window.farsightIpc.connAuthSign(m),
+      verify: (pk, m, s) => window.farsightIpc.connAuthVerify(pk, m, s),
+      isAccountKey: (pk) => window.farsightIpc.connAuthIsAccountKey(pk),
+      nonce: authNonce, timeoutMs: 15000,
+    });
+    peerAuthed = true; // control unlocked
+  } catch {
+    // Failed device verification (unknown key / bad signature / fingerprint
+    // mismatch / timeout) → block and end. Nothing was ever injectable.
+    endSessionByHost('auth_failed', 'Connection blocked — the controller could not be verified as your device.');
+  }
+}
 
 // Clipboard sync: while the session is active, poll the local OS clipboard and
 // forward changes to the peer over the control channel; write received peer
@@ -255,6 +295,8 @@ function teardown() {
   remoteReady = false;
   pendingOffer = null;
   pendingCandidates.length = 0;
+  linkedConnect = false;
+  peerAuthed = false;
 }
 
 // End an active session that the HOST initiated (Disconnect button, panic,
@@ -323,9 +365,15 @@ async function startSession() {
     // Input injection runs in the main process. Only forward while the session
     // is active — a second layer over the consent gate. Each event counts as
     // activity so an actively-used session doesn't hit the idle timeout.
-    onInput: (evt) => { if (session.isActive()) { window.farsightIpc.injectInput(evt); if (timers) timers.activity(); } },
+    // Input is gated on the session being active AND — for a linked connect —
+    // the device-keypair handshake having passed. A linked peer cannot inject
+    // until peerAuthed flips true.
+    onInput: (evt) => { if (session.isActive() && (!linkedConnect || peerAuthed)) { window.farsightIpc.injectInput(evt); if (timers) timers.activity(); } },
     onControl: (evt) => onControl(evt),
     onFileMessage: (data) => handleFileMessage(data),
+    // Only authenticate on the linked path; on the password path the auth channel
+    // is unused (the controller never starts a handshake) and is ignored.
+    onAuthChannel: (channel) => { if (linkedConnect) runHostAuth(channel); },
   });
   // Auto-end the session on inactivity (idle) or after a hard cap (absolute).
   timers = createSessionTimers({
@@ -386,7 +434,17 @@ function startSignaling(signalingUrl) {
     [MSG.ICE_SERVERS]: (m) => { iceServers = m.iceServers || []; },
     // SP1: the server relays the controller's app version on CONNECT — surface
     // it so the consent prompt shows who (and which version) is asking.
-    [MSG.CONNECT]: (m) => { session.requestConsent(); window.farsightIpc.requestAttention(); statusEl.textContent = m && typeof m.peerVersion === 'string' ? `A controller (v${m.peerVersion}) wants to connect.` : 'A controller wants to connect.'; },
+    [MSG.CONNECT]: (m) => {
+      // A `linked` connect is a password-free connect from one of the owner's own
+      // account devices; it is authenticated end-to-end after consent (input stays
+      // blocked until the keypair handshake passes — see runHostAuth).
+      linkedConnect = !!(m && m.linked);
+      peerAuthed = false;
+      session.requestConsent();
+      window.farsightIpc.requestAttention();
+      const who = linkedConnect ? 'One of your linked devices' : 'A controller';
+      statusEl.textContent = m && typeof m.peerVersion === 'string' ? `${who} (v${m.peerVersion}) wants to connect.` : `${who} wants to connect.`;
+    },
     [MSG.OFFER]: async (m) => {
       if (peer) { await peer.handleOffer(m.sdp); remoteReady = true; flushCandidates(); }
       else { pendingOffer = m.sdp; }

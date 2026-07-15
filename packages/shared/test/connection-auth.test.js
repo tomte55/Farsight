@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { createConnectionAuth } from '../src/connection-auth.js';
+import { createConnectionAuth, runConnectionAuth } from '../src/connection-auth.js';
+
+// A pair of in-memory channels that deliver to each other (mirrors two ends of an
+// RTCDataChannel). readyState 'open' so the pump starts immediately.
+function channelPair() {
+  const a = { readyState: 'open', onmessage: null, send: (m) => queueMicrotask(() => b.onmessage && b.onmessage({ data: m })) };
+  const b = { readyState: 'open', onmessage: null, send: (m) => queueMicrotask(() => a.onmessage && a.onmessage({ data: m })) };
+  return [a, b];
+}
 
 // Deterministic crypto fakes: a "signature" is `${pub}priv|${message}` (the fake
 // private key is `${pub}priv`), and verify checks that exact shape. isAccountKey
@@ -96,5 +104,37 @@ describe('connection-auth', () => {
     };
     const done = await run(badCtrl, host);
     expect(done.host).toBe('bad_signature');
+  });
+});
+
+describe('runConnectionAuth over paired channels', () => {
+  const crypto = makeCrypto(['CPUB', 'HPUB']);
+  const auth = (role, self, remote, chan, localFp, remoteFp) => {
+    let n = 0;
+    return runConnectionAuth({
+      role, channel: chan, deviceId: self.id, publicKey: self.pub,
+      localFingerprint: localFp, remoteFingerprint: remoteFp,
+      sign: (m) => crypto.sign(self.priv, m), verify: crypto.verify, isAccountKey: crypto.isAccountKey,
+      nonce: () => `${role}-n${n++}`, timeoutMs: 1000,
+    });
+  };
+  const ctrl = { id: 'c', pub: 'CPUB', priv: 'CPUBpriv' };
+  const host = { id: 'h', pub: 'HPUB', priv: 'HPUBpriv' };
+
+  it('both ends resolve ok on a valid mutual handshake', async () => {
+    const [ca, ha] = channelPair();
+    const pC = auth('controller', ctrl, host, ca, 'AA', 'BB');
+    const pH = auth('host', host, ctrl, ha, 'BB', 'AA');
+    await expect(Promise.all([pC, pH])).resolves.toEqual(['ok', 'ok']);
+  });
+
+  it('rejects the host end when the controller key is not enrolled', async () => {
+    const cryptoNoCtrl = makeCrypto(['HPUB']);
+    const [ca, ha] = channelPair();
+    let nc = 0, nh = 0;
+    const pC = runConnectionAuth({ role: 'controller', channel: ca, deviceId: 'c', publicKey: 'CPUB', localFingerprint: 'AA', remoteFingerprint: 'BB', sign: (m) => cryptoNoCtrl.sign('CPUBpriv', m), verify: cryptoNoCtrl.verify, isAccountKey: cryptoNoCtrl.isAccountKey, nonce: () => `c${nc++}`, timeoutMs: 1000 });
+    const pH = runConnectionAuth({ role: 'host', channel: ha, deviceId: 'h', publicKey: 'HPUB', localFingerprint: 'BB', remoteFingerprint: 'AA', sign: (m) => cryptoNoCtrl.sign('HPUBpriv', m), verify: cryptoNoCtrl.verify, isAccountKey: cryptoNoCtrl.isAccountKey, nonce: () => `h${nh++}`, timeoutMs: 1000 });
+    await expect(pH).rejects.toThrow('unknown_device');
+    await expect(pC).rejects.toBeInstanceOf(Error); // controller sees the peer 'fail'
   });
 });

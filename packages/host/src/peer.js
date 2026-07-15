@@ -1,6 +1,7 @@
 // packages/host/src/peer.js
 import { MSG } from '@farsight/shared/protocol';
 import { CHUNK_SIZE } from '@farsight/shared/file-transfer';
+import { parseDtlsFingerprint } from '@farsight/shared/connect-transcript';
 
 // P-1: protect resolution/text legibility under bandwidth pressure (screen
 // content), rather than Chromium's default 'balanced' which drops resolution
@@ -34,7 +35,7 @@ function preferVideoCodecs(transceiver) {
   } catch { /* leave default negotiation */ }
 }
 
-export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = () => {}, onControl = () => {}, onFileMessage = () => {} }) {
+export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = () => {}, onControl = () => {}, onFileMessage = () => {}, onAuthChannel = () => {} }) {
   const pc = new RTCPeerConnection({ iceServers });
   let videoSender = null;
   for (const track of stream.getTracks()) {
@@ -51,6 +52,12 @@ export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = 
   let hostFileChannel = null;
   pc.addEventListener('datachannel', (e) => {
     const ch = e.channel;
+    if (ch.label === 'auth') {
+      // Connect-from-console (SP2 §4.4): surface the E2E keypair-handshake channel
+      // so the renderer can authenticate the peer BEFORE showing consent/capturing.
+      onAuthChannel(ch);
+      return;
+    }
     if (ch.label === 'file') {
       try { ch.binaryType = 'arraybuffer'; } catch { /* guarded */ }
       hostFileChannel = ch;
@@ -117,6 +124,12 @@ export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = 
     sendFileData(data) {
       try { if (hostFileChannel && hostFileChannel.readyState === 'open') hostFileChannel.send(data); } catch { /* guarded */ }
     },
+    // Connect-from-console: DTLS fingerprints (from the exchanged SDP) the
+    // handshake binds to. Available after handleOffer() sets both descriptions.
+    getFingerprints: () => ({
+      local: parseDtlsFingerprint(pc.localDescription?.sdp || ''),
+      remote: parseDtlsFingerprint(pc.remoteDescription?.sdp || ''),
+    }),
     fileBufferedAmount() { try { return hostFileChannel ? hostFileChannel.bufferedAmount : 0; } catch { return 0; } },
     onFileBufferedLow(cb) {
       try { if (hostFileChannel) hostFileChannel.onbufferedamountlow = () => { try { cb(); } catch { /* guarded */ } }; } catch { /* guarded */ }

@@ -336,24 +336,108 @@ function doReconnect() {
   document.getElementById('go').click();
 }
 
-document.getElementById('go').addEventListener('click', async () => {
-  if (!signalingUrl) return;
-  const targetId = normalizeHostId(idInput.value);
-  const typedPassword = document.getElementById('host-pw').value;
-  // SP1 compat shim: try the normalized password first, then the raw typed
-  // value (pre-v1.4 hosts registered the dashed literal). We advance through
-  // these only on a bad_password reply, so a current host never triggers a retry.
-  const candidates = passwordCandidates(typedPassword);
+// Connect-from-console (SP2 §4.4): a fresh base64 nonce for the device-keypair
+// handshake (Web Crypto in the renderer).
+function authNonce() {
+  const b = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(b);
+  let s = ''; for (const x of b) s += String.fromCharCode(x);
+  return btoa(s);
+}
+
+// Connect-from-console state: on the linked (password-free) path the session view
+// is not revealed until the mutual keypair handshake passes (fails closed).
+let linkedMode = false;
+let linkedAuthOk = false;
+let pendingStream = null;
+
+// Reveal the live session view (video + input wiring). Extracted from onTrack so
+// the linked path can defer it until the device handshake succeeds.
+function revealSession(stream) {
+  video.srcObject = stream;
+  setActive(true);
+  connectEl.style.display = 'none';
+  screenEl.style.display = 'block';
+  document.getElementById('end').onclick = doClose;
+  startStatsPoll();
+  startClipboardSync();
+  // Forward mouse/keyboard over the input data channel. Registered once
+  // (revealSession can fire again on Reconnect); the handler reads the current
+  // module-level `peer` and no-ops when there is none (e.g. after Close).
+  if (!inputWired) {
+    // Coalesce mousemove to at most one send per animation frame (raw mousemove
+    // can fire ~165/sec on high-refresh displays). Non-move events are still
+    // forwarded immediately, but flush any pending move first so ordering
+    // (move-then-click) is preserved.
+    let pendingMove = null, rafId = 0;
+    const flushMove = () => {
+      rafId = 0;
+      if (!pendingMove || !peer) { pendingMove = null; return; }
+      const e = pendingMove; pendingMove = null;
+      const rect = videoContentRect(video.getBoundingClientRect(), video.videoWidth, video.videoHeight);
+      const evt = domEventToInput(e, rect);
+      if (evt && peer) peer.sendInput(evt);
+    };
+    const forward = (e) => {
+      if (!peer) return;
+      if (e.type === 'mousemove') { pendingMove = e; if (!rafId) rafId = requestAnimationFrame(flushMove); return; }
+      if (pendingMove) { if (rafId) cancelAnimationFrame(rafId); flushMove(); } // preserve order: last move before this event
+      if (['mousedown', 'mouseup', 'wheel'].includes(e.type)) e.preventDefault();
+      const rect = videoContentRect(video.getBoundingClientRect(), video.videoWidth, video.videoHeight);
+      const evt = domEventToInput(e, rect);
+      if (evt) peer.sendInput(evt);
+    };
+    for (const t of ['mousemove', 'mousedown', 'mouseup', 'wheel']) video.addEventListener(t, forward, { passive: false });
+    for (const t of ['keydown', 'keyup']) window.addEventListener(t, forward);
+    inputWired = true;
+  }
+}
+
+// Drive the controller side of the E2E device-keypair handshake over the peer's
+// 'auth' channel, once it opens and both SDP descriptions are set (so fingerprints
+// are available). On success reveal any video that already arrived; on failure
+// close the session — the host is not verifiably one of the owner's devices.
+async function runControllerAuth(p) {
+  const channel = p.authChannel;
+  await new Promise((res) => { if (channel.readyState === 'open') res(); else channel.addEventListener('open', res, { once: true }); });
+  const fp = p.getFingerprints();
+  try {
+    await runConnectionAuth({
+      role: 'controller', channel,
+      deviceId: await window.farsightIpc.connAuthDeviceId(),
+      publicKey: await window.farsightIpc.connAuthPublicKey(),
+      localFingerprint: fp.local, remoteFingerprint: fp.remote,
+      sign: (m) => window.farsightIpc.connAuthSign(m),
+      verify: (pk, m, s) => window.farsightIpc.connAuthVerify(pk, m, s),
+      isAccountKey: (pk) => window.farsightIpc.connAuthIsAccountKey(pk),
+      nonce: authNonce, timeoutMs: 15000,
+    });
+    if (peer !== p) return; // superseded/closed
+    linkedAuthOk = true;
+    if (pendingStream) { const s = pendingStream; pendingStream = null; revealSession(s); }
+    else statusEl.textContent = 'Verified — waiting for the host to accept…';
+  } catch {
+    if (peer !== p) return;
+    statusEl.textContent = 'Couldn’t verify the host as your device — connection blocked.';
+    doClose();
+  }
+}
+
+// Shared connect path for BOTH the manual id+password form and the console's
+// password-free "linked" Connect. Only the CONNECT payload (password vs linked)
+// and the post-connection auth/reveal gating differ.
+async function connectTo({ targetId, candidates, linked }) {
   let pwIndex = 0;
-  lastCreds.targetId = targetId;
-  lastCreds.password = typedPassword; // raw typed → Reconnect reproduces the same candidates
+  linkedMode = !!linked;
+  linkedAuthOk = false;
+  pendingStream = null;
   sessionClosing = false; // fresh attempt — clear any prior host-ended state
-  if (!isValidHostId(targetId)) { statusEl.textContent = 'Invalid ID.'; return; }
-  if (candidates.length === 0) { statusEl.textContent = 'Enter the host password.'; return; }
-  if (hostVersionEl) hostVersionEl.textContent = ''; // clear any stale note from a prior session
-  statusEl.textContent = 'Connecting…';
+  if (hostVersionEl) hostVersionEl.textContent = ''; // clear any stale note
+  statusEl.textContent = linked ? 'Connecting to your device…' : 'Connecting…';
   // SP1: announce our app version so the host (and server) learn who's connecting.
-  const sendConnect = () => signal.send(MSG.CONNECT, { targetId, password: candidates[pwIndex], version: appVersion || undefined });
+  const sendConnect = () => signal.send(MSG.CONNECT, linked
+    ? { targetId, linked: true, version: appVersion || undefined }
+    : { targetId, password: candidates[pwIndex], version: appVersion || undefined });
 
   // R-1: the server issues ICE/TURN servers only after successful auth. Build
   // the peer (and offer) once they arrive so the connection can use TURN.
@@ -401,55 +485,23 @@ document.getElementById('go').addEventListener('click', async () => {
         }
       },
       onTrack: (stream) => {
-        video.srcObject = stream;
-        setActive(true);
-        connectEl.style.display = 'none';
-        screenEl.style.display = 'block';
-        document.getElementById('end').onclick = doClose;
-        startStatsPoll();
-        startClipboardSync();
-        // Forward mouse/keyboard over the input data channel. Registered once
-        // (onTrack can fire again on Reconnect); the handler reads the current
-        // module-level `peer` and no-ops when there is none (e.g. after Close).
-        if (!inputWired) {
-          // Coalesce mousemove to at most one send per animation frame (raw
-          // mousemove can fire ~165/sec on high-refresh displays). Non-move
-          // events are still forwarded immediately, but flush any pending
-          // move first so ordering (move-then-click) is preserved.
-          let pendingMove = null, rafId = 0;
-          const flushMove = () => {
-            rafId = 0;
-            if (!pendingMove || !peer) { pendingMove = null; return; }
-            const e = pendingMove; pendingMove = null;
-            const rect = videoContentRect(video.getBoundingClientRect(), video.videoWidth, video.videoHeight);
-            const evt = domEventToInput(e, rect);
-            if (evt && peer) peer.sendInput(evt);
-          };
-          const forward = (e) => {
-            if (!peer) return;
-            if (e.type === 'mousemove') { pendingMove = e; if (!rafId) rafId = requestAnimationFrame(flushMove); return; }
-            if (pendingMove) { if (rafId) cancelAnimationFrame(rafId); flushMove(); } // preserve order: last move before this event
-            if (['mousedown', 'mouseup', 'wheel'].includes(e.type)) e.preventDefault();
-            const rect = videoContentRect(video.getBoundingClientRect(), video.videoWidth, video.videoHeight);
-            const evt = domEventToInput(e, rect);
-            if (evt) peer.sendInput(evt);
-          };
-          for (const t of ['mousemove', 'mousedown', 'mouseup', 'wheel']) video.addEventListener(t, forward, { passive: false });
-          for (const t of ['keydown', 'keyup']) window.addEventListener(t, forward);
-          inputWired = true;
-        }
+        // Linked path: don't reveal the screen until the device handshake passes.
+        if (linkedMode && !linkedAuthOk) { pendingStream = stream; statusEl.textContent = 'Verifying your device…'; return; }
+        revealSession(stream);
       },
     });
     peer = thisPeer;
     peer.onFileMessage(handleFileMessage);
     peer.start();
+    // Linked connect: authenticate the host end-to-end over the 'auth' channel.
+    if (linked) runControllerAuth(thisPeer);
   };
 
   signal = createSignalingClient(signalingUrl, {
     [MSG.ICE_SERVERS]: (m) => {
-      // Reaching ICE_SERVERS means auth succeeded — lock in the winning password
-      // candidate (so Reconnect uses it directly) and surface the host's version.
-      lastCreds.password = candidates[pwIndex];
+      // Reaching ICE_SERVERS means the server paired us. On the password path,
+      // lock in the winning candidate (so Reconnect uses it directly).
+      if (!linked) lastCreds.password = candidates[pwIndex];
       showHostVersion(m.peerVersion);
       startPeer(m.iceServers || []);
     },
@@ -458,7 +510,7 @@ document.getElementById('go').addEventListener('click', async () => {
     [MSG.ERROR]: (m) => {
       // Compat shim: a bad_password may just mean this host predates the v1.4
       // password normalization — retry once with the next candidate before failing.
-      if (m.reason === 'bad_password' && pwIndex + 1 < candidates.length) {
+      if (!linked && m.reason === 'bad_password' && pwIndex + 1 < candidates.length) {
         pwIndex += 1;
         statusEl.textContent = 'Connecting…';
         sendConnect();
@@ -481,6 +533,21 @@ document.getElementById('go').addEventListener('click', async () => {
   // Host reacts to CONNECT (prepares its stream). On success the server sends
   // ICE_SERVERS, which triggers peer creation + OFFER above.
   sendConnect();
+}
+
+document.getElementById('go').addEventListener('click', async () => {
+  if (!signalingUrl) return;
+  const targetId = normalizeHostId(idInput.value);
+  const typedPassword = document.getElementById('host-pw').value;
+  // SP1 compat shim: try the normalized password first, then the raw typed
+  // value (pre-v1.4 hosts registered the dashed literal). We advance through
+  // these only on a bad_password reply, so a current host never triggers a retry.
+  const candidates = passwordCandidates(typedPassword);
+  lastCreds.targetId = targetId;
+  lastCreds.password = typedPassword; // raw typed → Reconnect reproduces the same candidates
+  if (!isValidHostId(targetId)) { statusEl.textContent = 'Invalid ID.'; return; }
+  if (candidates.length === 0) { statusEl.textContent = 'Enter the host password.'; return; }
+  connectTo({ targetId, candidates, linked: false });
 });
 
 // ── Saved-hosts console (SP2) ────────────────────────────────────────────────
@@ -630,6 +697,17 @@ function hostRow(d) {
   status.className = 'host-status';
   status.textContent = d.online ? 'Online' : 'Offline';
   right.appendChild(status);
+
+  // Connect-from-console (SP2 §4.4): a password-free Connect for an online device
+  // that has enrolled a key and reported where it's reachable (signalingId). The
+  // handshake proves it's your own device; the host still prompts for consent.
+  if (d.online && d.signalingId && d.publicKey) {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-primary host-connect';
+    btn.textContent = 'Connect';
+    btn.onclick = () => { closeFleet(); connectTo({ targetId: d.signalingId, candidates: [], linked: true }); };
+    right.appendChild(btn);
+  }
 
   row.append(dot, main, right);
   return row;

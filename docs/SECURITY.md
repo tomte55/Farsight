@@ -32,6 +32,31 @@ Optional high-assurance mitigation (deferred, non-blocking): derive a Short Auth
 String from each peer's DTLS certificate fingerprint, display it on both ends, and compare
 out-of-band to detect a MITM.
 
+## Connect-from-console (account-linked device-keypair auth)
+
+For your own account-linked fleet, the console can connect **without a session password**. This does
+not weaken the trust model:
+
+- **Signaling stays account-oblivious.** A host opts in with an `acceptsLinked` flag; a `linked`
+  CONNECT then pairs the two sockets without the password check. That grants only a *relay* — the
+  signaling server never learns accounts, keys, or identities.
+- **Auth is end-to-end.** After WebRTC/DTLS forms, the two devices run a **mutual Ed25519
+  challenge-response** over a dedicated `auth` data channel, each proving possession of an
+  account-issued device key whose public half is enrolled under the owner's account (verified via the
+  owner-authenticated `GET /devices`). Private keys live only in OS-encrypted storage (safeStorage /
+  DPAPI) in the main process — never in a renderer or on the wire.
+- **Bound to the DTLS fingerprints.** The signed transcript includes both peers' DTLS certificate
+  fingerprints, so the R-8 SDP-swap MITM is **defeated for the linked path**: a signaling server that
+  substituted fingerprints makes the two transcripts diverge and the signatures fail. This realizes
+  the R-8 mitigation for account-linked connects.
+- **Consent still required; control gated on auth.** A linked connect still raises the host's
+  per-session consent prompt (§4.3). Input injection stays blocked until the handshake passes, and the
+  controller does not reveal the remote screen until it has verified the host — an unverifiable peer is
+  denied control, shown nothing, and the session is torn down (fails closed).
+- **Residual:** the account is the fleet master key — a compromised account could dial its own fleet
+  (the same property as remote update, §4.3). Protect it: argon2id password hashing, optional TOTP,
+  and 2FA on the GitHub release account.
+
 ## Running least-privilege
 
 Launch the host as a standard user. Some target apps running as admin will not receive

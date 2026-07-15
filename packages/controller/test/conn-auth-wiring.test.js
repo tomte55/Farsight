@@ -11,6 +11,7 @@ import { expect, test, describe } from 'vitest';
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const main = readFileSync(path.join(dir, '../src/main.js'), 'utf8');
 const preload = readFileSync(path.join(dir, '../src/preload.cjs'), 'utf8');
+const renderer = readFileSync(path.join(dir, '../src/renderer/renderer.js'), 'utf8');
 
 describe('controller connect-from-console wiring', () => {
   test('main constructs the account service with a device-key file path', () => {
@@ -27,5 +28,12 @@ describe('controller connect-from-console wiring', () => {
     for (const fn of ['connAuthPublicKey', 'connAuthDeviceId', 'connAuthSign', 'connAuthVerify', 'connAuthIsAccountKey']) {
       expect(preload).toMatch(new RegExp(`\\b${fn}\\b`));
     }
+  });
+
+  test('the console renders a Connect action that dials signalingId over the linked path', () => {
+    expect(renderer).toMatch(/host-connect/);
+    expect(renderer).toMatch(/signalingId/);
+    expect(renderer).toMatch(/linked:\s*true/);
+    expect(renderer).toMatch(/runConnectionAuth/);
   });
 });

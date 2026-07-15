@@ -167,7 +167,9 @@ export function createSignalingServer({ port, config } = {}) {
           // peer is an older build that sent none — JSON omits the field).
           send(socket, MSG.ICE_SERVERS, { iceServers: ice, peerVersion: target.farsight.version || undefined });
           send(target, MSG.ICE_SERVERS, { iceServers: ice });
-          send(target, MSG.CONNECT, { peerVersion: socket.farsight.version || undefined }); // tell host a controller wants in
+          // tell the host a controller wants in; `linked` signals it to run the
+          // E2E device-keypair handshake (and skip the password) for this peer.
+          send(target, MSG.CONNECT, { peerVersion: socket.farsight.version || undefined, linked: wantsLinked || undefined });
           log.event('connect', { targetId: msg.targetId });
           break;
         }

@@ -2,6 +2,7 @@
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
 import { CHUNK_SIZE } from '@farsight/shared/file-transfer';
+import { parseDtlsFingerprint } from '@farsight/shared/connect-transcript';
 
 // P-3: prefer VP8 then H264 (broad hardware-encoder coverage, low encode
 // latency) by REORDERING (never excluding) the codec list on the video
@@ -52,6 +53,10 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
   // control messages. bufferedAmountLowThreshold backs the sender's
   // backpressure loop (see the renderer's waitForBufferedLow).
   const fileChannel = pc.createDataChannel('file', { ordered: true });
+  // Connect-from-console (SP2 §4.4): reliable, ordered channel carrying ONLY the
+  // E2E device-keypair handshake (see shared/connection-auth.js). Created for every
+  // session; used only on the linked (password-free) path.
+  const authChannel = pc.createDataChannel('auth', { ordered: true });
   try { fileChannel.binaryType = 'arraybuffer'; } catch { /* guarded */ }
   try { fileChannel.bufferedAmountLowThreshold = 262144; } catch { /* guarded */ }
   controlChannel.addEventListener('open', () => {
@@ -128,6 +133,13 @@ export function createControllerPeer({ sendSignal, iceServers = [], onTrack, onC
     fileBufferedAmount() { try { return fileChannel.bufferedAmount; } catch { return 0; } },
     onFileBufferedLow(cb) { try { fileChannel.onbufferedamountlow = () => { try { cb(); } catch { /* guarded */ } }; } catch { /* guarded */ } },
     getStats: () => pc.getStats(),
+    // Connect-from-console: the 'auth' channel + the DTLS fingerprints (from the
+    // exchanged SDP) the handshake binds to. Available after handleAnswer().
+    authChannel,
+    getFingerprints: () => ({
+      local: parseDtlsFingerprint(pc.localDescription?.sdp || ''),
+      remote: parseDtlsFingerprint(pc.remoteDescription?.sdp || ''),
+    }),
     close: () => { clearIceRestart(); pc.close(); },
   };
 }

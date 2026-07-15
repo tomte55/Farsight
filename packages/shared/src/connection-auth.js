@@ -76,3 +76,51 @@ export function createConnectionAuth({
     },
   };
 }
+
+// Drive a handshake `machine` over a message channel (an RTCDataChannel or any
+// object with `send(str)`, `onmessage`, and `addEventListener('open', …)`).
+// Resolves 'ok' on mutual success; rejects with an Error(reason) on any failure
+// or timeout. Fails closed: a channel that never opens rejects at the timeout.
+export function pumpConnectionAuth(machine, channel, { timeoutMs = 15_000, setTimeout: setT, clearTimeout: clearT } = {}) {
+  const schedule = setT ?? (typeof setTimeout !== 'undefined' ? setTimeout : null);
+  const cancel = clearT ?? (typeof clearTimeout !== 'undefined' ? clearTimeout : null);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = schedule ? schedule(() => finish(reject, new Error('auth_timeout')), timeoutMs) : null;
+    function finish(fn, value) {
+      if (settled) return;
+      settled = true;
+      if (timer !== null && cancel) cancel(timer);
+      fn(value);
+    }
+    channel.onmessage = async (e) => {
+      let msg;
+      try { msg = JSON.parse(typeof e === 'object' && 'data' in e ? e.data : e); } catch { return; }
+      const r = await machine.handle(msg);
+      if (r.out) { try { channel.send(JSON.stringify(r.out)); } catch { /* channel gone */ } }
+      if (r.done) finish(resolve, 'ok');
+      else if (r.fail) {
+        // Tell the peer so it fails fast instead of waiting for its own timeout.
+        try { channel.send(JSON.stringify({ t: 'fail', reason: r.fail })); } catch { /* channel gone */ }
+        finish(reject, new Error(r.fail));
+      }
+    };
+    const first = machine.start();
+    const startPump = () => { if (first) { try { channel.send(JSON.stringify(first)); } catch { /* channel gone */ } } };
+    // readyState 'open' (RTCDataChannel) or a test channel without one → start now.
+    if (channel.readyState === 'open' || channel.readyState === undefined) startPump();
+    else if (channel.addEventListener) channel.addEventListener('open', startPump, { once: true });
+  });
+}
+
+// Convenience: build a handshake machine + drive it over `channel` in one call.
+// Used by the renderers (crypto ops are IPC-backed; nonce is Web Crypto).
+export function runConnectionAuth({
+  role, channel, deviceId, publicKey, localFingerprint, remoteFingerprint,
+  sign, verify, isAccountKey, nonce, timeoutMs,
+}) {
+  const machine = createConnectionAuth({
+    role, deviceId, publicKey, localFingerprint, remoteFingerprint, sign, verify, isAccountKey, nonce,
+  });
+  return pumpConnectionAuth(machine, channel, { timeoutMs });
+}
