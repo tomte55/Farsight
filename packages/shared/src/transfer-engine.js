@@ -75,7 +75,7 @@ export function createSendJob({ manifest, resume = [] }) {
 
 const JOB_TRANSITIONS = {
   active: { pause: 'paused', disconnect: 'interrupted', complete: 'done', fail: 'error', cancel: 'canceled' },
-  paused: { resume: 'active', disconnect: 'interrupted', cancel: 'canceled' },
+  paused: { resume: 'active', cancel: 'canceled' },
   interrupted: { reconnect: 'active', cancel: 'canceled' },
   done: {},
   error: { retry: 'active', cancel: 'canceled' },

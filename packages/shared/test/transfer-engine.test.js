@@ -91,3 +91,9 @@ test('nextJobState ignores impossible transitions', () => {
   expect(nextJobState('active', 'bogus')).toBe('active');
   expect(nextJobState('nonsense', 'pause')).toBe('nonsense');
 });
+
+test('a user-paused job stays paused across a disconnect (pause intent survives)', () => {
+  expect(nextJobState('paused', 'disconnect')).toBe('paused');
+  // and it does not auto-resume: a reconnect while paused is a no-op
+  expect(nextJobState('paused', 'reconnect')).toBe('paused');
+});
