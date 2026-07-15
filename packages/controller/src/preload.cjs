@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   accountLogin: (input) => ipcRenderer.invoke('account:login', input),
   accountLogout: () => ipcRenderer.invoke('account:logout'),
   accountRegister: (input) => ipcRenderer.invoke('account:register', input),
+  accountResendVerification: (input) => ipcRenderer.invoke('account:resend-verification', input),
   accountRequestPasswordReset: (input) => ipcRenderer.invoke('account:request-password-reset', input),
   accountFleet: () => ipcRenderer.invoke('account:fleet'),
 });

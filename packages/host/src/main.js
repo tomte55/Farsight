@@ -51,6 +51,7 @@ ipcMain.handle('account:status', () => getAccountService().status());
 ipcMain.handle('account:login', (_e, input) => getAccountService().login({ deviceName: os.hostname(), ...input }));
 ipcMain.handle('account:logout', () => getAccountService().logout());
 ipcMain.handle('account:register', (_e, input) => getAccountService().register(input));
+ipcMain.handle('account:resend-verification', (_e, input) => getAccountService().resendVerification(input));
 ipcMain.handle('account:request-password-reset', (_e, input) => getAccountService().requestPasswordReset(input));
 ipcMain.handle('account:fleet', () => getAccountService().fleet());
 let mainWindow = null;

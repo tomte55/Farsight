@@ -32,13 +32,13 @@ describe('host account enrollment wiring', () => {
   });
 
   test('main registers the account IPC handlers', () => {
-    for (const ch of ['account:status', 'account:login', 'account:logout', 'account:register', 'account:request-password-reset', 'account:fleet']) {
+    for (const ch of ['account:status', 'account:login', 'account:logout', 'account:register', 'account:resend-verification', 'account:request-password-reset', 'account:fleet']) {
       expect(main).toContain(`'${ch}'`);
     }
   });
 
   test('preload exposes the account bridge to the renderer', () => {
-    for (const fn of ['accountStatus', 'accountLogin', 'accountLogout', 'accountRegister', 'accountRequestPasswordReset', 'accountFleet']) {
+    for (const fn of ['accountStatus', 'accountLogin', 'accountLogout', 'accountRegister', 'accountResendVerification', 'accountRequestPasswordReset', 'accountFleet']) {
       expect(preload).toMatch(new RegExp(`\\b${fn}\\b`));
     }
   });

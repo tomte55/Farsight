@@ -43,6 +43,7 @@ export function createAccountService({
     },
     register: (input) => client.register(input),
     verifyEmail: (input) => client.verifyEmail(input),
+    resendVerification: (input) => client.resendVerification(input),
     requestPasswordReset: (input) => client.requestPasswordReset(input),
 
     // Cheap sign-in check (also resumes a persisted session on first call, and

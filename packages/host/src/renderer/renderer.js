@@ -478,6 +478,10 @@ async function doSignIn() {
     acctPassword.value = '';
     acctCode.value = '';
     refreshAccountView();
+  } else if (res.error === 'email_unverified') {
+    // Auto-resend a fresh verification link so an expired one can't lock the user out.
+    await window.farsightIpc.accountResendVerification({ email });
+    setMsg(acctSigninError, `Your email isn’t verified yet — we’ve sent a fresh link to ${email}. Click it, then sign in.`, true);
   } else {
     setMsg(acctSigninError, SIGNIN_ERRORS[res.error] || 'Sign-in failed. Try again.');
   }
