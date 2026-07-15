@@ -24,7 +24,6 @@
     "./connect-transcript": "./src/connect-transcript.js",
     "./connection-auth": "./src/connection-auth.js",
     "./config": "./src/config.js",
-    "./file-transfer": "./src/file-transfer.js",
     "./transfer-manifest": "./src/transfer-manifest.js",
     "./transfer-protocol": "./src/transfer-protocol.js",
     "./remote-fs-protocol": "./src/remote-fs-protocol.js",
