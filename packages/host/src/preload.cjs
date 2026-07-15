@@ -28,8 +28,6 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   onUpdateStatus: (cb) => ipcRenderer.on('updater:status', (_e, ui) => cb(ui)),
   readClipboard: () => ipcRenderer.invoke('clipboard-read'),
   writeClipboard: (text) => ipcRenderer.send('clipboard-write', text),
-  pickFile: () => ipcRenderer.invoke('pick-file'),
-  saveFile: (arg) => ipcRenderer.invoke('save-file', arg),
   reportError: (entry) => ipcRenderer.send('log:renderer', entry),
 
   // Account enrollment (SP2): sign in on the host to link this machine to your

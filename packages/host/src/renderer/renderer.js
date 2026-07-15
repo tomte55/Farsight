@@ -6,9 +6,6 @@ import { createSessionTimers } from '../timeouts.js';
 import { monitorsForControl } from '../capture.js';
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
-import {
-  CHUNK_SIZE, MAX_FILE_SIZE, metaFrame, endFrame, parseFrame, sanitizeFilename, createReceiver,
-} from '@farsight/shared/file-transfer';
 import { formatHostId } from '@farsight/shared/credentials-format';
 import { createIdleRotator } from '@farsight/shared/idle-rotator';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
@@ -21,12 +18,6 @@ function authNonce() {
   let s = ''; for (const x of b) s += String.fromCharCode(x);
   return btoa(s);
 }
-
-// Bound on receiveState.chunks.length: legit transfers use CHUNK_SIZE chunks
-// (~6400 for a 100 MB file), so this bounds the array against a peer sending
-// a huge number of tiny chunks (O(n^2) reduce + per-ArrayBuffer overhead) even
-// though each one is individually within the total-byte cap.
-const MAX_CHUNKS = Math.ceil(MAX_FILE_SIZE / CHUNK_SIZE) + 16;
 
 const idEl = document.getElementById('host-id');
 const statusEl = document.getElementById('status');
@@ -173,129 +164,7 @@ function stopClipboardSync() {
   if (clipTimer) { clearInterval(clipTimer); clipTimer = null; }
 }
 
-// File transfer: bidirectional over the dedicated 'file' data channel (created
-// by the controller; received here via createHostPeer's onFileMessage param).
-// Active only while a peer exists — sendFile()/handleFileMessage() both no-op
-// without one. State is reset on every teardown path, same as clipboard sync.
-let fileTransferId = 0;
-let sendingFile = false;
-let pendingBufferedLowResolve = null;
-let receiveState = null; // { receiver, chunks: ArrayBuffer[], id }
-const sendFileBtn = document.getElementById('send-file');
-const fileStatusEl = document.getElementById('file-status');
-
 function setMenuStatus(text) { if (menuStatus) menuStatus.textContent = text; }
-function setFileStatus(text) { if (fileStatusEl) fileStatusEl.textContent = text; }
-
-// Backpressure: wait for the channel's bufferedAmount to drop below the
-// threshold before sending the next chunk. cancelPendingFileSend() force-
-// resolves this if a teardown happens mid-wait, so a torn-down session can
-// never leave sendFile() awaiting an event that will never fire again.
-async function waitForBufferedLow(peerRef) {
-  if (!peerRef || peerRef.fileBufferedAmount() <= 1_000_000) return;
-  await new Promise((resolve) => {
-    pendingBufferedLowResolve = resolve;
-    peerRef.onFileBufferedLow(() => { pendingBufferedLowResolve = null; resolve(); });
-  });
-}
-function cancelPendingFileSend() {
-  if (pendingBufferedLowResolve) { const r = pendingBufferedLowResolve; pendingBufferedLowResolve = null; r(); }
-}
-function resetFileReceive() { receiveState = null; }
-function resetFileTransferState() {
-  resetFileReceive();
-  cancelPendingFileSend();
-}
-
-async function sendFile() {
-  if (!peer) { setFileStatus('No active session.'); return; }
-  if (sendingFile) return;
-  const picked = await window.farsightIpc.pickFile();
-  if (!peer) return; // session may have torn down while the OS file dialog was open
-  if (!picked) return;
-  if (picked.error) { setFileStatus(picked.error); return; }
-  if (picked.size > MAX_FILE_SIZE) { setFileStatus('File is larger than the 100 MB transfer limit.'); return; }
-  sendingFile = true;
-  const id = ++fileTransferId;
-  const peerRef = peer;
-  try {
-    peerRef.sendFileData(metaFrame({ id, name: picked.name, size: picked.size, mime: 'application/octet-stream' }));
-    const bytes = picked.bytes;
-    let offset = 0;
-    while (offset < bytes.byteLength) {
-      if (peer !== peerRef) break; // torn down / replaced mid-send
-      const end = Math.min(offset + CHUNK_SIZE, bytes.byteLength);
-      const chunk = bytes.slice(offset, end);
-      await waitForBufferedLow(peerRef);
-      if (peer !== peerRef) break;
-      peerRef.sendFileData(chunk);
-      offset = end;
-      setFileStatus(`Sending ${picked.name}… ${Math.min(100, Math.round((offset / picked.size) * 100))}%`);
-    }
-    if (peer === peerRef) {
-      peerRef.sendFileData(endFrame(id));
-      setFileStatus(`Sent ${picked.name}.`);
-    }
-  } catch {
-    setFileStatus('File send failed.');
-  } finally {
-    sendingFile = false;
-  }
-}
-if (sendFileBtn) sendFileBtn.addEventListener('click', sendFile);
-
-async function finishFileReceive() {
-  if (!receiveState) return;
-  const { receiver, chunks } = receiveState;
-  receiver.end();
-  resetFileReceive();
-  const total = chunks.reduce((n, c) => n + c.byteLength, 0);
-  const combined = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) { combined.set(new Uint8Array(c), off); off += c.byteLength; }
-  const name = sanitizeFilename(receiver.name);
-  try {
-    const res = await window.farsightIpc.saveFile({ name, bytes: combined.buffer });
-    setFileStatus(res && res.ok ? `Saved ${name}.` : 'Save cancelled.');
-  } catch {
-    setFileStatus('Save failed.');
-  }
-}
-
-// Wired as createHostPeer's onFileMessage callback (see startSession below).
-function handleFileMessage(data) {
-  if (typeof data === 'string') {
-    const frame = parseFrame(data);
-    if (!frame) return;
-    if (frame.t === 'meta') {
-      const receiver = createReceiver({
-        onProgress: (p) => setFileStatus(`Receiving ${sanitizeFilename(frame.name)}… ${Math.round(p * 100)}%`),
-      });
-      try { receiver.begin(frame); } catch { setFileStatus('Incoming file rejected (too large).'); resetFileReceive(); return; }
-      receiveState = { receiver, chunks: [], id: frame.id };
-    } else if (frame.t === 'end') {
-      if (!receiveState || receiveState.id !== frame.id) return;
-      finishFileReceive();
-    } else if (frame.t === 'cancel') {
-      if (receiveState && receiveState.id === frame.id) { resetFileReceive(); setFileStatus('Transfer cancelled by sender.'); }
-    }
-    return;
-  }
-  // Binary chunk (ArrayBuffer). Cap total received at MAX_FILE_SIZE regardless
-  // of the declared meta.size, in case a peer sends more than it announced.
-  // Uses the receiver's O(1) running total (not a per-chunk reduce over
-  // chunks, which is O(n^2) over a transfer) and also caps chunk COUNT, so a
-  // peer sending millions of tiny chunks can't freeze the renderer or blow
-  // memory via per-ArrayBuffer overhead even while staying under the byte cap.
-  if (!receiveState) return;
-  const buf = data instanceof ArrayBuffer ? data : (data && data.buffer);
-  if (!buf) return;
-  receiveState.receiver.pushChunkBytes(buf.byteLength);
-  if (receiveState.receiver.received > MAX_FILE_SIZE) { resetFileReceive(); setFileStatus('Incoming file too large — aborted.'); return; }
-  if (receiveState.chunks.length >= MAX_CHUNKS) { resetFileReceive(); setFileStatus('Transfer aborted (too many chunks).'); return; }
-  receiveState.chunks.push(buf);
-  if (receiveState.receiver.isComplete()) finishFileReceive();
-}
 
 function flushCandidates() {
   while (pendingCandidates.length) peer.handleCandidate(pendingCandidates.shift());
@@ -309,7 +178,6 @@ function teardown() {
   if (peer) { peer.close(); peer = null; }
   if (timers) { timers.stop(); timers = null; }
   stopClipboardSync();
-  resetFileTransferState();
   remoteReady = false;
   pendingOffer = null;
   pendingCandidates.length = 0;
@@ -388,7 +256,6 @@ async function startSession() {
     // until peerAuthed flips true.
     onInput: (evt) => { if (session.isActive() && (!linkedConnect || peerAuthed)) { window.farsightIpc.injectInput(evt); if (timers) timers.activity(); } },
     onControl: (evt) => onControl(evt),
-    onFileMessage: (data) => handleFileMessage(data),
     // Only authenticate on the linked path; on the password path the auth channel
     // is unused (the controller never starts a handshake) and is ignored.
     onAuthChannel: (channel) => { if (linkedConnect) runHostAuth(channel); },
