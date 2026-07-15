@@ -44,3 +44,28 @@ test('save rejects a job without a string jobId', async () => {
   await expect(store.save({ jobId: '' })).rejects.toThrow();
   await expect(store.save({})).rejects.toThrow();
 });
+
+test('list returns all saved jobs and skips corrupt / non-json files', async () => {
+  const dir = tmp();
+  const store = createJobsStore({ dir });
+  await store.save({ ...sample(), jobId: 'j1' });
+  await store.save({ ...sample(), jobId: 'j2' });
+  // A hand-mangled record and an unrelated file must not break enumeration.
+  writeFileSync(join(dir, 'j3.json'), '{ not valid json');
+  writeFileSync(join(dir, 'notes.txt'), 'ignore me');
+  const ids = (await store.list()).map((j) => j.jobId).sort();
+  expect(ids).toEqual(['j1', 'j2']);
+});
+
+test('list on a never-used store directory is an empty array', async () => {
+  const store = createJobsStore({ dir: join(tmp(), 'sub', 'not-created-yet') });
+  expect(await store.list()).toEqual([]);
+});
+
+test('remove deletes a job and is a no-op if it is already gone', async () => {
+  const store = createJobsStore({ dir: tmp() });
+  await store.save({ ...sample(), jobId: 'gone' });
+  await store.remove('gone');
+  expect(await store.load('gone')).toBeNull();
+  await store.remove('gone'); // no throw
+});
