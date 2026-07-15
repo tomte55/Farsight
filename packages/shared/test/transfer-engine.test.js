@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { createReceiveJob, createSendJob } from '../src/transfer-engine.js';
+import { createReceiveJob, createSendJob, nextJobState } from '../src/transfer-engine.js';
 
 const manifest = {
   entries: [
@@ -72,4 +72,22 @@ test('send progress counts remaining-to-send bytes', () => {
   tx.onFileSent(0);
   expect(tx.progress().sent).toBe(6);
   expect(tx.progress().filesSent).toBe(1);
+});
+
+test('nextJobState models the queue lifecycle', () => {
+  expect(nextJobState('active', 'pause')).toBe('paused');
+  expect(nextJobState('paused', 'resume')).toBe('active');
+  expect(nextJobState('active', 'disconnect')).toBe('interrupted');
+  expect(nextJobState('interrupted', 'reconnect')).toBe('active');
+  expect(nextJobState('active', 'complete')).toBe('done');
+  expect(nextJobState('active', 'fail')).toBe('error');
+  expect(nextJobState('active', 'cancel')).toBe('canceled');
+  expect(nextJobState('error', 'retry')).toBe('active');
+});
+
+test('nextJobState ignores impossible transitions', () => {
+  expect(nextJobState('done', 'pause')).toBe('done');
+  expect(nextJobState('canceled', 'resume')).toBe('canceled');
+  expect(nextJobState('active', 'bogus')).toBe('active');
+  expect(nextJobState('nonsense', 'pause')).toBe('nonsense');
 });
