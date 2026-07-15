@@ -39,6 +39,16 @@ export function createAccountService({
     },
     async logout() {
       heartbeat.stop();
+      // Revoke this device server-side so it leaves the owner's fleet (and its
+      // refresh token dies) — not just a local token wipe. Best-effort: if we're
+      // offline or it fails, still clear locally so sign-out always completes.
+      const deviceId = session.getDeviceId();
+      if (deviceId) {
+        const token = await session.getAccessToken();
+        if (token) {
+          try { await client.revokeDevice({ accessToken: token, deviceId }); } catch { /* clear locally anyway */ }
+        }
+      }
       return session.logout();
     },
     register: (input) => client.register(input),

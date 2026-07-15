@@ -107,6 +107,34 @@ describe('getAccessToken auto-refresh', () => {
   });
 });
 
+describe('getDeviceId', () => {
+  test('is the deviceId from login, and survives a refresh (decoded from the access token)', async () => {
+    const store = memStore();
+    // access token carries a deviceId claim so a resumed session still knows it
+    const withDevice = (dev, expSec) => {
+      const b64url = (o) => Buffer.from(JSON.stringify(o)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      return `${b64url({ alg: 'HS256' })}.${b64url({ deviceId: dev, exp: expSec })}.sig`;
+    };
+    const nearlyExpired = withDevice('d1', NOW / 1000 + 10);
+    const refreshed = withDevice('d1', NOW / 1000 + 900);
+    const client = {
+      login: vi.fn().mockResolvedValue({ ok: true, data: { accessToken: nearlyExpired, refreshToken: 'r1', deviceId: 'd1' } }),
+      refresh: vi.fn().mockResolvedValue({ ok: true, data: { accessToken: refreshed } }),
+    };
+    const session = createAccountSession({ client, store, now: () => NOW });
+
+    await session.login({ email: 'a@b.c', password: 'pw', deviceName: 'pc' });
+    expect(session.getDeviceId()).toBe('d1');
+    await session.getAccessToken(); // triggers a refresh (near expiry)
+    expect(session.getDeviceId()).toBe('d1');
+  });
+
+  test('is null before any login/resume', () => {
+    const session = createAccountSession({ client: { login: vi.fn(), refresh: vi.fn() }, store: memStore(), now: () => NOW });
+    expect(session.getDeviceId()).toBeNull();
+  });
+});
+
 describe('logout', () => {
   test('clears the store and the in-memory token', async () => {
     const store = memStore({ refreshToken: 'r1' });

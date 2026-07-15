@@ -471,9 +471,15 @@ async function doSignIn() {
   acctSigninBtn.disabled = true;
   acctSigninBtn.textContent = 'Signing in…';
   // deviceName defaults to the machine hostname in main; omitted here.
-  const res = await window.farsightIpc.accountLogin({ email, password, code });
-  acctSigninBtn.disabled = false;
-  acctSigninBtn.textContent = 'Sign in & link';
+  let res;
+  try {
+    res = await window.farsightIpc.accountLogin({ email, password, code });
+  } catch {
+    res = { ok: false, error: 'network_error' };
+  } finally {
+    acctSigninBtn.disabled = false;
+    acctSigninBtn.textContent = 'Sign in & link';
+  }
   if (res.ok) {
     acctPassword.value = '';
     acctCode.value = '';

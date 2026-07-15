@@ -147,6 +147,43 @@ describe('createAccountService', () => {
     expect(sched.hasCallback()).toBe(false);
   });
 
+  test('logout revokes this device server-side before clearing (so it leaves the fleet)', async () => {
+    const ff = fakeFetch({
+      '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } },
+      '/devices/revoke': { status: 200, body: { ok: true } },
+    });
+    const service = createAccountService({
+      baseUrl: 'https://auth.example', safeStorage: fakeSafeStorage, fs: fakeFs(),
+      filePath: '/cfg/token.enc', fetch: ff.impl, now: () => 1_700_000_000_000,
+    });
+
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+    await service.logout();
+
+    const revoke = ff.calls.find((c) => c.url.endsWith('/devices/revoke'));
+    expect(revoke).toBeTruthy();
+    expect(JSON.parse(revoke.init.body)).toEqual({ deviceId: 'd1' });
+    expect(revoke.init.headers.authorization).toMatch(/^Bearer /);
+    // and the session is signed out afterwards
+    expect(await service.status()).toEqual({ signedIn: false });
+  });
+
+  test('logout still clears locally even if the server revoke fails (offline)', async () => {
+    const fs = fakeFs();
+    const service = createAccountService({
+      baseUrl: 'https://auth.example', safeStorage: fakeSafeStorage, fs,
+      filePath: '/cfg/token.enc',
+      // no /devices/revoke route → 404; logout must not throw and must still clear
+      fetch: fakeFetch({ '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } } }).impl,
+      now: () => 1_700_000_000_000,
+    });
+
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+    await expect(service.logout()).resolves.not.toThrow();
+    expect(fs.existsSync('/cfg/token.enc')).toBe(false);
+    expect(await service.status()).toEqual({ signedIn: false });
+  });
+
   test('logout clears the persisted session', async () => {
     const fs = fakeFs();
     const service = svc({ '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } } }, fs);

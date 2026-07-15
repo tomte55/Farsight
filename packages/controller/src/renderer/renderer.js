@@ -536,9 +536,15 @@ async function doSignIn() {
   if (!email || !password) { setMsg(acctSigninError, 'Enter your email and password.'); return; }
   acctSigninBtn.disabled = true;
   acctSigninBtn.textContent = 'Signing in…';
-  const res = await window.farsightIpc.accountLogin({ email, password, deviceName: 'Controller', code });
-  acctSigninBtn.disabled = false;
-  acctSigninBtn.textContent = 'Sign in';
+  let res;
+  try {
+    res = await window.farsightIpc.accountLogin({ email, password, deviceName: 'Controller', code });
+  } catch {
+    res = { ok: false, error: 'network_error' };
+  } finally {
+    acctSigninBtn.disabled = false;
+    acctSigninBtn.textContent = 'Sign in';
+  }
   if (res.ok) {
     acctPassword.value = '';
     acctCode.value = '';
@@ -650,3 +656,8 @@ document.getElementById('acct-forgot').addEventListener('click', doForgot);
 for (const el of [acctPassword, acctCode, acctEmail]) {
   el.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSignIn(); });
 }
+
+// Resume a persisted account session on launch so a signed-in controller starts
+// reporting presence immediately (heartbeat), without waiting for the fleet panel
+// to be opened. No stored token → no network call; status() just returns signed-out.
+window.farsightIpc.accountStatus();
