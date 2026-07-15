@@ -7,6 +7,7 @@ import { CONTROL } from '@farsight/shared/control-events';
 import { isValidHostId } from '@farsight/shared/host-id';
 import { normalizeHostId, passwordCandidates } from '@farsight/shared/credentials-format';
 import { isOlder } from '@farsight/shared/version';
+import { runConnectionAuth } from '@farsight/shared/connection-auth';
 import {
   CHUNK_SIZE, MAX_FILE_SIZE, metaFrame, endFrame, parseFrame, sanitizeFilename, createReceiver,
 } from '@farsight/shared/file-transfer';

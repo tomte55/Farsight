@@ -36,4 +36,11 @@ describe('controller connect-from-console wiring', () => {
     expect(renderer).toMatch(/linked:\s*true/);
     expect(renderer).toMatch(/runConnectionAuth/);
   });
+
+  // Regression guard (v1.7.2 bug): runConnectionAuth was USED but not IMPORTED →
+  // ReferenceError at runtime → the controller crashed before sending hello and the
+  // host timed out. Assert the actual import binding, not merely the identifier.
+  test('the renderer IMPORTS runConnectionAuth (not just references it)', () => {
+    expect(renderer).toMatch(/import\s*\{[^}]*\brunConnectionAuth\b[^}]*\}\s*from\s*['"]@farsight\/shared\/connection-auth['"]/);
+  });
 });
