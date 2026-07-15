@@ -165,6 +165,85 @@ test('loopback: a multi-file folder transfers, verifies, and finalizes every fil
   }
 });
 
+test('createReceiver does not resolve on job_done until the last file finishes draining (completion gating)', async () => {
+  const dest = tmp();
+  const payload = Buffer.from('late-bytes-payload'.repeat(40));
+  const hash = createHash('sha256').update(payload).digest('hex');
+  const manifest = { entries: [{ fileId: 0, path: 'late.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const sent = [];
+  const ch = {
+    sendCtrl(s) { sent.push(parseCtrlFrame(s)); },
+    async sendBulk() {},
+    onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; },
+  };
+  const store = memStore();
+  const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true });
+  const done = rx.start();
+  let settled = false;
+  done.then(() => { settled = true; });
+
+  await recvCtrl(offerFrame({ jobId: 'g1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(fileBeginFrame({ jobId: 'g1', fileId: 0, offset: 0 }));
+  // job_done arrives BEFORE the file's bulk bytes and FILE_END (ft-ctrl and
+  // ft-bulk are independently ordered) — the receiver must NOT resolve yet.
+  await recvCtrl(jobDoneFrame({ jobId: 'g1' }));
+  await new Promise((r) => setImmediate(r));
+  expect(settled).toBe(false);
+
+  await recvBulk(payload);
+  await new Promise((r) => setImmediate(r));
+  expect(settled).toBe(false); // bytes landed, but FILE_END's hash hasn't arrived yet
+
+  await recvCtrl(fileEndFrame({ jobId: 'g1', fileId: 0, hash }));
+  const res = await done;
+
+  expect(res.ok).toBe(true);
+  expect(existsSync(join(dest, 'late.bin'))).toBe(true);
+});
+
+test('createReceiver resolves (does not hang) with ok:false when it declines an offer with a traversal path', async () => {
+  const dest = tmp();
+  let recvCtrl = () => {};
+  const sent = [];
+  const ch = { sendCtrl(s) { sent.push(parseCtrlFrame(s)); }, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk() {} };
+  const rx = createReceiver({ channel: ch, destRoot: dest, store: memStore(), consent: async () => true });
+  const done = rx.start();
+
+  await recvCtrl(offerFrame({ jobId: 'bad2', entries: [{ fileId: 0, path: '../escape', size: 1, mtime: 1 }], totalBytes: 1, totalFiles: 1 }));
+  expect(sent.some((f) => f.t === 'reject')).toBe(true);
+
+  const res = await done; // must settle, not hang
+  expect(res.ok).toBe(false);
+});
+
+test('createReceiver resolves ok:false (does not hang) on a hash mismatch, and discards the .part', async () => {
+  const dest = tmp();
+  const payload = Buffer.from('mismatch-payload'.repeat(40));
+  const manifest = { entries: [{ fileId: 0, path: 'bad.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const ch = {
+    sendCtrl() {}, async sendBulk() {},
+    onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; },
+  };
+  const store = memStore();
+  const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true });
+  const done = rx.start();
+
+  await recvCtrl(offerFrame({ jobId: 'm1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(fileBeginFrame({ jobId: 'm1', fileId: 0, offset: 0 }));
+  await recvBulk(payload);
+  await recvCtrl(fileEndFrame({ jobId: 'm1', fileId: 0, hash: 'deadbeef'.repeat(8) })); // wrong hash (64 hex chars)
+  await recvCtrl(jobDoneFrame({ jobId: 'm1' }));
+  const res = await done; // must settle, not hang
+
+  expect(res.ok).toBe(false);
+  expect(existsSync(join(dest, 'bad.bin'))).toBe(false);
+  expect(existsSync(join(dest, 'bad.bin.part'))).toBe(false); // discarded on mismatch
+});
+
 test('loopback: an interrupted single file resumes and still verifies (restart completion-read)', async () => {
   const srcRoot = tmp();
   const f = join(srcRoot, 'big.bin');
