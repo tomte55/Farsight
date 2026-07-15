@@ -47,6 +47,8 @@ ipcMain.handle('account:register', (_e, input) => getAccountService().register(i
 ipcMain.handle('account:resend-verification', (_e, input) => getAccountService().resendVerification(input));
 ipcMain.handle('account:request-password-reset', (_e, input) => getAccountService().requestPasswordReset(input));
 ipcMain.handle('account:fleet', () => getAccountService().fleet());
+// Remote update (S2.7): set a converge-to target version on a fleet device.
+ipcMain.handle('account:request-update', (_e, input) => getAccountService().requestDeviceUpdate(input?.deviceId, input?.targetVersion));
 
 function configFilePath() {
   return path.join(app.getPath('userData'), 'config.json');

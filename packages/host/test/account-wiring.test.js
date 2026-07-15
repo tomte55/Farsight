@@ -79,3 +79,13 @@ describe('host connect-from-console wiring (SP2 §4.4)', () => {
     }
   });
 });
+
+describe('host remote-update wiring (S2.7)', () => {
+  test('acts on a converge-to directive from the account heartbeat', () => {
+    // onUpdateDirective → shouldConverge gate → installWhenReady.
+    expect(main).toMatch(/onUpdateDirective/);
+    expect(main).toMatch(/shouldConverge/);
+    expect(main).toMatch(/installWhenReady/);
+    expect(main).toMatch(/import\s*\{[^}]*\bshouldConverge\b[^}]*\}\s*from\s*['"]@farsight\/shared\/update-policy['"]/);
+  });
+});

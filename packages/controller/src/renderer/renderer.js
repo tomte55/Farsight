@@ -705,11 +705,33 @@ function hostRow(d) {
 
   const right = document.createElement('div');
   right.className = 'host-right';
+  // Remote update (S2.7): a host behind this controller's version gets an actionable
+  // Update button. Setting the directive makes the host converge to the official feed
+  // on its next heartbeat (works even if it's offline now — it converges on return).
   if (d.appVersion && appVersion && isOlder(d.appVersion, appVersion)) {
-    const badge = document.createElement('span');
-    badge.className = 'host-badge';
-    badge.textContent = 'Update available';
-    right.appendChild(badge);
+    // "Updating…" while a newer target than the host's current version is pending.
+    const pending = d.targetVersion && isOlder(d.appVersion, d.targetVersion);
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-ghost host-update';
+    if (pending) {
+      btn.textContent = 'Updating…';
+      btn.disabled = true;
+    } else {
+      btn.textContent = 'Update';
+      btn.onclick = async () => {
+        btn.disabled = true;
+        btn.textContent = 'Updating…';
+        const res = await window.farsightIpc.accountRequestUpdate({ deviceId: d.id, targetVersion: appVersion });
+        if (!res || !res.ok) {
+          btn.disabled = false;
+          btn.textContent = 'Update';
+          setMsg(fleetError, 'Couldn’t request the update. Check your connection.');
+        } else {
+          setTimeout(loadFleet, 4000); // reflect convergence on the next refresh
+        }
+      };
+    }
+    right.appendChild(btn);
   }
   const status = document.createElement('span');
   status.className = 'host-status';

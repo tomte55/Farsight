@@ -22,6 +22,7 @@ import { MAX_FILE_SIZE } from '@farsight/shared/file-transfer';
 import electronUpdater from 'electron-updater';
 const { autoUpdater } = electronUpdater;
 import { createUpdater } from '@farsight/shared/updater';
+import { shouldConverge } from '@farsight/shared/update-policy';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from '@farsight/shared/account-service';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -69,6 +70,7 @@ let hostId = '';
 // close-guard and every quit path (tray Quit, auto-update install).
 const lifecycle = createLifecycle();
 let hostUpdater = null;
+let lastHandledTarget = null; // S2.7: the last remote-update target we acted on
 let latestUpdateUi = { showRestartPrompt: false, checking: false, message: '', version: null };
 let log = null;   // root logger; assigned on app ready, referenced as log?.*
 // 16×16 Aurora gradient PNG (violet→blue, rounded). Inline data URL so the tray
@@ -370,6 +372,21 @@ app.whenReady().then(() => {
     },
   });
   hostUpdater.start();
+
+  // Remote update (S2.7): act on a converge-to directive delivered via the account
+  // heartbeat. Only when the target is strictly newer than us, and only once per
+  // target (installWhenReady checks/downloads then installs — deferring across an
+  // active session). Installs ONLY the official feed release; the directive is just
+  // a version string. Registered here so a linked host that resumed its session on
+  // launch converges without any UI.
+  getAccountService().onUpdateDirective((data) => {
+    const target = data && typeof data.targetVersion === 'string' ? data.targetVersion : null;
+    if (target && target !== lastHandledTarget && shouldConverge({ currentVersion: app.getVersion(), targetVersion: target })) {
+      lastHandledTarget = target;
+      log?.child('updater').info(`remote update directive → converge to ${target}`);
+      if (hostUpdater) hostUpdater.installWhenReady();
+    }
+  });
 });
 app.on('will-quit', () => { log?.info('host quitting'); globalShortcut.unregisterAll(); });
 app.on('window-all-closed', () => { if (lifecycle.isQuitting() && process.platform !== 'darwin') app.quit(); });

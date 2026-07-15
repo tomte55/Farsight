@@ -43,4 +43,11 @@ describe('controller connect-from-console wiring', () => {
   test('the renderer IMPORTS runConnectionAuth (not just references it)', () => {
     expect(renderer).toMatch(/import\s*\{[^}]*\brunConnectionAuth\b[^}]*\}\s*from\s*['"]@farsight\/shared\/connection-auth['"]/);
   });
+
+  test('remote-update wiring: IPC + preload + console Update button (S2.7)', () => {
+    expect(main).toContain("'account:request-update'");
+    expect(preload).toMatch(/\baccountRequestUpdate\b/);
+    expect(renderer).toMatch(/accountRequestUpdate/);
+    expect(renderer).toMatch(/host-update/);
+  });
 });
