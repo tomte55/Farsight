@@ -40,8 +40,11 @@ describe('main.js: transfer service construction (receive path)', () => {
   });
 
   test('openChannel attaches a transfer worker by sessionId, not by initiating', () => {
+    // Canonical rendezvous shape (SP3 coherence contract #1), identical to the
+    // controller: openChannel is always called as { role, target, sessionId }.
+    expect(main).toMatch(/openChannel:\s*async\s*\(\{\s*role,\s*target,\s*sessionId\s*\}\)/);
     expect(main).toMatch(/role:\s*'attach'/);
-    expect(main).toMatch(/sessionId:\s*rendezvous\?\.sessionId/);
+    expect(main).toMatch(/role:\s*'attach',\s*signalingUrl,\s*sessionId,\s*version/);
   });
 
   test('progress is forwarded to the renderer via transfer:event', () => {
@@ -62,12 +65,12 @@ describe('main.js: transfer:incoming / transfer:list IPC', () => {
 });
 
 describe('main.js: consent round-trip', () => {
-  test('requestReceiveConsent sends transfer:consent-request with jobId/manifest/destDir and returns a boolean promise', () => {
-    expect(main).toMatch(/function requestReceiveConsent/);
+  test('requestReceiveConsent sends transfer:consent-request with the REAL jobId/manifest/destDir and returns a boolean promise', () => {
+    // SP3 coherence contract #2: the real transfer jobId (from createReceiver's
+    // consent({jobId, manifest}) call), not a locally-minted correlation id.
+    expect(main).toMatch(/function requestReceiveConsent\(\{\s*jobId,\s*manifest\s*\}\)/);
     expect(main).toMatch(/'transfer:consent-request'/);
-    expect(main).toMatch(/jobId:\s*promptId/);
-    expect(main).toMatch(/manifest/);
-    expect(main).toMatch(/destDir/);
+    expect(main).toMatch(/jobId,\s*manifest,\s*destDir/);
   });
 
   test('registers transfer:respond-consent to resolve the pending prompt', () => {

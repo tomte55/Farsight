@@ -671,10 +671,10 @@ function renderManifestTree(node) {
   return ul;
 }
 
-// main mints a short-lived correlation id per consent prompt (NOT the same as
-// the persisted job's real jobId — see main.js's requestReceiveConsent). Only
-// one prompt is shown at a time; a second offer arriving mid-prompt is a real
-// gap flagged in the report (NEEDS-LIVE-VERIFICATION).
+// req.jobId is the REAL persisted transfer jobId (see main.js's
+// requestReceiveConsent — SP3 coherence contract #2). Only one prompt is
+// shown at a time; a second offer arriving mid-prompt is a real gap flagged
+// in the report (NEEDS-LIVE-VERIFICATION).
 let pendingConsentId = null;
 window.farsightIpc.onTransferConsent((req) => {
   if (!req || typeof req.jobId !== 'string' || !req.manifest) return;

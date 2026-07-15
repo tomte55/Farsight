@@ -90,23 +90,17 @@ function receivedFilesDir() {
   return path.join(app.getPath('downloads'), 'Farsight', 'Received');
 }
 
-// Consent round-trip: transfer-orchestrator's createReceiver calls
-// consent({manifest}) (no jobId — the real transfer jobId isn't assigned to
-// the orchestrator's local state until just before this call, and isn't
-// threaded through the consent callback's signature). We mint our own
-// short-lived correlation id per prompt so the renderer can reply to the
-// RIGHT modal even if a second offer somehow arrives while one is pending;
-// it is NOT the same id as the persisted job's jobId (that only exists once
-// the manifest is accepted) — see the NEEDS-LIVE-VERIFICATION note in the report.
-let consentCounter = 0;
-const pendingConsent = new Map(); // promptId -> resolve(boolean)
-function requestReceiveConsent({ manifest }) {
+// Consent round-trip (SP3 coherence contract #2): transfer-orchestrator's
+// createReceiver calls consent({jobId, manifest}) with the REAL transfer
+// jobId (assigned by the sender via OFFER) — use it directly as the
+// correlation id for the renderer's accept/reject round-trip, so the prompt,
+// the IPC round-trip, and the persisted jobs-store record all agree on one id.
+const pendingConsent = new Map(); // jobId -> resolve(boolean)
+function requestReceiveConsent({ jobId, manifest }) {
   return new Promise((resolve) => {
     if (!mainWindow || mainWindow.isDestroyed()) { resolve(false); return; }
-    consentCounter += 1;
-    const promptId = `c${consentCounter}-${Date.now().toString(36)}`;
-    pendingConsent.set(promptId, resolve);
-    mainWindow.webContents.send('transfer:consent-request', { jobId: promptId, manifest, destDir: receivedFilesDir() });
+    pendingConsent.set(jobId, resolve);
+    mainWindow.webContents.send('transfer:consent-request', { jobId, manifest, destDir: receivedFilesDir() });
     // Bring the window to the user's attention, same as an incoming control
     // session's CONNECT — an unattended host would otherwise silently drop
     // the offer (declined only because nobody saw the prompt in time).
@@ -132,15 +126,27 @@ function getTransferService() {
       consent: requestReceiveConsent,
       // The host never initiates a transfer in this phase (no send UI here —
       // that lives on the controller), so this only ever runs with the
-      // 'attach' role; rendezvous is { sessionId } (see 'transfer:incoming' below).
-      openChannel: async ({ rendezvous }) => {
+      // 'attach' role. Canonical rendezvous shape (SP3 coherence contract #1),
+      // identical to the controller's openChannel: transfer-service always
+      // calls this as { role, target, sessionId }.
+      openChannel: async ({ role, target, sessionId }) => {
         const worker = createTransferWorker();
         const stored = readStoredConfig();
         const signalingUrl = resolveSignalingUrl({
           envUrl: process.env.FARSIGHT_SIGNALING_URL,
           storedUrl: stored.signalingUrl,
         }).url;
-        worker.startRendezvous({ role: 'attach', signalingUrl, sessionId: rendezvous?.sessionId, version: app.getVersion() });
+        if (role === 'initiate') {
+          worker.startRendezvous({
+            role: 'initiator',
+            signalingUrl,
+            targetId: target?.id,
+            password: target?.password,
+            version: app.getVersion(),
+          });
+        } else {
+          worker.startRendezvous({ role: 'attach', signalingUrl, sessionId, version: app.getVersion() });
+        }
         return { channel: worker.channel, close: async () => worker.close() };
       },
       onEvent: (ev) => {
