@@ -3,7 +3,8 @@ import { expect, test, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createJobsStore } from '../src/jobs-store.js';
+import { createJobsStore, JOB_STATES } from '../src/jobs-store.js';
+import { nextJobState } from '../src/transfer-engine.js';
 
 const dirs = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), 'ftjobs-')); dirs.push(d); return d; }
@@ -68,4 +69,11 @@ test('remove deletes a job and is a no-op if it is already gone', async () => {
   await store.remove('gone');
   expect(await store.load('gone')).toBeNull();
   await store.remove('gone'); // no throw
+});
+
+test('JOB_STATES covers every state the engine reducer can reach', () => {
+  const events = ['pause', 'resume', 'disconnect', 'reconnect', 'complete', 'fail', 'cancel', 'retry'];
+  const reachable = new Set(['active']); // the initial state
+  for (const s of [...JOB_STATES]) for (const e of events) reachable.add(nextJobState(s, e));
+  for (const s of reachable) expect(JOB_STATES).toContain(s);
 });
