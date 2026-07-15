@@ -1,0 +1,27 @@
+<!-- packages/controller/src/transfer-worker/index.html -->
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  Hidden, UI-less worker window (design doc §3): owns the transfer
+  RTCPeerConnection + its own signaling WebSocket. This window still handles
+  untrusted-adjacent input (a remote peer's SDP/data-channel frames) even with
+  no UI, so it gets the same CSP containment as the visible renderer.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self'; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+<title>Farsight Transfer Worker</title>
+<!--
+  Import map: same mechanism as ../renderer/index.html — resolves bare
+  @farsight/shared/* specifiers (Chromium has no bundler/node_modules
+  resolution here) to the vendored ../shared/*.js path that resolves
+  identically in dev and in the packaged asar. Only lists what worker.js's
+  module graph actually imports; extend when worker.js grows.
+-->
+<script type="importmap">
+{
+  "imports": {
+    "@farsight/shared/protocol": "../shared/protocol.js",
+    "@farsight/shared/signaling-url": "../shared/signaling-url.js"
+  }
+}
+</script>
+<script type="module" src="./worker.js"></script>
