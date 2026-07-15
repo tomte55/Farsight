@@ -13,6 +13,14 @@ import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl
 import { createUpdater } from '@farsight/shared/updater';
 import { MAX_FILE_SIZE } from '@farsight/shared/file-transfer';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from './account.js';
+// SP3 file transfer (send path): the orchestrator/queue/jobs-store pipeline
+// (createTransferService) plus the manifest-building I/O it's fed with.
+import { createTransferWorker } from './transfer-worker.js';
+import { createTransferService } from '@farsight/shared/transfer-service';
+import { createJobsStore } from '@farsight/shared/jobs-store';
+import { walkSource } from '@farsight/shared/transfer-io';
+import { buildManifest } from '@farsight/shared/transfer-manifest';
+import { newJobId } from '@farsight/shared/transfer-queue';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Account service (SP2 saved-hosts console) — lazily built so safeStorage /
@@ -49,6 +57,98 @@ ipcMain.handle('account:request-password-reset', (_e, input) => getAccountServic
 ipcMain.handle('account:fleet', () => getAccountService().fleet());
 // Remote update (S2.7): set a converge-to target version on a fleet device.
 ipcMain.handle('account:request-update', (_e, input) => getAccountService().requestDeviceUpdate(input?.deviceId, input?.targetVersion));
+
+// SP3 file transfer (send path). Each transfer gets its own createTransferWorker()
+// — a hidden BrowserWindow owning a DEDICATED RTCPeerConnection + signaling
+// socket (see transfer-worker.js), independent of the main control session's
+// peer. The jobs-store persists progress under userData/transfers so a send
+// survives across app restarts (resume is a later phase — this wiring covers
+// starting a fresh send end to end). `consent` always declines because the
+// controller UI does not offer a receive flow yet (Phase 2 follow-up); nothing
+// currently calls startReceive from this app.
+let jobsStore = null;
+function getJobsStore() {
+  if (!jobsStore) jobsStore = createJobsStore({ dir: path.join(app.getPath('userData'), 'transfers') });
+  return jobsStore;
+}
+let transferService = null;
+function getTransferService() {
+  if (!transferService) {
+    transferService = createTransferService({
+      store: getJobsStore(),
+      transferDir: path.join(app.getPath('userData'), 'transfers-received'),
+      consent: async () => false, // receive UI not wired yet — see comment above
+      openChannel: async ({ role, target, rendezvous }) => {
+        const worker = createTransferWorker();
+        const stored = readStoredConfig();
+        const signalingUrl = resolveSignalingUrl({
+          envUrl: process.env.FARSIGHT_SIGNALING_URL,
+          storedUrl: stored.signalingUrl,
+        }).url;
+        if (role === 'initiate') {
+          worker.startRendezvous({
+            role: 'initiator',
+            signalingUrl,
+            targetId: target?.id,
+            password: target?.password,
+            version: app.getVersion(),
+          });
+        } else {
+          worker.startRendezvous({ role: 'attach', signalingUrl, sessionId: rendezvous, version: app.getVersion() });
+        }
+        return { channel: worker.channel, close: async () => worker.close() };
+      },
+      onEvent: (ev) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('transfer:event', ev);
+      },
+    });
+  }
+  return transferService;
+}
+
+ipcMain.handle('transfer:pick-paths', async () => {
+  const r = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections', 'openDirectory'] });
+  return r.canceled ? [] : r.filePaths;
+});
+
+ipcMain.handle('transfer:send', async (_e, input) => {
+  const { target, paths } = input || {};
+  if (!target || typeof target.id !== 'string' || !Array.isArray(paths) || paths.length === 0) {
+    return { error: 'invalid_request' };
+  }
+  try {
+    const { entries, sources } = await walkSource(paths.map((p) => ({ path: p })));
+    const manifest = buildManifest(entries);
+    const jobId = newJobId();
+    // Fire-and-forget: startSend()'s promise only resolves once the WHOLE
+    // transfer finishes, so awaiting it here would block the renderer's
+    // transferSend() call for the entire transfer. Progress is instead
+    // delivered incrementally via the 'transfer:event' push above.
+    getTransferService().startSend({ jobId, manifest, sources, target })
+      .catch((err) => log?.child('transfer').warn(`send failed: ${err?.message || err}`));
+    return { jobId, manifest };
+  } catch (err) {
+    log?.child('transfer').warn(`transfer:send setup failed: ${err.message}`);
+    return { error: err.message };
+  }
+});
+
+ipcMain.handle('transfer:list', () => getTransferService().listJobs());
+
+// Best-effort cancel: transfer-orchestrator.js's createSender only reacts to a
+// 'cancel' CTRL frame arriving FROM the remote peer — there is no local-abort
+// hook exposed through transfer-service yet, so an in-flight send keeps
+// running to completion/error even after this call. This marks the persisted
+// job record canceled so the UI reflects the user's intent; a real abort path
+// is a follow-up (see NEEDS-LIVE-VERIFICATION notes).
+ipcMain.handle('transfer:cancel', async (_e, jobId) => {
+  const store = getJobsStore();
+  const job = await store.load(jobId);
+  if (!job) return { ok: false };
+  if (job.jobState === 'done' || job.jobState === 'canceled') return { ok: true };
+  await store.save({ ...job, jobState: 'canceled' });
+  return { ok: true };
+});
 
 function configFilePath() {
   return path.join(app.getPath('userData'), 'config.json');

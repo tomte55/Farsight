@@ -52,8 +52,11 @@ describe('createTransferWorker() exports the documented factory surface', () => 
     expect(worker).toMatch(/import\s*\{[^}]*\bcreateTransferChannel\b[^}]*\}\s*from\s*['"]@farsight\/shared\/transfer-channel['"]/);
   });
 
-  test('is NOT wired into app.whenReady() yet (later UI plan)', () => {
-    expect(main).not.toMatch(/createTransferWorker/);
+  // SP3 Phase 2: createTransferWorker() is now wired into main.js's
+  // getTransferService()/openChannel (send path) — see
+  // controller-transfer-ui-wiring.test.js for the send/UI wiring guards.
+  test('is wired into main.js (send-path orchestration)', () => {
+    expect(main).toMatch(/createTransferWorker/);
   });
 });
 

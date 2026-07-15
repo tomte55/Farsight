@@ -30,4 +30,12 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   connAuthSign: (message) => ipcRenderer.invoke('conn-auth:sign', message),
   connAuthVerify: (publicKey, message, signature) => ipcRenderer.invoke('conn-auth:verify', publicKey, message, signature),
   connAuthIsAccountKey: (publicKey) => ipcRenderer.invoke('conn-auth:is-account-key', publicKey),
+  // SP3 file transfer (send path): pick files/folders via the OS dialog, start
+  // a send to a target {id,password}, list persisted jobs, best-effort cancel,
+  // and subscribe to live progress pushed from main as 'transfer:event'.
+  transferPickPaths: () => ipcRenderer.invoke('transfer:pick-paths'),
+  transferSend: (input) => ipcRenderer.invoke('transfer:send', input),
+  transferList: () => ipcRenderer.invoke('transfer:list'),
+  transferCancel: (jobId) => ipcRenderer.invoke('transfer:cancel', jobId),
+  onTransferEvent: (cb) => ipcRenderer.on('transfer:event', (_e, ev) => cb(ev)),
 });
