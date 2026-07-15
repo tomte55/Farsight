@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest';
 import { newJobId, selectResumable, RESUMABLE_STATES } from '../src/transfer-queue.js';
+import { createQueue } from '../src/transfer-queue.js';
 
 test('newJobId is a filesystem-safe unique lowercase hex id', () => {
   const a = newJobId(), b = newJobId();
@@ -27,4 +28,33 @@ test('selectResumable keeps only incomplete jobs, ordered by createdAt then jobI
 test('selectResumable tolerates a non-array / empty input', () => {
   expect(selectResumable(null)).toEqual([]);
   expect(selectResumable([])).toEqual([]);
+});
+
+test('createQueue keeps one active job and promotes FIFO on complete', () => {
+  const q = createQueue();
+  expect(q.active()).toBeNull();
+  q.add('j1'); q.add('j2'); q.add('j3');
+  expect(q.active()).toBe('j1');
+  expect(q.list()).toEqual(['j1', 'j2', 'j3']);
+  expect(q.complete('j1')).toBe('j2'); // promotes next active
+  expect(q.active()).toBe('j2');
+  expect(q.list()).toEqual(['j2', 'j3']);
+});
+
+test('add is idempotent and remove drops a waiting or active job', () => {
+  const q = createQueue();
+  q.add('a'); q.add('a'); q.add('b');
+  expect(q.list()).toEqual(['a', 'b']); // no duplicate
+  expect(q.has('b')).toBe(true);
+  expect(q.remove('b')).toBe('a'); // removing a waiting job keeps active 'a'
+  expect(q.list()).toEqual(['a']);
+  expect(q.remove('a')).toBeNull(); // removing the last leaves nothing active
+  expect(q.active()).toBeNull();
+});
+
+test('completing a non-active job just drops it from the waiting list', () => {
+  const q = createQueue();
+  q.add('a'); q.add('b'); q.add('c');
+  expect(q.complete('c')).toBe('a'); // active unchanged
+  expect(q.list()).toEqual(['a', 'b']);
 });

@@ -14,3 +14,17 @@ export function selectResumable(records) {
     .filter((r) => r && RESUMABLE_STATES.includes(r.jobState))
     .sort((a, b) => (a.createdAt - b.createdAt) || (a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0));
 }
+
+// Serial single-active FIFO. The head of the list is the active job; the rest
+// wait. complete/remove drop the id and return the new active head (or null).
+export function createQueue() {
+  const order = []; // active is order[0]
+  return {
+    add(jobId) { if (!order.includes(jobId)) order.push(jobId); },
+    active() { return order.length ? order[0] : null; },
+    has(jobId) { return order.includes(jobId); },
+    list() { return [...order]; },
+    complete(jobId) { const i = order.indexOf(jobId); if (i >= 0) order.splice(i, 1); return order.length ? order[0] : null; },
+    remove(jobId) { const i = order.indexOf(jobId); if (i >= 0) order.splice(i, 1); return order.length ? order[0] : null; },
+  };
+}
