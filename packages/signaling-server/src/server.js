@@ -170,6 +170,9 @@ export function createSignalingServer({ port, config } = {}) {
             sess.timer = setTimeout(() => {
               if (sessions.get(sessionId) === sess && !sess.b) {
                 sessions.delete(sessionId);
+                // Drop the initiator's back-pointer so a later close can't delete
+                // an unrelated session that reused this id (no leaked/wrong-swept sessions).
+                if (socket.farsight.transferSessionId === sessionId) socket.farsight.transferSessionId = null;
                 send(socket, MSG.ERROR, { reason: 'transfer_timeout' });
               }
             }, cfg.sessionTimeoutMs ?? 15000);

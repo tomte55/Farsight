@@ -102,6 +102,33 @@ test('ATTACH to an unknown session is rejected', async () => {
   w.close();
 });
 
+test('a second ATTACH to an already-attached session is rejected', async () => {
+  srv = createSignalingServer({ port: 8288, config: cfg({ port: 8288 }) });
+  const host = await open('ws://127.0.0.1:8288');
+  const hostRead = reader(host);
+  host.send(JSON.stringify({ type: MSG.REGISTER, password: 'pw' }));
+  const reg = await hostRead();
+
+  const sender = await open('ws://127.0.0.1:8288');
+  const senderRead = reader(sender);
+  sender.send(JSON.stringify({ type: MSG.CONNECT, targetId: reg.id, password: 'pw', kind: 'transfer' }));
+  const req = await hostRead();
+
+  const worker = await open('ws://127.0.0.1:8288');
+  const workerRead = reader(worker);
+  worker.send(JSON.stringify({ type: MSG.ATTACH, sessionId: req.sessionId }));
+  expect((await senderRead()).type).toBe(MSG.ICE_SERVERS);
+  expect((await workerRead()).type).toBe(MSG.ICE_SERVERS);
+
+  // A second worker cannot hijack the already-paired session.
+  const intruder = await open('ws://127.0.0.1:8288');
+  const intruderRead = reader(intruder);
+  intruder.send(JSON.stringify({ type: MSG.ATTACH, sessionId: req.sessionId }));
+  expect((await intruderRead()).reason).toBe('no_session');
+
+  host.close(); sender.close(); worker.close(); intruder.close();
+});
+
 test('an unattached session times out and errors the initiator', async () => {
   srv = createSignalingServer({ port: 8286, config: cfg({ port: 8286, sessionTimeoutMs: 80 }) });
   const host = await open('ws://127.0.0.1:8286');
