@@ -67,15 +67,23 @@ export function createAccountServer(opts: CreateServerOptions): Server {
     return b;
   };
 
-  const send = (res: ServerResponse, status: number, body: unknown) => {
-    const payload = JSON.stringify(body);
+  const send = (res: ServerResponse, status: number, body: unknown, contentType?: string) => {
+    if (contentType === 'text/html') {
+      res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(String(body));
+      return;
+    }
     res.writeHead(status, { 'content-type': 'application/json' });
-    res.end(payload);
+    res.end(JSON.stringify(body));
   };
 
   return createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const ip = clientIp(req, trustProxy);
-    const path = (req.url ?? '/').split('?')[0]!;
+    const url = req.url ?? '/';
+    const qIdx = url.indexOf('?');
+    const path = qIdx === -1 ? url : url.slice(0, qIdx);
+    const query: Record<string, string> = {};
+    if (qIdx !== -1) for (const [k, v] of new URLSearchParams(url.slice(qIdx + 1))) query[k] = v;
     try {
       if (!bucketFor(ip).tryRemove()) {
         log('rate_limited', { ip, path });
@@ -96,10 +104,11 @@ export function createAccountServer(opts: CreateServerOptions): Server {
         method: req.method ?? 'GET',
         path,
         body,
+        query,
         headers: req.headers,
       });
       log('request', { ip, method: req.method, path, status: response.status });
-      send(res, response.status, response.body);
+      send(res, response.status, response.body, response.contentType);
     } catch (e) {
       if (e instanceof PayloadTooLarge) return send(res, 413, { error: 'payload_too_large' });
       log('error', { ip, path, message: e instanceof Error ? e.message : 'unknown' });

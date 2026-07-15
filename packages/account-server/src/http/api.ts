@@ -30,23 +30,56 @@ export interface ApiRequest {
   method: string;
   path: string;
   body: unknown; // parsed JSON, or undefined
+  query?: Record<string, string | undefined>; // parsed URL query string
   headers?: Record<string, string | string[] | undefined>;
 }
 
 export interface ApiResponse {
   status: number;
   body: unknown;
+  contentType?: string; // defaults to application/json; 'text/html' for web pages
 }
 
 const json = (status: number, body: unknown): ApiResponse => ({ status, body });
 const ok = (body: unknown = { ok: true }): ApiResponse => json(200, body);
 const badRequest = (error = 'invalid_request'): ApiResponse => json(400, { error });
+const html = (status: number, body: string): ApiResponse => ({ status, body, contentType: 'text/html' });
 
 // Pull a required non-empty string field from a JSON body, else undefined.
 function str(body: unknown, key: string): string | undefined {
   if (typeof body !== 'object' || body === null) return undefined;
   const v = (body as Record<string, unknown>)[key];
   return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+// Pull a required non-empty query-string param, else undefined.
+function qstr(req: ApiRequest, key: string): string | undefined {
+  const v = req.query?.[key];
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+}
+
+// Minimal self-contained (no external assets) Farsight-branded HTML shell for the
+// browser-facing verification / reset pages the emails link to.
+function page(title: string, inner: string): string {
+  return (
+    `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>` +
+    `:root{color-scheme:dark}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;` +
+    `background:#0e0e16;color:#e6e6f0;font:15px/1.6 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}` +
+    `.card{width:min(92vw,420px);background:#16161f;border:1px solid #26263a;border-radius:14px;padding:30px 28px}` +
+    `.brand{display:flex;align-items:center;gap:9px;margin-bottom:18px;font-weight:700}.glyph{color:#4aa8ff}` +
+    `h1{font-size:18px;margin:0 0 8px}p{color:#a6a6c0;margin:0 0 14px}` +
+    `label{display:block;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#8a8aa8;margin:12px 0 5px}` +
+    `input{width:100%;box-sizing:border-box;padding:11px 12px;border-radius:9px;border:1px solid #2c2c44;` +
+    `background:#0e0e16;color:#e6e6f0;font-size:15px}button{width:100%;margin-top:16px;padding:11px;border:0;` +
+    `border-radius:9px;background:#4aa8ff;color:#04122a;font-weight:700;font-size:15px;cursor:pointer}` +
+    `.ok{color:#7ee0a0}.err{color:#ff8a8a}</style></head><body><div class="card">` +
+    `<div class="brand"><span class="glyph">◆</span>Farsight</div>${inner}</div></body></html>`
+  );
 }
 
 type Handler = (ctx: ApiContext, req: ApiRequest) => Promise<ApiResponse>;
@@ -96,6 +129,46 @@ const handlers: Record<string, Handler> = {
     if (!token) return badRequest();
     const res = await verifyEmail(flowDeps(ctx), { token });
     return res === 'ok' ? ok({ verified: true }) : badRequest(res); // 'invalid' | 'expired'
+  },
+
+  // ── browser-facing web pages (the emails link to these GET routes) ────────
+  'GET /verify': async (ctx, req) => {
+    const token = qstr(req, 'token');
+    if (!token) {
+      return html(400, page('Verify email', `<h1>Verification link incomplete</h1><p>Open the link from your verification email again — it looks like part of it was cut off.</p>`));
+    }
+    const res = await verifyEmail(flowDeps(ctx), { token });
+    if (res === 'ok') {
+      return html(200, page('Email verified', `<h1 class="ok">Email verified ✓</h1><p>Your Farsight account is ready. Head back to the Farsight app and sign in.</p>`));
+    }
+    return html(400, page('Verify email', `<h1 class="err">Link invalid or expired</h1><p>This verification link is invalid or has expired. In the Farsight app, sign in to send yourself a fresh verification email.</p>`));
+  },
+
+  'GET /reset': async (ctx, req) => {
+    const token = qstr(req, 'token');
+    if (!token) {
+      return html(400, page('Reset password', `<h1>Reset link incomplete</h1><p>Open the link from your password-reset email again — it looks like part of it was cut off.</p>`));
+    }
+    // Render the form; the token is validated (and consumed) on submit by
+    // POST /confirm-password-reset, so a GET never burns the single-use link.
+    const t = escapeHtml(token);
+    const inner =
+      `<h1>Choose a new password</h1><p>Enter a new password for your Farsight account.</p>` +
+      `<form id="f"><input type="hidden" id="token" value="${t}">` +
+      `<label for="pw">New password</label>` +
+      `<input id="pw" type="password" autocomplete="new-password" minlength="8" required>` +
+      `<button type="submit">Set new password</button></form><p id="msg"></p>` +
+      `<script>document.getElementById('f').addEventListener('submit',async function(e){e.preventDefault();` +
+      `var m=document.getElementById('msg');m.textContent='Saving…';m.className='';` +
+      `var r=await fetch('/confirm-password-reset',{method:'POST',headers:{'content-type':'application/json'},` +
+      `body:JSON.stringify({token:document.getElementById('token').value,newPassword:document.getElementById('pw').value})});` +
+      `if(r.ok){m.textContent='Password updated — you can now sign in in the Farsight app.';m.className='ok';` +
+      `document.getElementById('pw').disabled=true;e.target.querySelector('button').disabled=true;}` +
+      `else{var d=await r.json().catch(function(){return{};});` +
+      `m.textContent=d.error==='weak_password'?'Choose a stronger password (at least 8 characters).':` +
+      `(d.error==='expired'?'This reset link has expired — request a new one from the app.':'This reset link is invalid or has already been used.');` +
+      `m.className='err';}});</script>`;
+    return html(200, page('Reset password', inner));
   },
 
   // Enumeration-safe: always 200, regardless of whether the email exists.
