@@ -30,3 +30,24 @@ export function validateEntry(e) {
   if (typeof e.mtime !== 'number' || !Number.isFinite(e.mtime)) return false;
   return true;
 }
+
+export function buildManifest(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) throw new Error('empty manifest');
+  const seen = new Set();
+  const out = [];
+  let totalBytes = 0;
+  for (const e of entries) {
+    if (!validateEntry(e)) throw new Error('invalid manifest entry');
+    if (seen.has(e.fileId)) throw new Error('duplicate fileId');
+    seen.add(e.fileId);
+    out.push({ fileId: e.fileId, path: sanitizeRelativePath(e.path), size: e.size, mtime: e.mtime });
+    totalBytes += e.size;
+  }
+  return { entries: out, totalBytes, totalFiles: out.length };
+}
+
+// skip-existing = rsync default (path already matched by caller; here size+mtime).
+export function skipExisting(entry, existing) {
+  if (!existing || typeof existing !== 'object') return false;
+  return existing.size === entry.size && existing.mtime === entry.mtime;
+}
