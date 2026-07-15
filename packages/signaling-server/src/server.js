@@ -76,7 +76,7 @@ export function createSignalingServer({ port, config } = {}) {
     // for normal ICE-candidate bursts, tight enough to stop message floods.
     const bucket = createTokenBucket({ capacity: cfg.msgBurst, refillPerSec: cfg.msgPerSec });
 
-    socket.farsight = { id: null, password: null, peerSocket: null, ip, registered: false, bucket, version: null };
+    socket.farsight = { id: null, password: null, peerSocket: null, ip, registered: false, bucket, version: null, acceptsLinked: false };
 
     // R-2: close a socket that neither registers (host) nor pairs (controller)
     // within the idle window, so half-open sockets can't accumulate.
@@ -114,6 +114,12 @@ export function createSignalingServer({ port, config } = {}) {
           // connecting controller (and, later, surfaced to the console). Only a
           // string is kept — anything else is ignored.
           socket.farsight.version = typeof msg.version === 'string' ? msg.version : null;
+          // Connect-from-console (SP2): advertise that this host accepts
+          // password-free "linked" connects from the owner's own account devices.
+          // The real auth is the E2E keypair handshake downstream (see
+          // shared/connection-auth.js) — this only relaxes the signaling password
+          // gate. Boolean only; anything else is ignored.
+          socket.farsight.acceptsLinked = msg.acceptsLinked === true;
           registry.add(id, socket);
           send(socket, MSG.REGISTERED, { id });
           log.event('register', { id });
@@ -135,11 +141,17 @@ export function createSignalingServer({ port, config } = {}) {
           // R-4: composite lockout key scopes attempts to (host, this controller IP).
           const key = `${msg.targetId}|${socket.farsight.ip}`;
           if (limiter.isLocked(key)) { log.event('locked', { id: msg.targetId }); send(socket, MSG.ERROR, { reason: 'locked' }); break; }
-          if (!target.farsight.password || !constantTimeEqual(String(msg.password ?? ''), target.farsight.password)) {
-            limiter.recordFailure(key);
-            log.event('auth_fail', { id: msg.targetId, reason: 'bad_password' });
-            send(socket, MSG.ERROR, { reason: 'bad_password' });
-            break;
+          // A linked connect skips the password gate — but only if the host
+          // advertised acceptsLinked. The host authenticates the peer end-to-end
+          // via the device-keypair handshake; signaling stays account-oblivious.
+          const wantsLinked = msg.linked === true && target.farsight.acceptsLinked === true;
+          if (!wantsLinked) {
+            if (!target.farsight.password || !constantTimeEqual(String(msg.password ?? ''), target.farsight.password)) {
+              limiter.recordFailure(key);
+              log.event('auth_fail', { id: msg.targetId, reason: 'bad_password' });
+              send(socket, MSG.ERROR, { reason: 'bad_password' });
+              break;
+            }
           }
           // R-5: reject a second controller while the host is already paired.
           if (target.farsight.peerSocket) { send(socket, MSG.ERROR, { reason: 'busy' }); break; }
