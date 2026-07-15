@@ -78,7 +78,11 @@ function getTransferService() {
       store: getJobsStore(),
       transferDir: path.join(app.getPath('userData'), 'transfers-received'),
       consent: async () => false, // receive UI not wired yet — see comment above
-      openChannel: async ({ role, target, rendezvous }) => {
+      // Canonical rendezvous shape (SP3 coherence contract #1), identical to
+      // the host's openChannel: transfer-service always calls this as
+      // { role, target, sessionId } — 'initiate' carries target (sessionId
+      // undefined), 'attach' carries sessionId (target undefined).
+      openChannel: async ({ role, target, sessionId }) => {
         const worker = createTransferWorker();
         const stored = readStoredConfig();
         const signalingUrl = resolveSignalingUrl({
@@ -94,7 +98,7 @@ function getTransferService() {
             version: app.getVersion(),
           });
         } else {
-          worker.startRendezvous({ role: 'attach', signalingUrl, sessionId: rendezvous, version: app.getVersion() });
+          worker.startRendezvous({ role: 'attach', signalingUrl, sessionId, version: app.getVersion() });
         }
         return { channel: worker.channel, close: async () => worker.close() };
       },
@@ -135,20 +139,12 @@ ipcMain.handle('transfer:send', async (_e, input) => {
 
 ipcMain.handle('transfer:list', () => getTransferService().listJobs());
 
-// Best-effort cancel: transfer-orchestrator.js's createSender only reacts to a
-// 'cancel' CTRL frame arriving FROM the remote peer — there is no local-abort
-// hook exposed through transfer-service yet, so an in-flight send keeps
-// running to completion/error even after this call. This marks the persisted
-// job record canceled so the UI reflects the user's intent; a real abort path
-// is a follow-up (see NEEDS-LIVE-VERIFICATION notes).
-ipcMain.handle('transfer:cancel', async (_e, jobId) => {
-  const store = getJobsStore();
-  const job = await store.load(jobId);
-  if (!job) return { ok: false };
-  if (job.jobState === 'done' || job.jobState === 'canceled') return { ok: true };
-  await store.save({ ...job, jobState: 'canceled' });
-  return { ok: true };
-});
+// SP3 coherence contract #3: cancel() now actually aborts an in-flight send —
+// transfer-service.cancel() tears down the active job's channel (via the
+// close() returned by openChannel above) in addition to marking the
+// persisted job record canceled; a waiting (not-yet-active) job is just
+// dropped from the queue.
+ipcMain.handle('transfer:cancel', async (_e, jobId) => getTransferService().cancel(jobId));
 
 function configFilePath() {
   return path.join(app.getPath('userData'), 'config.json');
