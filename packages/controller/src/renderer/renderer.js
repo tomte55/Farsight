@@ -516,6 +516,13 @@ async function connectTo({ targetId, candidates, linked }) {
         sendConnect();
         return;
       }
+      // On the linked path a bad_password means the host isn't accepting
+      // password-free connects (e.g. it predates this feature) — not a real
+      // password error; give an actionable message instead of "Wrong password".
+      if (linked && m.reason === 'bad_password') {
+        statusEl.textContent = 'This device isn’t reachable for password-free connect yet — update it to the latest version.';
+        return;
+      }
       statusEl.textContent = ERROR_TEXT[m.reason] || `Error: ${m.reason}`;
     },
     [MSG.PEER_DISCONNECTED]: () => {

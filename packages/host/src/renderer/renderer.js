@@ -458,7 +458,7 @@ function startSignaling(signalingUrl) {
       session.end();
       statusEl.textContent = 'Peer disconnected.';
     },
-  }, { password: sessionPassword, version: appVersion });
+  }, { password: sessionPassword, version: appVersion, acceptsLinked: true });
 }
 
 // First-run setup / settings: the signaling URL is configured via IPC, never

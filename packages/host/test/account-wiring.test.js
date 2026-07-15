@@ -49,6 +49,17 @@ describe('host connect-from-console wiring (SP2 §4.4)', () => {
     expect(main).toMatch(/deviceKeyFilePath/);
   });
 
+  test('the host advertises acceptsLinked on REGISTER (opts into password-free linked connect)', () => {
+    const renderer = readFileSync(path.join(dir, '../src/renderer/renderer.js'), 'utf8');
+    const client = readFileSync(path.join(dir, '../src/signaling-client.js'), 'utf8');
+    // The renderer must pass acceptsLinked:true, and the signaling client must
+    // include it in the REGISTER payload — else the server rejects linked connects
+    // as bad_password.
+    expect(renderer).toMatch(/acceptsLinked:\s*true/);
+    expect(client).toMatch(/acceptsLinked/);
+    expect(client).toMatch(/REGISTER,\s*\{[^}]*acceptsLinked/);
+  });
+
   test('main publishes the signaling id to the account service on registration', () => {
     // set-host-id (renderer → main) must feed setSignalingId so the console can
     // learn where to dial this host (rendezvous).
