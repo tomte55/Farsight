@@ -18,6 +18,7 @@ import {
 } from '../two-factor.js';
 import { heartbeat, listFleet, type PresenceDeps } from '../presence.js';
 import { setDevicePublicKey } from '../device-keys.js';
+import { setTargetVersion } from '../device-update.js';
 
 export interface ApiContext {
   prisma: PrismaClient;
@@ -261,7 +262,24 @@ const handlers: Record<string, Handler> = {
     // its current signaling id (connect-from-console rendezvous).
     const version = str(req.body, 'version');
     const signalingId = str(req.body, 'signalingId');
-    await heartbeat(presenceDeps(ctx), { deviceId: auth.deviceId, version, signalingId });
+    const { targetVersion } = await heartbeat(presenceDeps(ctx), { deviceId: auth.deviceId, version, signalingId });
+    // Return any pending management directive (S2.7: converge-to target version).
+    return ok({ targetVersion });
+  },
+
+  // Remote update (S2.7): the owner sets a target version for one of their own
+  // devices; the host converges to the official feed on its next heartbeat. Pass
+  // targetVersion:null (or omit) to clear.
+  'POST /devices/update': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    const deviceId = str(req.body, 'deviceId');
+    if (!deviceId) return badRequest();
+    // Only your own devices — don't reveal whether someone else's id exists.
+    const device = await ctx.prisma.device.findUnique({ where: { id: deviceId } });
+    if (!device || device.userId !== auth.userId) return json(404, { error: 'not_found' });
+    const targetVersion = str(req.body, 'targetVersion') ?? null;
+    await setTargetVersion({ prisma: ctx.prisma }, { deviceId, targetVersion });
     return ok();
   },
 

@@ -93,6 +93,34 @@ describe('POST /devices/heartbeat', () => {
   });
 });
 
+describe('POST /devices/update (remote update directive)', () => {
+  test('401 without a token', async () => {
+    const c = ctx();
+    expect((await handleRequest(c, req('POST', '/devices/update', { deviceId: 'x', targetVersion: '1.8.0' }))).status).toBe(401);
+  });
+
+  test('owner sets a target version, visible in the fleet + the heartbeat response', async () => {
+    const c = ctx();
+    const mine = await loginToken(c, 'ru@example.com');
+
+    expect((await handleRequest(c, req('POST', '/devices/update', { deviceId: mine.deviceId, targetVersion: '1.8.0' }, mine.accessToken))).status).toBe(200);
+
+    const list = await handleRequest(c, req('GET', '/devices', undefined, mine.accessToken));
+    expect((list.body as { devices: Array<{ targetVersion: string | null }> }).devices[0]!.targetVersion).toBe('1.8.0');
+
+    const beat = await handleRequest(c, req('POST', '/devices/heartbeat', { version: '1.7.0' }, mine.accessToken));
+    expect((beat.body as { targetVersion: string | null }).targetVersion).toBe('1.8.0');
+  });
+
+  test("404 for another account's device (no cross-account writes)", async () => {
+    const c = ctx();
+    const mine = await loginToken(c, 'ro@example.com');
+    const other = await loginToken(c, 'ro2@example.com');
+    const res = await handleRequest(c, req('POST', '/devices/update', { deviceId: other.deviceId, targetVersion: '1.8.0' }, mine.accessToken));
+    expect(res.status).toBe(404);
+  });
+});
+
 describe('POST /devices/key', () => {
   test('401 without a token', async () => {
     const c = ctx();

@@ -95,6 +95,11 @@ model Device {
   /// refreshed on each heartbeat so the owner's console knows where to dial it.
   /// Null until the device first reports one.
   signalingId String?
+  /// Remote update (SP2 S2.7): declarative "this device should be at >= this
+  /// version". The owner sets it from the console; the host learns it via the
+  /// heartbeat response and converges to the official feed. Idempotent — once the
+  /// host reaches it, it's a no-op. Null = no pending update directive.
+  targetVersion String?
   /// Last-known app version for presence/remote-update (SP1 host version); null until seen.
   appVersion String?
   /// Presence: last time this device checked in; null until first seen (S2.5).

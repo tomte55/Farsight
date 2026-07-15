@@ -17,11 +17,13 @@ export const DEFAULT_ONLINE_WINDOW_MS = 90_000;
 
 // A device reports its own liveness (and, optionally, its current app version).
 // Reachable only by an authenticated live device, so no ownership check here.
+// Refreshes liveness and returns any pending management directive for this device
+// (S2.7 remote update: the target version the host should converge to, or null).
 export async function heartbeat(
   deps: PresenceDeps,
   input: { deviceId: string; version?: string; signalingId?: string },
-): Promise<void> {
-  await deps.prisma.device.update({
+): Promise<{ targetVersion: string | null }> {
+  const device = await deps.prisma.device.update({
     where: { id: input.deviceId },
     data: {
       lastSeenAt: new Date(deps.now),
@@ -30,6 +32,7 @@ export async function heartbeat(
       ...(input.signalingId ? { signalingId: input.signalingId } : {}),
     },
   });
+  return { targetVersion: device.targetVersion };
 }
 
 export interface DevicePresence {
@@ -42,6 +45,8 @@ export interface DevicePresence {
   // Both null until the device enrolls a key / reports a signaling id (owner-only).
   signalingId: string | null;
   publicKey: string | null;
+  // Remote update: a pending converge-to target, so the console can reflect it.
+  targetVersion: string | null;
 }
 
 // The owner's fleet: non-revoked devices under their account, each with a
@@ -64,5 +69,6 @@ export async function listFleet(
     online: d.lastSeenAt !== null && deps.now - d.lastSeenAt.getTime() <= windowMs,
     signalingId: d.signalingId,
     publicKey: d.publicKey,
+    targetVersion: d.targetVersion,
   }));
 }

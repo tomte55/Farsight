@@ -61,6 +61,18 @@ describe('heartbeat', () => {
     const row = await db.prisma.device.findUnique({ where: { id: d.id } });
     expect(row!.signalingId).toBe('123456789');
   });
+
+  test('returns the pending target version directive (S2.7 remote update)', async () => {
+    const u = await mkUser('h4@example.com');
+    const d = await mkDevice(u.id, { targetVersion: '1.9.0' });
+
+    const res = await heartbeat(deps(), { deviceId: d.id, version: '1.7.0' });
+    expect(res.targetVersion).toBe('1.9.0');
+
+    const noneUser = await mkUser('h5@example.com');
+    const d2 = await mkDevice(noneUser.id, {});
+    expect((await heartbeat(deps(), { deviceId: d2.id })).targetVersion).toBe(null);
+  });
 });
 
 describe('listFleet', () => {
@@ -86,13 +98,14 @@ describe('listFleet', () => {
     expect(fresh.lastSeenAt).toBeInstanceOf(Date);
   });
 
-  test('exposes signalingId + publicKey for connect-from-console', async () => {
+  test('exposes signalingId + publicKey + targetVersion for connect / remote-update', async () => {
     const owner = await mkUser('rz@example.com');
-    await mkDevice(owner.id, { name: 'host', lastSeenAt: new Date(NOW), publicKey: 'PUBKEY', signalingId: '234567891' });
+    await mkDevice(owner.id, { name: 'host', lastSeenAt: new Date(NOW), publicKey: 'PUBKEY', signalingId: '234567891', targetVersion: '2.0.0' });
 
     const fleet = await listFleet(deps(), { userId: owner.id });
     expect(fleet[0]!.signalingId).toBe('234567891');
     expect(fleet[0]!.publicKey).toBe('PUBKEY');
+    expect(fleet[0]!.targetVersion).toBe('2.0.0');
   });
 
   test('respects a custom online window', async () => {
