@@ -162,3 +162,28 @@ test('finalizeReceivedFile discards the .part on a hash mismatch', async () => {
   expect(existsSync(pf.partPath)).toBe(false);
   expect(existsSync(pf.finalPath)).toBe(false);
 });
+
+import { sendFile } from '../src/transfer-io.js';
+
+test('sendFile hashes the whole file and streams every byte when offset is 0', async () => {
+  const root = tmp();
+  const f = join(root, 'src.bin');
+  const data = Buffer.from('0123456789'.repeat(500)); // 5000 bytes
+  writeFileSync(f, data);
+  const got = [];
+  const { hash } = await sendFile({ sourcePath: f, offset: 0, chunkSize: 512, onChunk: async (b) => { got.push(Buffer.from(b)); } });
+  expect(hash).toBe(createHash('sha256').update(data).digest('hex'));
+  expect(Buffer.concat(got)).toEqual(data);
+});
+
+test('sendFile hashes the whole file but only streams bytes from the offset on resume', async () => {
+  const root = tmp();
+  const f = join(root, 'src2.bin');
+  const data = Buffer.from('ABCDEFGHIJ'.repeat(300)); // 3000 bytes
+  writeFileSync(f, data);
+  const offset = 1234;
+  const got = [];
+  const { hash } = await sendFile({ sourcePath: f, offset, chunkSize: 256, onChunk: async (b) => { got.push(Buffer.from(b)); } });
+  expect(hash).toBe(createHash('sha256').update(data).digest('hex')); // whole-file hash
+  expect(Buffer.concat(got)).toEqual(data.subarray(offset)); // only the tail streamed
+});

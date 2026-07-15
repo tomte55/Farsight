@@ -119,3 +119,32 @@ export async function finalizeReceivedFile({ partFile, expectedHash, mtime }) {
   await utimes(partFile.finalPath, secs, secs);
   return { ok: true };
 }
+
+// Stream a file to the peer while computing its whole-file SHA-256. On resume
+// (offset > 0) the bytes before offset are hashed but NOT resent — the receiver
+// already has them (spec §6.1/§6.4). onChunk is awaited for backpressure.
+export function sendFile({ sourcePath, offset, chunkSize, onChunk }) {
+  return new Promise((res, rej) => {
+    const h = createHash('sha256');
+    const rs = createReadStream(sourcePath, { highWaterMark: chunkSize });
+    let pos = 0;
+    let chain = Promise.resolve();
+    rs.on('data', (chunk) => {
+      h.update(chunk);
+      const start = pos;
+      const end = pos + chunk.length;
+      pos = end;
+      if (end > offset) {
+        const from = start >= offset ? 0 : offset - start;
+        const slice = chunk.subarray(from);
+        rs.pause();
+        chain = chain
+          .then(() => onChunk(slice))
+          .then(() => rs.resume())
+          .catch(rej);
+      }
+    });
+    rs.on('error', rej);
+    rs.on('end', () => { chain.then(() => res({ hash: h.digest('hex') })).catch(rej); });
+  });
+}
