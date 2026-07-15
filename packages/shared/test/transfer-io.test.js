@@ -32,3 +32,23 @@ test('freeSpaceBytes is a positive number and hasFreeSpace compares to it', asyn
   expect(await hasFreeSpace(root, 0)).toBe(true);
   expect(await hasFreeSpace(root, free + 1_000_000_000_000)).toBe(false);
 });
+
+import { hashFile } from '../src/transfer-io.js';
+import { writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+
+test('hashFile returns the hex SHA-256 of the file contents', async () => {
+  const root = tmp();
+  const f = join(root, 'blob.bin');
+  const data = Buffer.from('the quick brown fox'.repeat(1000));
+  writeFileSync(f, data);
+  const expected = createHash('sha256').update(data).digest('hex');
+  expect(await hashFile(f)).toBe(expected);
+});
+
+test('hashFile of an empty file is the SHA-256 of empty input', async () => {
+  const root = tmp();
+  const f = join(root, 'empty.bin');
+  writeFileSync(f, Buffer.alloc(0));
+  expect(await hashFile(f)).toBe(createHash('sha256').digest('hex'));
+});

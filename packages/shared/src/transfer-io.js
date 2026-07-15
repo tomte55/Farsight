@@ -3,6 +3,8 @@
 // like updater.js/device-keypair.js — NEVER imported by a sandboxed renderer.
 // Consumes the pure transfer-manifest.js for path safety.
 import { statfs } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { resolve, join, sep } from 'node:path';
 import { sanitizeRelativePath } from './transfer-manifest.js';
 
@@ -24,4 +26,16 @@ export async function freeSpaceBytes(destRoot) {
 
 export async function hasFreeSpace(destRoot, needBytes) {
   return (await freeSpaceBytes(destRoot)) >= needBytes;
+}
+
+// Whole-file SHA-256 (hex). Used for the sender's FILE_END hash and for the
+// receiver's completion-read verification after an app restart (spec §6.4).
+export function hashFile(absPath) {
+  return new Promise((res, rej) => {
+    const h = createHash('sha256');
+    const rs = createReadStream(absPath);
+    rs.on('data', (c) => h.update(c));
+    rs.on('error', rej);
+    rs.on('end', () => res(h.digest('hex')));
+  });
 }
