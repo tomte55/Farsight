@@ -41,3 +41,34 @@ export function createReceiveJob({ manifest, have = {} }) {
     progress,
   };
 }
+
+export function createSendJob({ manifest, resume = [] }) {
+  const have = new Map();
+  for (const r of resume) have.set(r.fileId, r.haveBytes);
+  const plan = manifest.entries.map((e) => {
+    const start = Math.min(have.get(e.fileId) || 0, e.size);
+    return { fileId: e.fileId, size: e.size, offset: start, sent: start >= e.size };
+  });
+  let idx = 0;
+  function advance() { while (idx < plan.length && plan[idx].sent) idx += 1; }
+  advance();
+  return {
+    nextFile() {
+      advance();
+      if (idx >= plan.length) return null;
+      const p = plan[idx];
+      return { fileId: p.fileId, offset: p.offset, size: p.size };
+    },
+    onFileSent(fileId) { const p = plan.find((x) => x.fileId === fileId); if (p) p.sent = true; advance(); },
+    isComplete() { return plan.every((p) => p.sent); },
+    progress() {
+      let total = 0, sent = 0, filesSent = 0;
+      for (const p of plan) {
+        const rem = p.size - p.offset;
+        total += rem;
+        if (p.sent) { sent += rem; filesSent += 1; }
+      }
+      return { sent, total, fraction: total > 0 ? sent / total : 1, filesSent, filesTotal: plan.length };
+    },
+  };
+}

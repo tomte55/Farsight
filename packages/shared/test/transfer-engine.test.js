@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { createReceiveJob } from '../src/transfer-engine.js';
+import { createReceiveJob, createSendJob } from '../src/transfer-engine.js';
 
 const manifest = {
   entries: [
@@ -48,4 +48,28 @@ test('received bytes clamp to file size and never exceed', () => {
   rx2.onFileBegin({ fileId: 1, offset: 0 });
   expect(rx2.onBytes(1, 999)).toBe(1);
   expect(rx2.resumePlan()[1]).toEqual({ fileId: 1, haveBytes: 20 });
+});
+
+test('nextFile walks files sequentially, honoring resume offsets and skips', () => {
+  const tx = createSendJob({ manifest, resume: [{ fileId: 0, haveBytes: 4 }, { fileId: 1, haveBytes: 20 }] });
+  expect(tx.nextFile()).toEqual({ fileId: 0, offset: 4, size: 10 }); // file 1 fully present → skipped
+  tx.onFileSent(0);
+  expect(tx.nextFile()).toBeNull();
+  expect(tx.isComplete()).toBe(true);
+});
+
+test('send with no resume starts every file at 0', () => {
+  const tx = createSendJob({ manifest });
+  expect(tx.nextFile()).toEqual({ fileId: 0, offset: 0, size: 10 });
+  tx.onFileSent(0);
+  expect(tx.nextFile()).toEqual({ fileId: 1, offset: 0, size: 20 });
+});
+
+test('send progress counts remaining-to-send bytes', () => {
+  const tx = createSendJob({ manifest, resume: [{ fileId: 0, haveBytes: 4 }] });
+  // to-send = (10-4) + (20-0) = 26
+  expect(tx.progress().total).toBe(26);
+  tx.onFileSent(0);
+  expect(tx.progress().sent).toBe(6);
+  expect(tx.progress().filesSent).toBe(1);
 });
