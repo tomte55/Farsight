@@ -14,8 +14,11 @@ export function confineDestPath(destRoot, relPath) {
   const safe = sanitizeRelativePath(relPath);
   if (safe === null) throw new Error('unsafe path');
   const rootAbs = resolve(destRoot);
+  // Separator-bounded prefix so a sibling like C:\dest-evil can't pass as C:\dest.
+  // Guard against a destRoot that is itself a filesystem/drive root (already ends in sep).
+  const rootPrefix = rootAbs.endsWith(sep) ? rootAbs : rootAbs + sep;
   const full = resolve(rootAbs, safe);
-  if (full !== rootAbs && !full.startsWith(rootAbs + sep)) throw new Error('unsafe path');
+  if (full !== rootAbs && !full.startsWith(rootPrefix)) throw new Error('unsafe path');
   return full;
 }
 
@@ -85,7 +88,11 @@ export async function createPartFile({ destRoot, relPath, resumeFrom, hashLive }
   if (resumeFrom !== 0) {
     try { offset = (await fh.stat()).size; } catch { offset = 0; }
   }
-  const hash = hashLive ? createHash('sha256') : null;
+  // A live hash is only valid if it covered the file from byte 0 within one
+  // continuous run. Resuming (resumeFrom > 0) re-opens the writer and can't
+  // reconstruct the prior bytes' hash state, so it MUST fall back to a
+  // completion read — force liveDigest() to null in that case (spec §6.4).
+  const hash = (hashLive && resumeFrom === 0) ? createHash('sha256') : null;
   let digest = null; // memoized: Node's Hash.digest() throws if called twice
   return {
     offset,
@@ -127,6 +134,9 @@ export function sendFile({ sourcePath, offset, chunkSize, onChunk }) {
   return new Promise((res, rej) => {
     const h = createHash('sha256');
     const rs = createReadStream(sourcePath, { highWaterMark: chunkSize });
+    // Destroy the stream on any failure so a paused read never leaks its fd
+    // (onChunk rejecting mid-transfer leaves the stream paused otherwise).
+    const fail = (err) => { try { rs.destroy(); } catch { /* already gone */ } rej(err); };
     let pos = 0;
     let chain = Promise.resolve();
     rs.on('data', (chunk) => {
@@ -141,10 +151,10 @@ export function sendFile({ sourcePath, offset, chunkSize, onChunk }) {
         chain = chain
           .then(() => onChunk(slice))
           .then(() => rs.resume())
-          .catch(rej);
+          .catch(fail);
       }
     });
-    rs.on('error', rej);
-    rs.on('end', () => { chain.then(() => res({ hash: h.digest('hex') })).catch(rej); });
+    rs.on('error', fail);
+    rs.on('end', () => { chain.then(() => res({ hash: h.digest('hex') })).catch(fail); });
   });
 }

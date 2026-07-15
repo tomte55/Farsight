@@ -113,6 +113,18 @@ test('createPartFile resumes append at the existing .part size', async () => {
   expect(readFileSync(resumed.partPath)).toEqual(Buffer.from('AAAABBBB'));
 });
 
+test('createPartFile forces completion-read hashing when resuming (no valid live hash)', async () => {
+  const root = tmp();
+  const a = await createPartFile({ destRoot: root, relPath: 'resume-hash.bin', resumeFrom: 0, hashLive: true });
+  await a.write(Buffer.from('AAAA')); await a.close();
+  // Resuming re-opens the writer → the live hash cannot cover the prior bytes,
+  // so liveDigest() must be null, forcing finalize to do a completion read.
+  const b = await createPartFile({ destRoot: root, relPath: 'resume-hash.bin', resumeFrom: 4, hashLive: true });
+  expect(b.offset).toBe(4);
+  await b.write(Buffer.from('BBBB')); await b.close();
+  expect(b.liveDigest()).toBeNull();
+});
+
 test('createPartFile with resumeFrom 0 truncates a stale .part', async () => {
   const root = tmp();
   const a = await createPartFile({ destRoot: root, relPath: 's.bin', resumeFrom: 0, hashLive: false });
@@ -174,6 +186,15 @@ test('sendFile hashes the whole file and streams every byte when offset is 0', a
   const { hash } = await sendFile({ sourcePath: f, offset: 0, chunkSize: 512, onChunk: async (b) => { got.push(Buffer.from(b)); } });
   expect(hash).toBe(createHash('sha256').update(data).digest('hex'));
   expect(Buffer.concat(got)).toEqual(data);
+});
+
+test('sendFile rejects and tears down the stream when onChunk throws', async () => {
+  const root = tmp();
+  const f = join(root, 'abort.bin');
+  writeFileSync(f, Buffer.alloc(10000));
+  await expect(sendFile({
+    sourcePath: f, offset: 0, chunkSize: 256, onChunk: async () => { throw new Error('boom'); },
+  })).rejects.toThrow('boom');
 });
 
 test('sendFile hashes the whole file but only streams bytes from the offset on resume', async () => {
