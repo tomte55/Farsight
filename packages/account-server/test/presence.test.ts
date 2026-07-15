@@ -51,6 +51,16 @@ describe('heartbeat', () => {
     expect(row!.lastSeenAt?.getTime()).toBe(NOW);
     expect(row!.appVersion).toBe('1.5.0');
   });
+
+  test('persists the signalingId (connect-from-console rendezvous)', async () => {
+    const u = await mkUser('h3@example.com');
+    const d = await mkDevice(u.id, {});
+
+    await heartbeat(deps(), { deviceId: d.id, signalingId: '123456789' });
+
+    const row = await db.prisma.device.findUnique({ where: { id: d.id } });
+    expect(row!.signalingId).toBe('123456789');
+  });
 });
 
 describe('listFleet', () => {
@@ -74,6 +84,15 @@ describe('listFleet', () => {
     const fresh = fleet.find((d) => d.name === 'fresh')!;
     expect(fresh.appVersion).toBe('1.6.0');
     expect(fresh.lastSeenAt).toBeInstanceOf(Date);
+  });
+
+  test('exposes signalingId + publicKey for connect-from-console', async () => {
+    const owner = await mkUser('rz@example.com');
+    await mkDevice(owner.id, { name: 'host', lastSeenAt: new Date(NOW), publicKey: 'PUBKEY', signalingId: '234567891' });
+
+    const fleet = await listFleet(deps(), { userId: owner.id });
+    expect(fleet[0]!.signalingId).toBe('234567891');
+    expect(fleet[0]!.publicKey).toBe('PUBKEY');
   });
 
   test('respects a custom online window', async () => {

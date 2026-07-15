@@ -91,6 +91,10 @@ model Device {
   name       String
   /// Account-issued device public key, set at enrollment (S2.6); null until linked.
   publicKey  String?
+  /// Connect-from-console rendezvous (SP2 §4.4): the host's CURRENT signaling id,
+  /// refreshed on each heartbeat so the owner's console knows where to dial it.
+  /// Null until the device first reports one.
+  signalingId String?
   /// Last-known app version for presence/remote-update (SP1 host version); null until seen.
   appVersion String?
   /// Presence: last time this device checked in; null until first seen (S2.5).

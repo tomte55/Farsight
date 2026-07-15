@@ -17,6 +17,7 @@ import {
   type TwoFactorDeps,
 } from '../two-factor.js';
 import { heartbeat, listFleet, type PresenceDeps } from '../presence.js';
+import { setDevicePublicKey } from '../device-keys.js';
 
 export interface ApiContext {
   prisma: PrismaClient;
@@ -256,9 +257,23 @@ const handlers: Record<string, Handler> = {
   'POST /devices/heartbeat': async (ctx, req) => {
     const auth = await requireAuth(ctx, req);
     if ('status' in auth) return auth;
-    // The calling device reports its own liveness + optional current version.
+    // The calling device reports its own liveness + optional current version +
+    // its current signaling id (connect-from-console rendezvous).
     const version = str(req.body, 'version');
-    await heartbeat(presenceDeps(ctx), { deviceId: auth.deviceId, version });
+    const signalingId = str(req.body, 'signalingId');
+    await heartbeat(presenceDeps(ctx), { deviceId: auth.deviceId, version, signalingId });
+    return ok();
+  },
+
+  // Connect-from-console (SP2 §4.4): the calling device enrolls its account-issued
+  // public key. Scoped to the caller's own deviceId (from the token) — you can only
+  // set your own key.
+  'POST /devices/key': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    const publicKey = str(req.body, 'publicKey');
+    if (!publicKey) return badRequest();
+    await setDevicePublicKey({ prisma: ctx.prisma }, { deviceId: auth.deviceId, publicKey });
     return ok();
   },
 

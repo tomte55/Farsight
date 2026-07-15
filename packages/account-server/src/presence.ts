@@ -19,13 +19,15 @@ export const DEFAULT_ONLINE_WINDOW_MS = 90_000;
 // Reachable only by an authenticated live device, so no ownership check here.
 export async function heartbeat(
   deps: PresenceDeps,
-  input: { deviceId: string; version?: string },
+  input: { deviceId: string; version?: string; signalingId?: string },
 ): Promise<void> {
   await deps.prisma.device.update({
     where: { id: input.deviceId },
     data: {
       lastSeenAt: new Date(deps.now),
       ...(input.version ? { appVersion: input.version } : {}),
+      // Connect-from-console rendezvous: refresh where this device can be dialed.
+      ...(input.signalingId ? { signalingId: input.signalingId } : {}),
     },
   });
 }
@@ -36,6 +38,10 @@ export interface DevicePresence {
   appVersion: string | null;
   lastSeenAt: Date | null;
   online: boolean;
+  // Connect-from-console: where to dial this device now, and the key to verify it.
+  // Both null until the device enrolls a key / reports a signaling id (owner-only).
+  signalingId: string | null;
+  publicKey: string | null;
 }
 
 // The owner's fleet: non-revoked devices under their account, each with a
@@ -56,5 +62,7 @@ export async function listFleet(
     appVersion: d.appVersion,
     lastSeenAt: d.lastSeenAt,
     online: d.lastSeenAt !== null && deps.now - d.lastSeenAt.getTime() <= windowMs,
+    signalingId: d.signalingId,
+    publicKey: d.publicKey,
   }));
 }

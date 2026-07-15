@@ -80,4 +80,40 @@ describe('POST /devices/heartbeat', () => {
     const { devices } = res.body as { devices: Array<{ appVersion: string | null }> };
     expect(devices[0]!.appVersion).toBe('1.6.0');
   });
+
+  test('persists the signalingId, visible in the fleet listing (rendezvous)', async () => {
+    const c = ctx();
+    const mine = await loginToken(c, 'hbrz@example.com');
+
+    await handleRequest(c, req('POST', '/devices/heartbeat', { version: '1.7.0', signalingId: '345678912' }, mine.accessToken));
+
+    const res = await handleRequest(c, req('GET', '/devices', undefined, mine.accessToken));
+    const { devices } = res.body as { devices: Array<{ signalingId: string | null }> };
+    expect(devices[0]!.signalingId).toBe('345678912');
+  });
+});
+
+describe('POST /devices/key', () => {
+  test('401 without a token', async () => {
+    const c = ctx();
+    expect((await handleRequest(c, req('POST', '/devices/key', { publicKey: 'P' }))).status).toBe(401);
+  });
+
+  test('400 without a publicKey', async () => {
+    const c = ctx();
+    const mine = await loginToken(c, 'key400@example.com');
+    expect((await handleRequest(c, req('POST', '/devices/key', {}, mine.accessToken))).status).toBe(400);
+  });
+
+  test('stores the caller device public key, visible in the fleet listing', async () => {
+    const c = ctx();
+    const mine = await loginToken(c, 'keyok@example.com');
+
+    expect((await handleRequest(c, req('POST', '/devices/key', { publicKey: 'PUBWIRED' }, mine.accessToken))).status).toBe(200);
+
+    const res = await handleRequest(c, req('GET', '/devices', undefined, mine.accessToken));
+    const { devices } = res.body as { devices: Array<{ id: string; publicKey: string | null }> };
+    expect(devices[0]!.id).toBe(mine.deviceId);
+    expect(devices[0]!.publicKey).toBe('PUBWIRED');
+  });
 });
