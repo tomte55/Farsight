@@ -54,9 +54,9 @@ describe('main.js: SP3 send-path IPC handlers', () => {
     expect(main).toMatch(/showOpenDialog\(\{\s*properties:\s*\[[^\]]*openFile[^\]]*multiSelections[^\]]*openDirectory[^\]]*\]/);
   });
 
-  test('the legacy pick-file/save-file handlers are untouched (retired in a later plan, not this one)', () => {
-    expect(main).toContain("ipcMain.handle('pick-file'");
-    expect(main).toContain("ipcMain.handle('save-file'");
+  test('the legacy pick-file/save-file handlers (interim single-file transfer) are retired', () => {
+    expect(main).not.toContain("ipcMain.handle('pick-file'");
+    expect(main).not.toContain("ipcMain.handle('save-file'");
   });
 });
 

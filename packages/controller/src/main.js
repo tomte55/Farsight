@@ -11,7 +11,6 @@ import * as nodeFs from 'node:fs';
 import { createAppLogger } from '@farsight/shared/app-log';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
 import { createUpdater } from '@farsight/shared/updater';
-import { MAX_FILE_SIZE } from '@farsight/shared/file-transfer';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from './account.js';
 // SP3 file transfer (send path): the orchestrator/queue/jobs-store pipeline
 // (createTransferService) plus the manifest-building I/O it's fed with.
@@ -177,29 +176,6 @@ ipcMain.handle('get-app-version', () => app.getVersion());
 
 ipcMain.handle('clipboard-read', () => clipboard.readText());
 ipcMain.on('clipboard-write', (_e, text) => { if (typeof text === 'string' && text.length <= 100000) clipboard.writeText(text); });
-
-// File transfer: fs/dialog access is main-process-only, like clipboard.
-// pick-file returns the whole file as an ArrayBuffer (bounded to
-// MAX_FILE_SIZE) for the renderer to chunk and send over the 'file' data
-// channel; save-file always goes through a user-driven Save dialog, and only
-// ever uses the basename of the (already-sanitized-by-caller) name.
-ipcMain.handle('pick-file', async () => {
-  const r = await dialog.showOpenDialog({ properties: ['openFile'] });
-  if (r.canceled || !r.filePaths[0]) return null;
-  const p = r.filePaths[0];
-  let buf;
-  try { buf = readFileSync(p); } catch (err) { log?.child('ipc').warn(`pick-file read failed: ${err.message}`); return { error: err.message }; }
-  if (buf.length > MAX_FILE_SIZE) { log?.child('ipc').info('pick-file rejected: over size limit'); return { error: 'File is larger than the 100 MB transfer limit.' }; }
-  return { name: path.basename(p), size: buf.length, bytes: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length) };
-});
-ipcMain.handle('save-file', async (_e, arg) => {
-  const { name, bytes } = arg || {};
-  if (!(bytes instanceof ArrayBuffer)) return { ok: false };
-  const r = await dialog.showSaveDialog({ defaultPath: path.basename(String(name || 'download')) });
-  if (r.canceled || !r.filePath) return { ok: false };
-  try { writeFileSync(r.filePath, Buffer.from(bytes)); return { ok: true }; }
-  catch (err) { log?.child('ipc').warn(`save-file write failed: ${err.message}`); return { ok: false, error: err.message }; }
-});
 
 let mainWindow = null;
 let ctrlUpdater = null;
