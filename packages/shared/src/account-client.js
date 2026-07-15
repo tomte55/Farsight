@@ -49,8 +49,11 @@ export function createAccountClient({ baseUrl, fetch: fetchImpl } = {}) {
     refresh: ({ refreshToken }) => request('POST', '/token/refresh', { body: { refreshToken } }),
 
     // ── authenticated self-management (Bearer access token) ───────────────
-    heartbeat: ({ accessToken, version }) =>
-      request('POST', '/devices/heartbeat', { body: { version }, token: accessToken }),
+    heartbeat: ({ accessToken, version, signalingId }) =>
+      request('POST', '/devices/heartbeat', { body: { version, signalingId }, token: accessToken }),
+    // Connect-from-console (§4.4): enroll this device's account-issued public key.
+    uploadPublicKey: ({ accessToken, publicKey }) =>
+      request('POST', '/devices/key', { body: { publicKey }, token: accessToken }),
     listDevices: ({ accessToken }) => request('GET', '/devices', { token: accessToken }),
     revokeDevice: ({ accessToken, deviceId }) =>
       request('POST', '/devices/revoke', { body: { deviceId }, token: accessToken }),

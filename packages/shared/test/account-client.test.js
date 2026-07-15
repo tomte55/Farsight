@@ -90,6 +90,23 @@ describe('authenticated (Bearer) calls', () => {
     expect(JSON.parse(calls[0].init.body)).toEqual({ version: '1.6.0' });
   });
 
+  test('heartbeat includes signalingId when provided (rendezvous)', async () => {
+    const { impl, calls } = mockFetch({ status: 200, body: { ok: true } });
+    await client(impl).heartbeat({ accessToken: 'tok', version: '1.7.0', signalingId: '123456789' });
+    expect(JSON.parse(calls[0].init.body)).toEqual({ version: '1.7.0', signalingId: '123456789' });
+  });
+
+  test('uploadPublicKey POSTs the key to /devices/key with a Bearer header', async () => {
+    const { impl, calls } = mockFetch({ status: 200, body: { ok: true } });
+    const res = await client(impl).uploadPublicKey({ accessToken: 'tok', publicKey: 'PUB' });
+
+    expect(res.ok).toBe(true);
+    expect(calls[0].url).toBe('https://auth.sovexa.org/devices/key');
+    expect(calls[0].init.method).toBe('POST');
+    expect(calls[0].init.headers.authorization).toBe('Bearer tok');
+    expect(JSON.parse(calls[0].init.body)).toEqual({ publicKey: 'PUB' });
+  });
+
   test('listDevices is a GET with the Bearer header and no body', async () => {
     const { impl, calls } = mockFetch({ status: 200, body: { devices: [{ id: 'd', online: true }] } });
     const res = await client(impl).listDevices({ accessToken: 'tok' });

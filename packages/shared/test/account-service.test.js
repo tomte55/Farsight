@@ -195,3 +195,65 @@ describe('createAccountService', () => {
     expect(await service.status()).toEqual({ signedIn: false });
   });
 });
+
+describe('connect-from-console: device keypair lifecycle', () => {
+  test('login generates + persists a keypair and uploads the public key', async () => {
+    const ff = fakeFetch({
+      '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } },
+      '/devices/key': { status: 200, body: { ok: true } },
+      '/devices/heartbeat': { status: 200, body: {} },
+    });
+    const fs = fakeFs();
+    const service = createAccountService({
+      baseUrl: 'https://auth.example', safeStorage: fakeSafeStorage, fs,
+      filePath: '/cfg/token.enc', deviceKeyFilePath: '/cfg/device.key',
+      fetch: ff.impl, now: () => 1_700_000_000_000,
+    });
+
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+
+    const upload = ff.calls.find((c) => c.url.endsWith('/devices/key'));
+    expect(upload).toBeTruthy();
+    const sentKey = JSON.parse(upload.init.body).publicKey;
+    expect(sentKey).toBe(service.getPublicKey());       // uploaded our real public key
+    expect(fs.existsSync('/cfg/device.key')).toBe(true); // persisted encrypted
+  });
+
+  test('the keypair persists across service instances (relaunch reuses it)', async () => {
+    const fs = fakeFs();
+    const mk = () => createAccountService({
+      baseUrl: 'https://auth.example', safeStorage: fakeSafeStorage, fs,
+      filePath: '/cfg/token.enc', deviceKeyFilePath: '/cfg/device.key',
+      fetch: fakeFetch({}).impl, now: () => 1_700_000_000_000,
+    });
+    const first = mk().getPublicKey();
+    const second = mk().getPublicKey(); // new instance, same key file
+    expect(second).toBe(first);
+  });
+
+  test('signTranscript + verifyTranscript round-trip with the device key', () => {
+    const service = svc({});
+    const pub = service.getPublicKey();
+    const sig = service.signTranscript('the-transcript');
+    expect(service.verifyTranscript(pub, 'the-transcript', sig)).toBe(true);
+    expect(service.verifyTranscript(pub, 'tampered', sig)).toBe(false);
+  });
+
+  test('isAccountPublicKey is true only for a key in the owner fleet (fail-closed)', async () => {
+    const service = svc({
+      '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } },
+      '/devices/key': { status: 200, body: {} },
+      '/devices/heartbeat': { status: 200, body: {} },
+      '/devices': { status: 200, body: { devices: [{ id: 'd1', name: 'PC', online: true, publicKey: 'ENROLLED' }] } },
+    });
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+
+    expect(await service.isAccountPublicKey('ENROLLED')).toBe(true);
+    expect(await service.isAccountPublicKey('STRANGER')).toBe(false);
+  });
+
+  test('isAccountPublicKey is false when signed out (fail-closed)', async () => {
+    const service = svc({});
+    expect(await service.isAccountPublicKey('ANY')).toBe(false);
+  });
+});
