@@ -32,6 +32,7 @@
     "./transfer-io": "./src/transfer-io.js",
     "./jobs-store": "./src/jobs-store.js",
     "./transfer-orchestrator": "./src/transfer-orchestrator.js",
+    "./transfer-queue": "./src/transfer-queue.js",
     "./update-policy": "./src/update-policy.js",
     "./updater": "./src/updater.js",
     "./log": "./src/log.js",
