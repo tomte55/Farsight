@@ -104,6 +104,8 @@ test('createReceiver validates the offer, accepts, writes bytes, verifies and fi
   expect(readFileSync(join(dest, 'sub', 'x.bin'))).toEqual(payload);
   expect(existsSync(join(dest, 'sub', 'x.bin.part'))).toBe(false); // renamed
   expect(store.saved.some((j) => j.jobState === 'done')).toBe(true);
+  // Default peer (SP3 coherence contract #4): unknown on receive unless threaded.
+  expect(store.saved.find((j) => j.jobState === 'done').peer).toEqual({});
 });
 
 test('createReceiver rejects a manifest with a traversal path', async () => {
@@ -117,6 +119,28 @@ test('createReceiver rejects a manifest with a traversal path', async () => {
   await recvCtrl(offerFrame({ jobId: 'bad', entries: [{ fileId: 0, path: '../escape', size: 1, mtime: 1 }], totalBytes: 1, totalFiles: 1 }));
   expect(sent.some((f) => f.t === 'reject')).toBe(true);
   expect(sent.some((f) => f.t === 'accept')).toBe(false);
+});
+
+// SP3 coherence contract #2: consent must receive the REAL transfer jobId
+// (the one assigned by the sender via OFFER, and persisted to the jobs-store)
+// rather than a locally-minted correlation id.
+test('createReceiver passes the real jobId to consent alongside the manifest', async () => {
+  const dest = tmp();
+  let recvCtrl = () => {};
+  const sent = [];
+  const seen = [];
+  const ch = { sendCtrl(s) { sent.push(parseCtrlFrame(s)); }, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk() {} };
+  const entries = [{ fileId: 0, path: 'x.bin', size: 1, mtime: 1 }];
+  const rx = createReceiver({
+    channel: ch, destRoot: dest, store: memStore(),
+    consent: async (arg) => { seen.push(arg); return false; },
+  });
+  rx.start();
+  await recvCtrl(offerFrame({ jobId: 'consent-jid', entries, totalBytes: 1, totalFiles: 1 }));
+  expect(seen.length).toBe(1);
+  expect(seen[0].jobId).toBe('consent-jid');
+  expect(seen[0].manifest.totalFiles).toBe(1);
+  expect(sent.some((f) => f.t === 'reject' && f.reason === 'declined')).toBe(true);
 });
 
 import { walkSource } from '@farsight/shared/transfer-io';

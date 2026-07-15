@@ -80,7 +80,7 @@ async function resumeOffsetFor(destRoot, entry) {
   return 0;
 }
 
-export function createReceiver({ channel, destRoot, store, consent, onEvent = () => {} }) {
+export function createReceiver({ channel, destRoot, store, consent, peer = {}, onEvent = () => {} }) {
   let job = null, manifest = null, jobId = null, ok = true;
   let jobDoneSeen = false;
   const doneIds = new Set(), failedIds = new Set();
@@ -127,7 +127,7 @@ export function createReceiver({ channel, destRoot, store, consent, onEvent = ()
   async function saveRecord(jobState) {
     if (!store || !manifest) return;
     await store.save({
-      jobId, dir: 'recv', tier: 'adhoc', peer: {}, destRoot,
+      jobId, dir: 'recv', tier: 'adhoc', peer, destRoot,
       manifest,
       perFile: perFileSnapshot(),
       jobState, createdAt: 0,
@@ -187,7 +187,11 @@ export function createReceiver({ channel, destRoot, store, consent, onEvent = ()
         resolveOnce({ jobId, ok: false, rejected: 'nospace' });
         return;
       }
-      if (!(await consent({ manifest: m }))) {
+      // Thread the REAL transfer jobId (assigned by the sender via the OFFER
+      // frame) into consent — not a locally-minted correlation id — so the
+      // renderer's accept/reject round-trip and the persisted jobs-store
+      // record agree on one id end to end (SP3 coherence contract #2).
+      if (!(await consent({ jobId, manifest: m }))) {
         channel.sendCtrl(rejectFrame({ jobId, reason: 'declined' }));
         resolveOnce({ jobId, ok: false, rejected: 'declined' });
         return;

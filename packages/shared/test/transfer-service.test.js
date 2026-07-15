@@ -62,7 +62,7 @@ test('loopback send -> receive through the service layer lands files byte-identi
 
   const jobId = newJobId();
   const recvPromise = receiverSvc.startReceive({ rendezvous: 'r1' });
-  const sendResult = await senderSvc.startSend({ jobId, manifest, sources, target: 't1' });
+  const sendResult = await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'device-t1', password: 'pw' } });
   const recvResult = await recvPromise;
 
   expect(sendResult.ok).toBe(true);
@@ -75,8 +75,14 @@ test('loopback send -> receive through the service layer lands files byte-identi
 
   const recvJobs = await recvStore.list();
   expect(recvJobs.some((j) => j.jobState === 'done')).toBe(true);
+  // SP3 coherence contract #4: the send record threads the real peer id;
+  // the receive record stays {} (no initiator id is relayed to the receiver
+  // in this phase — see TRANSFER_REQUEST in the signaling server).
+  expect(recvJobs.find((j) => j.jobState === 'done').peer).toEqual({});
   const sendJobs = await sendStore.list();
-  expect(sendJobs.some((j) => j.jobId === jobId && j.jobState === 'done')).toBe(true);
+  const sendRec = sendJobs.find((j) => j.jobId === jobId && j.jobState === 'done');
+  expect(sendRec).toBeTruthy();
+  expect(sendRec.peer).toEqual({ id: 'device-t1' });
 });
 
 test('serial queue: two enqueued sends never have more than one active channel at once, both complete', async () => {
@@ -124,6 +130,100 @@ test('serial queue: two enqueued sends never have more than one active channel a
   expect(maxActive).toBe(1); // never overlapped: the queue serialized the sends
   expect(readFileSync(join(dests.t1, 'x.bin'))).toEqual(readFileSync(w1.sources.get(0)));
   expect(readFileSync(join(dests.t2, 'y.bin'))).toEqual(readFileSync(w2.sources.get(0)));
+});
+
+// SP3 coherence contract #3: cancel(jobId) on the ACTIVE job tears the channel
+// down (calls the openChannel-returned close()) and marks the persisted record
+// 'canceled' deterministically — not left to whatever the underlying sender
+// promise eventually does.
+test('cancel() on the active send closes its channel and marks the record canceled', async () => {
+  const src = tmp();
+  writeFileSync(join(src, 'x.bin'), Buffer.alloc(5000, 1));
+  const { entries, sources } = await walkSource([{ path: join(src, 'x.bin') }]);
+  const manifest = buildManifestReal(entries);
+  const sendStore = createJobsStore({ dir: tmp() });
+
+  let closed = false;
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({
+      // A channel nobody drives further (no receiver ACKs the OFFER) — the
+      // send is genuinely stuck "active" until canceled.
+      channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} },
+      close: async () => { closed = true; },
+    }),
+  });
+
+  const jobId = newJobId();
+  const p = svc.startSend({ jobId, manifest, sources, target: { id: 'device-9' } });
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); // let runSend open the channel and go active
+
+  const c = await svc.cancel(jobId);
+  expect(c.ok).toBe(true);
+  expect(closed).toBe(true);
+
+  const result = await p;
+  expect(result.ok).toBe(false);
+  expect(result.canceled).toBe(true);
+
+  const jobs = await sendStore.list();
+  const rec = jobs.find((j) => j.jobId === jobId);
+  expect(rec.jobState).toBe('canceled');
+  expect(rec.peer).toEqual({ id: 'device-9' });
+});
+
+test('cancel() on a waiting (not-yet-active) send removes it from the queue without opening a channel', async () => {
+  const src1 = tmp();
+  writeFileSync(join(src1, 'a.bin'), Buffer.alloc(4000, 1));
+  const w1 = await walkSource([{ path: join(src1, 'a.bin') }]);
+  const m1 = buildManifestReal(w1.entries);
+
+  const src2 = tmp();
+  writeFileSync(join(src2, 'b.bin'), Buffer.alloc(10, 2));
+  const w2 = await walkSource([{ path: join(src2, 'b.bin') }]);
+  const m2 = buildManifestReal(w2.entries);
+
+  const sendStore = createJobsStore({ dir: tmp() });
+  let opens = [];
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true,
+    openChannel: async ({ target }) => {
+      opens.push(target);
+      // Job A's channel never progresses (no receiver), so job B stays queued
+      // behind it until we cancel B directly out of the queue.
+      return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} };
+    },
+  });
+
+  const pA = svc.startSend({ jobId: 'jobA', manifest: m1, sources: w1.sources, target: { id: 'devA' } });
+  const pB = svc.startSend({ jobId: 'jobB', manifest: m2, sources: w2.sources, target: { id: 'devB' } });
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+
+  expect(opens.map((t) => t.id)).toEqual(['devA']); // sanity: only jobA's channel opened so far
+
+  const c = await svc.cancel('jobB');
+  expect(c.ok).toBe(true);
+  const resultB = await pB;
+  expect(resultB.ok).toBe(false);
+  expect(resultB.canceled).toBe(true);
+
+  const jobs = await sendStore.list();
+  const recB = jobs.find((j) => j.jobId === 'jobB');
+  expect(recB.jobState).toBe('canceled');
+  expect(recB.peer).toEqual({ id: 'devB' });
+  expect(opens.length).toBe(1); // jobB's channel was never opened
+
+  await svc.cancel('jobA'); // cleanup so the test doesn't leave a dangling promise
+  await pA.catch(() => {});
+});
+
+test('cancel() on an unknown jobId with no persisted record returns ok:false', async () => {
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => { throw new Error('not used in this test'); },
+  });
+  const c = await svc.cancel('no-such-job');
+  expect(c.ok).toBe(false);
 });
 
 test('receiver declining consent resolves ok:false with no file written, and settles the sender without hanging', async () => {

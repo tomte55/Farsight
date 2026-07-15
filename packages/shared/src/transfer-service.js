@@ -40,17 +40,29 @@ export function createTransferService({ store, transferDir, consent, openChannel
   const queue = createQueue();
   const pendingSends = new Map(); // jobId -> { manifest, sources, target, createdAt, resolve, reject }
   let sendRunning = false;
+  // Handle to the ACTIVE send's openChannel-returned close(), so cancel(jobId)
+  // can actually tear the channel down (SP3 coherence contract #3) instead of
+  // only flipping the persisted record while the transfer keeps running.
+  let activeClose = null;
 
   function emit(jobId, direction, ev) {
     onEvent({ ...ev, jobId, direction });
   }
 
-  function saveSendRecord({ jobId, manifest, createdAt, jobState }) {
+  // Minimal, correct peer threading (SP3 coherence contract #4): a send knows
+  // its target's id; only persist it when target is really the {id,password}
+  // shape the apps use (not the opaque strings some tests pass), so we never
+  // invent data we don't have.
+  function peerFor(target) {
+    return (target && typeof target === 'object' && typeof target.id === 'string') ? { id: target.id } : {};
+  }
+
+  function saveSendRecord({ jobId, manifest, createdAt, jobState, peer }) {
     return store.save({
       jobId,
       dir: 'send',
       tier: 'adhoc',
-      peer: {},
+      peer: peer || {},
       destRoot: null,
       manifest,
       perFile: manifest.entries.map((e) => ({ fileId: e.fileId, status: jobState === 'done' ? 'done' : jobState === 'error' ? 'error' : 'pending' })),
@@ -62,25 +74,35 @@ export function createTransferService({ store, transferDir, consent, openChannel
   async function runSend(jobId) {
     const entry = pendingSends.get(jobId);
     const { manifest, sources, target, createdAt } = entry;
+    const peer = peerFor(target);
     let channel = null;
     let close = null;
     let result;
     try {
       ({ channel, close } = await openChannel({ role: 'initiate', target }));
-      const sender = createSender({
-        channel, jobId, manifest, sources,
-        onEvent: (ev) => emit(jobId, 'send', ev),
-      });
-      await sender.start(); // resolves with no value on success, rejects/throws on failure
-      result = { jobId, ok: true };
-      await saveSendRecord({ jobId, manifest, createdAt, jobState: 'done' });
+      if (pendingSends.has(jobId)) {
+        // Still wanted: cancel() may have already removed it while the
+        // channel was opening (see cancel() below) — don't start sending.
+        activeClose = close;
+        const sender = createSender({
+          channel, jobId, manifest, sources,
+          onEvent: (ev) => emit(jobId, 'send', ev),
+        });
+        await sender.start(); // resolves with no value on success, rejects/throws on failure
+        result = { jobId, ok: true };
+        await saveSendRecord({ jobId, manifest, createdAt, jobState: 'done', peer });
+      } else {
+        result = { jobId, ok: false, canceled: true };
+      }
     } catch (err) {
       result = { jobId, ok: false, error: errMessage(err) };
-      try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'error' }); } catch { /* best effort */ }
+      try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'error', peer }); } catch { /* best effort */ }
     } finally {
+      if (activeClose === close) activeClose = null; // don't clobber a NEWER job's handle
       if (close) { try { await close(); } catch { /* ignore close errors */ } }
     }
 
+    if (!pendingSends.has(jobId)) return result; // already finalized by cancel()
     pendingSends.delete(jobId);
     queue.complete(jobId);
     sendRunning = false;
@@ -98,6 +120,39 @@ export function createTransferService({ store, transferDir, consent, openChannel
     }
   }
 
+  // cancel(jobId): the ACTIVE job's channel is torn down via its close() (in
+  // addition to marking the store record 'canceled' right here — deterministic,
+  // not dependent on the underlying sender promise ever settling). A waiting
+  // (not-yet-active) job is simply dropped from the queue. A jobId not tracked
+  // in memory at all (already finished, or persisted by a previous app run) just
+  // gets its store record flipped.
+  async function cancel(jobId) {
+    if (!pendingSends.has(jobId)) {
+      const job = await store.load(jobId);
+      if (!job) return { ok: false };
+      if (job.jobState === 'done' || job.jobState === 'canceled') return { ok: true };
+      await store.save({ ...job, jobState: 'canceled' });
+      return { ok: true };
+    }
+
+    const entry = pendingSends.get(jobId);
+    const isActive = queue.active() === jobId;
+
+    pendingSends.delete(jobId);
+    queue.remove(jobId);
+    if (isActive) {
+      sendRunning = false;
+      if (activeClose) { const c = activeClose; activeClose = null; try { await c(); } catch { /* ignore */ } }
+    }
+
+    try {
+      await saveSendRecord({ jobId, manifest: entry.manifest, createdAt: entry.createdAt, jobState: 'canceled', peer: peerFor(entry.target) });
+    } catch { /* best effort */ }
+    entry.resolve({ jobId, ok: false, canceled: true });
+    if (isActive) advanceSendQueue();
+    return { ok: true };
+  }
+
   return {
     startSend({ jobId, manifest, sources, target }) {
       return new Promise((resolve, reject) => {
@@ -107,8 +162,15 @@ export function createTransferService({ store, transferDir, consent, openChannel
       });
     },
 
+    cancel,
+
     async startReceive({ rendezvous }) {
-      const { channel, close } = await openChannel({ role: 'attach', rendezvous });
+      // Canonical openChannel shape (SP3 coherence contract #1): always
+      // { role, target, sessionId }. A receive's sessionId may arrive here
+      // either as a plain string or as { sessionId } (host main.js's
+      // transfer:incoming passes the latter) — normalize to a plain string.
+      const sessionId = typeof rendezvous === 'string' ? rendezvous : rendezvous?.sessionId;
+      const { channel, close } = await openChannel({ role: 'attach', sessionId });
       let currentJobId = null;
       const tapped = tapJobId(channel, (id) => { currentJobId = id; });
       const receiver = createReceiver({
