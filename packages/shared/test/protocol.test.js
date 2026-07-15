@@ -33,3 +33,12 @@ test('UPDATE_PASSWORD is a known type', () => {
   expect(parseMessage(JSON.stringify({ type: 'update_password', password: 'k7m9pq' })).type)
     .toBe('update_password');
 });
+
+test('MSG carries the SP3 transfer-session types and parseMessage accepts them', () => {
+  expect(MSG.TRANSFER_REQUEST).toBe('transfer_request');
+  expect(MSG.ATTACH).toBe('attach');
+  expect(parseMessage(JSON.stringify({ type: 'attach', sessionId: 's1' })))
+    .toEqual({ type: 'attach', sessionId: 's1' });
+  expect(parseMessage(JSON.stringify({ type: 'transfer_request', sessionId: 's1', linked: true })))
+    .toEqual({ type: 'transfer_request', sessionId: 's1', linked: true });
+});
