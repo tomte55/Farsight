@@ -49,10 +49,18 @@ not weaken the trust model:
   fingerprints, so the R-8 SDP-swap MITM is **defeated for the linked path**: a signaling server that
   substituted fingerprints makes the two transcripts diverge and the signatures fail. This realizes
   the R-8 mitigation for account-linked connects.
-- **Consent still required; control gated on auth.** A linked connect still raises the host's
-  per-session consent prompt (§4.3). Input injection stays blocked until the handshake passes, and the
-  controller does not reveal the remote screen until it has verified the host — an unverifiable peer is
-  denied control, shown nothing, and the session is torn down (fails closed).
+- **No per-session prompt for your own fleet; control gated on auth.** A linked connect to a device
+  you've linked to your own account does **not** raise a consent prompt — logging into your account on
+  that machine is the standing consent (§4.3, now extended from silent *update* to silent *control* of
+  your own devices, the TeamViewer unattended-own-device model). The host still shows an active-session
+  banner (visible indication it's being controlled) but requires no click. **Control is gated on the
+  keypair handshake:** input injection stays blocked until it passes, and the controller does not reveal
+  the remote screen until it has verified the host — an unverifiable peer is denied control, shown
+  nothing, and the session is torn down (fails closed). **Ad-hoc / id+password connects still require
+  explicit per-session consent** (a stranger with your session password gets an attended prompt, never
+  unattended control). Consequence: the account is now the master key to *unattended control* of your
+  fleet, not just updates — so account security (argon2id, optional TOTP, 2FA on the release account)
+  is even more load-bearing.
 - **Residual:** the account is the fleet master key — a compromised account could dial its own fleet
   (the same property as remote update, §4.3). Protect it: argon2id password hashing, optional TOTP,
   and 2FA on the GitHub release account.

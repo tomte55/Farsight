@@ -111,23 +111,41 @@ let linkedConnect = false;
 let peerAuthed = false;
 
 async function runHostAuth(channel) {
+  // Attach a synchronous buffer the instant the channel arrives, so the
+  // controller's first message (hello) can't be dropped during the async identity
+  // fetch below — the data channel won't replay a message sent before onmessage
+  // was set. Buffered messages are replayed into the pump once it's wired.
+  const early = [];
+  channel.onmessage = (e) => early.push(e);
+  let deviceId = null, publicKey = null;
   try {
-    const fp = peer.getFingerprints();
-    await runConnectionAuth({
-      role: 'host', channel,
-      deviceId: await window.farsightIpc.connAuthDeviceId(),
-      publicKey: await window.farsightIpc.connAuthPublicKey(),
+    [deviceId, publicKey] = await Promise.all([
+      window.farsightIpc.connAuthDeviceId(),
+      window.farsightIpc.connAuthPublicKey(),
+    ]);
+  } catch { /* leave null → handshake fails closed */ }
+  const fp = peer.getFingerprints();
+  console.debug('[connect-auth host] fp', fp, 'deviceId', deviceId, 'hasKey', !!publicKey);
+  try {
+    const p = runConnectionAuth({
+      role: 'host', channel, deviceId, publicKey,
       localFingerprint: fp.local, remoteFingerprint: fp.remote,
       sign: (m) => window.farsightIpc.connAuthSign(m),
       verify: (pk, m, s) => window.farsightIpc.connAuthVerify(pk, m, s),
       isAccountKey: (pk) => window.farsightIpc.connAuthIsAccountKey(pk),
-      nonce: authNonce, timeoutMs: 15000,
+      nonce: authNonce, timeoutMs: 20000,
     });
+    for (const e of early) channel.onmessage(e); // replay into the pump's handler
+    await p;
     peerAuthed = true; // control unlocked
-  } catch {
+    statusEl.textContent = 'Linked device verified — session active.';
+  } catch (e) {
     // Failed device verification (unknown key / bad signature / fingerprint
-    // mismatch / timeout) → block and end. Nothing was ever injectable.
-    endSessionByHost('auth_failed', 'Connection blocked — the controller could not be verified as your device.');
+    // mismatch / timeout) → block and end. Nothing was ever injectable. Surface
+    // the reason so failures are diagnosable.
+    const reason = (e && e.message) ? e.message : 'error';
+    console.error('[connect-auth host] failed:', reason);
+    endSessionByHost('auth_failed', `Connection blocked — device verification failed (${reason}).`);
   }
 }
 
@@ -435,15 +453,23 @@ function startSignaling(signalingUrl) {
     // SP1: the server relays the controller's app version on CONNECT — surface
     // it so the consent prompt shows who (and which version) is asking.
     [MSG.CONNECT]: (m) => {
-      // A `linked` connect is a password-free connect from one of the owner's own
-      // account devices; it is authenticated end-to-end after consent (input stays
-      // blocked until the keypair handshake passes — see runHostAuth).
       linkedConnect = !!(m && m.linked);
       peerAuthed = false;
-      session.requestConsent();
       window.farsightIpc.requestAttention();
-      const who = linkedConnect ? 'One of your linked devices' : 'A controller';
-      statusEl.textContent = m && typeof m.peerVersion === 'string' ? `${who} (v${m.peerVersion}) wants to connect.` : `${who} wants to connect.`;
+      if (linkedConnect) {
+        // Own fleet (account-linked): the account login on THIS machine is the
+        // standing consent (§4.3) — no per-session prompt for your own devices.
+        // Auto-accept; the E2E keypair handshake still gates input, so a peer that
+        // isn't verifiably your device can never drive the machine.
+        statusEl.textContent = m && typeof m.peerVersion === 'string' ? `Linked device (v${m.peerVersion}) connecting…` : 'A linked device is connecting…';
+        session.requestConsent();
+        session.allow(); // synchronous idle→pending_consent→active: no visible prompt
+        startSession();
+      } else {
+        // Ad-hoc / password connect: still requires explicit per-session consent.
+        session.requestConsent();
+        statusEl.textContent = m && typeof m.peerVersion === 'string' ? `A controller (v${m.peerVersion}) wants to connect.` : 'A controller wants to connect.';
+      }
     },
     [MSG.OFFER]: async (m) => {
       if (peer) { await peer.handleOffer(m.sdp); remoteReady = true; flushCandidates(); }

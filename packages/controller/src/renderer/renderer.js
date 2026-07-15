@@ -399,26 +399,36 @@ function revealSession(stream) {
 // close the session — the host is not verifiably one of the owner's devices.
 async function runControllerAuth(p) {
   const channel = p.authChannel;
+  // Pre-fetch our identity BEFORE the channel opens so the handshake starts with
+  // no async gap (the pump attaches onmessage then sends hello synchronously).
+  let deviceId = null, publicKey = null;
+  try {
+    [deviceId, publicKey] = await Promise.all([
+      window.farsightIpc.connAuthDeviceId(),
+      window.farsightIpc.connAuthPublicKey(),
+    ]);
+  } catch { /* leave null → handshake fails closed */ }
   await new Promise((res) => { if (channel.readyState === 'open') res(); else channel.addEventListener('open', res, { once: true }); });
   const fp = p.getFingerprints();
+  console.debug('[connect-auth controller] fp', fp, 'deviceId', deviceId, 'hasKey', !!publicKey);
   try {
     await runConnectionAuth({
-      role: 'controller', channel,
-      deviceId: await window.farsightIpc.connAuthDeviceId(),
-      publicKey: await window.farsightIpc.connAuthPublicKey(),
+      role: 'controller', channel, deviceId, publicKey,
       localFingerprint: fp.local, remoteFingerprint: fp.remote,
       sign: (m) => window.farsightIpc.connAuthSign(m),
       verify: (pk, m, s) => window.farsightIpc.connAuthVerify(pk, m, s),
       isAccountKey: (pk) => window.farsightIpc.connAuthIsAccountKey(pk),
-      nonce: authNonce, timeoutMs: 15000,
+      nonce: authNonce, timeoutMs: 20000,
     });
     if (peer !== p) return; // superseded/closed
     linkedAuthOk = true;
     if (pendingStream) { const s = pendingStream; pendingStream = null; revealSession(s); }
-    else statusEl.textContent = 'Verified — waiting for the host to accept…';
-  } catch {
+    else statusEl.textContent = 'Verified — connecting…';
+  } catch (e) {
     if (peer !== p) return;
-    statusEl.textContent = 'Couldn’t verify the host as your device — connection blocked.';
+    const reason = (e && e.message) ? e.message : 'error';
+    console.error('[connect-auth controller] failed:', reason);
+    statusEl.textContent = `Couldn’t verify the host as your device (${reason}).`;
     doClose();
   }
 }
