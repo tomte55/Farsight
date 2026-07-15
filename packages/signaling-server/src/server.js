@@ -194,6 +194,24 @@ export function createSignalingServer({ port, config } = {}) {
           log.event('connect', { targetId: msg.targetId });
           break;
         }
+        case MSG.ATTACH: {
+          // SP3 (spec §4.2): a transfer worker joins an existing session by its
+          // unguessable sessionId (delivered only to the target via TRANSFER_REQUEST).
+          const sess = sessions.get(msg.sessionId);
+          if (!sess || sess.b) { send(socket, MSG.ERROR, { reason: 'no_session' }); break; }
+          socket.farsight.version = typeof msg.version === 'string' ? msg.version : null;
+          sess.b = socket;
+          socket.farsight.transferSessionId = msg.sessionId;
+          // Cross-link so the existing OFFER/ANSWER/CANDIDATE relay routes between them.
+          socket.farsight.peerSocket = sess.a;
+          sess.a.farsight.peerSocket = socket;
+          clearIdle();
+          const ice = iceServersFor(cfg);
+          send(sess.a, MSG.ICE_SERVERS, { iceServers: ice, peerVersion: socket.farsight.version || undefined });
+          send(socket, MSG.ICE_SERVERS, { iceServers: ice });
+          log.event('transfer_attach', { sessionId: msg.sessionId });
+          break;
+        }
         // R-6: whitelist relayed fields — never forward the raw message wholesale.
         case MSG.OFFER:
         case MSG.ANSWER: {

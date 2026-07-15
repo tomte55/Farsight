@@ -62,3 +62,42 @@ test('a transfer CONNECT with a bad password is rejected and opens no session', 
 
   host.close(); sender.close();
 });
+
+test('ATTACH pairs the transfer sockets, both get ICE_SERVERS, and OFFER relays', async () => {
+  srv = createSignalingServer({ port: 8193, config: cfg({ port: 8193 }) });
+  const host = await open('ws://127.0.0.1:8193');
+  const hostRead = reader(host);
+  host.send(JSON.stringify({ type: MSG.REGISTER, password: 'pw' }));
+  const reg = await hostRead();
+
+  const sender = await open('ws://127.0.0.1:8193');
+  const senderRead = reader(sender);
+  sender.send(JSON.stringify({ type: MSG.CONNECT, targetId: reg.id, password: 'pw', kind: 'transfer' }));
+  const req = await hostRead();
+  expect(req.type).toBe(MSG.TRANSFER_REQUEST);
+
+  // The host opens its transfer worker socket and attaches to the session.
+  const worker = await open('ws://127.0.0.1:8193');
+  const workerRead = reader(worker);
+  worker.send(JSON.stringify({ type: MSG.ATTACH, sessionId: req.sessionId }));
+
+  expect((await senderRead()).type).toBe(MSG.ICE_SERVERS);
+  expect((await workerRead()).type).toBe(MSG.ICE_SERVERS);
+
+  // SDP relays between the paired transfer sockets.
+  sender.send(JSON.stringify({ type: MSG.OFFER, sdp: 'x-sdp' }));
+  const off = await workerRead();
+  expect(off.type).toBe(MSG.OFFER);
+  expect(off.sdp).toBe('x-sdp');
+
+  host.close(); sender.close(); worker.close();
+});
+
+test('ATTACH to an unknown session is rejected', async () => {
+  srv = createSignalingServer({ port: 8194, config: cfg({ port: 8194 }) });
+  const w = await open('ws://127.0.0.1:8194');
+  const wRead = reader(w);
+  w.send(JSON.stringify({ type: MSG.ATTACH, sessionId: 'nope' }));
+  expect((await wRead()).reason).toBe('no_session');
+  w.close();
+});
