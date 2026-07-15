@@ -2,10 +2,10 @@
 // SP3 (spec §6) MAIN-ONLY streamed-to-disk transfer io. Uses node:fs/crypto/path
 // like updater.js/device-keypair.js — NEVER imported by a sandboxed renderer.
 // Consumes the pure transfer-manifest.js for path safety.
-import { statfs, stat, readdir } from 'node:fs/promises';
+import { statfs, stat, readdir, open, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { resolve, join, sep, basename } from 'node:path';
+import { resolve, join, sep, basename, dirname } from 'node:path';
 import { sanitizeRelativePath } from './transfer-manifest.js';
 
 // SECURITY-CRITICAL (spec §6.3): a received relative path must be safe (Phase-1
@@ -70,4 +70,37 @@ export async function walkSource(roots) {
     else if (st.isFile()) await addFile(r.path, name);
   }
   return { entries, sources };
+}
+
+// A resumable .part writer. The .part on-disk size IS the durable resume offset
+// (spec §6). Live hash is folded in only when hashLive (a continuous run); after
+// an app restart the caller passes hashLive:false and verifies by completion read.
+export async function createPartFile({ destRoot, relPath, resumeFrom, hashLive }) {
+  const finalPath = confineDestPath(destRoot, relPath);
+  const partPath = `${finalPath}.part`;
+  await mkdir(dirname(finalPath), { recursive: true });
+  // resumeFrom 0 → truncate (fresh or restart-at-0); else append at current size.
+  const fh = await open(partPath, resumeFrom === 0 ? 'w' : 'a');
+  let offset = 0;
+  if (resumeFrom !== 0) {
+    try { offset = (await fh.stat()).size; } catch { offset = 0; }
+  }
+  const hash = hashLive ? createHash('sha256') : null;
+  let digest = null; // memoized: Node's Hash.digest() throws if called twice
+  return {
+    offset,
+    partPath,
+    finalPath,
+    async write(buf) {
+      await fh.write(buf);
+      if (hash) hash.update(buf);
+    },
+    async fsync() { await fh.sync(); },
+    async close() { await fh.close(); },
+    liveDigest() {
+      if (!hash) return null;
+      if (digest === null) digest = hash.digest('hex');
+      return digest;
+    },
+  };
 }

@@ -82,3 +82,43 @@ test('walkSource recurses a directory with posix relative paths under the dir na
   // fileIds are unique and sequential from 0.
   expect(new Set(entries.map((e) => e.fileId)).size).toBe(entries.length);
 });
+
+import { createPartFile } from '../src/transfer-io.js';
+import { statSync, readFileSync } from 'node:fs';
+
+test('createPartFile writes bytes to a .part and tracks a live hash', async () => {
+  const root = tmp();
+  const pf = await createPartFile({ destRoot: root, relPath: 'out/data.bin', resumeFrom: 0, hashLive: true });
+  expect(pf.offset).toBe(0);
+  const chunk = Buffer.from('hello world');
+  await pf.write(chunk);
+  await pf.fsync();
+  await pf.close();
+  expect(statSync(pf.partPath).size).toBe(chunk.length);
+  expect(readFileSync(pf.partPath)).toEqual(chunk);
+  expect(pf.liveDigest()).toBe(createHash('sha256').update(chunk).digest('hex'));
+});
+
+test('createPartFile resumes append at the existing .part size', async () => {
+  const root = tmp();
+  const first = await createPartFile({ destRoot: root, relPath: 'r.bin', resumeFrom: 0, hashLive: false });
+  await first.write(Buffer.from('AAAA'));
+  await first.fsync(); await first.close();
+  expect(first.liveDigest()).toBeNull();
+
+  const resumed = await createPartFile({ destRoot: root, relPath: 'r.bin', resumeFrom: 4, hashLive: false });
+  expect(resumed.offset).toBe(4);
+  await resumed.write(Buffer.from('BBBB'));
+  await resumed.close();
+  expect(readFileSync(resumed.partPath)).toEqual(Buffer.from('AAAABBBB'));
+});
+
+test('createPartFile with resumeFrom 0 truncates a stale .part', async () => {
+  const root = tmp();
+  const a = await createPartFile({ destRoot: root, relPath: 's.bin', resumeFrom: 0, hashLive: false });
+  await a.write(Buffer.from('STALE-DATA')); await a.close();
+  const b = await createPartFile({ destRoot: root, relPath: 's.bin', resumeFrom: 0, hashLive: false });
+  expect(b.offset).toBe(0);
+  await b.write(Buffer.from('X')); await b.close();
+  expect(readFileSync(b.partPath)).toEqual(Buffer.from('X'));
+});
