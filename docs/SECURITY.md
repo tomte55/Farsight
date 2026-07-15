@@ -92,6 +92,18 @@ account could serve a malicious update — the same trust already required to
 distribute the installers at all. Updates never apply during an active session
 and never force a restart (see the auto-update design).
 
+**Remote update (S2.7): account-linked, converge-to-official-feed.** The owner can trigger a linked
+host to install its pending update from the console, with no per-update prompt on the host — logging
+into your account on that machine is the standing consent (§4.3). The directive is delivered as a
+**target version string** on the host's presence heartbeat, never a binary: the host still installs
+**only** the official GitHub-feed release (HTTPS + sha512-verified), so a compromised account can at
+most trigger a converge-to-latest or a no-op — it can never hand a host an arbitrary binary. The
+install still defers across an active session and only ever applies the official signed feed. Only
+account-linked hosts are remotely updatable (an unlinked host has no heartbeat directive) — the same
+management gate as connect-from-console. This makes the account the master key to keeping the fleet
+current, reinforcing that account security (argon2id, optional TOTP, GitHub-release-account 2FA) is
+load-bearing.
+
 ## Clipboard sync
 During an active session, clipboard TEXT is synchronized in both directions
 (bounded to 100000 chars) over the encrypted control channel. This is within
