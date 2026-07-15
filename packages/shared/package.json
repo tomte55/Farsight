@@ -30,6 +30,7 @@
     "./remote-fs-protocol": "./src/remote-fs-protocol.js",
     "./transfer-engine": "./src/transfer-engine.js",
     "./transfer-io": "./src/transfer-io.js",
+    "./jobs-store": "./src/jobs-store.js",
     "./update-policy": "./src/update-policy.js",
     "./updater": "./src/updater.js",
     "./log": "./src/log.js",
