@@ -257,3 +257,47 @@ describe('connect-from-console: device keypair lifecycle', () => {
     expect(await service.isAccountPublicKey('ANY')).toBe(false);
   });
 });
+
+describe('remote update (S2.7)', () => {
+  test('requestDeviceUpdate posts the target version once signed in', async () => {
+    const ff = fakeFetch({
+      '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } },
+      '/devices/heartbeat': { status: 200, body: {} },
+      '/devices/update': { status: 200, body: { ok: true } },
+    });
+    const service = createAccountService({
+      baseUrl: 'https://auth.example', safeStorage: fakeSafeStorage, fs: fakeFs(),
+      filePath: '/cfg/token.enc', fetch: ff.impl, now: () => 1_700_000_000_000,
+    });
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+
+    const res = await service.requestDeviceUpdate('host-dev', '1.8.0');
+    expect(res.ok).toBe(true);
+    const call = ff.calls.find((c) => c.url.endsWith('/devices/update'));
+    expect(JSON.parse(call.init.body)).toEqual({ deviceId: 'host-dev', targetVersion: '1.8.0' });
+  });
+
+  test('requestDeviceUpdate is not_signed_in when signed out', async () => {
+    const service = svc({});
+    expect(await service.requestDeviceUpdate('x', '1.8.0')).toEqual({ ok: false, error: 'not_signed_in' });
+  });
+
+  test('onUpdateDirective fires with the heartbeat directive on login', async () => {
+    const sched = fakeScheduler();
+    const service = createAccountService({
+      baseUrl: 'https://auth.example', safeStorage: fakeSafeStorage, fs: fakeFs(),
+      filePath: '/cfg/token.enc',
+      fetch: fakeFetch({
+        '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } },
+        '/devices/heartbeat': { status: 200, body: { targetVersion: '1.9.0' } },
+      }).impl,
+      now: () => 1_700_000_000_000, version: '1.7.0', setInterval: sched.setInterval, clearInterval: sched.clearInterval,
+    });
+    const seen = [];
+    service.onUpdateDirective((d) => seen.push(d));
+
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' }); // triggers an immediate beat
+
+    expect(seen).toEqual([{ targetVersion: '1.9.0' }]);
+  });
+});

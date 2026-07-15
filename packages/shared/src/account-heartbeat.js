@@ -16,6 +16,7 @@ export function createHeartbeat({
   client,
   version,
   getSignalingId,
+  onDirective,
   intervalMs = 30_000,
   setInterval: setI,
   clearInterval: clearI,
@@ -35,7 +36,12 @@ export function createHeartbeat({
       // Connect-from-console rendezvous: report the current signaling id so the
       // owner's console knows where to dial this device (undefined → omitted).
       const signalingId = getSignalingId ? getSignalingId() : undefined;
-      await client.heartbeat({ accessToken: token, version, signalingId: signalingId || undefined });
+      const res = await client.heartbeat({ accessToken: token, version, signalingId: signalingId || undefined });
+      // Surface any management directive in the response (S2.7: a converge-to
+      // target version) so the app can act on it. Best-effort; never throws.
+      if (onDirective && res && res.ok && res.data) {
+        try { onDirective(res.data); } catch { /* ignore */ }
+      }
     } catch {
       // swallow — the next tick tries again
     }

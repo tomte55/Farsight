@@ -49,6 +49,18 @@ describe('createHeartbeat', () => {
     expect(client.heartbeat).toHaveBeenCalledWith({ accessToken: 'access-1', version: '1.7.0', signalingId: '456789123' });
   });
 
+  test('calls onDirective with the heartbeat response body (S2.7 remote update)', async () => {
+    const session = signedInSession('access-1');
+    const client = { heartbeat: vi.fn().mockResolvedValue({ ok: true, status: 200, data: { targetVersion: '1.8.0' } }) };
+    const sched = fakeScheduler();
+    const seen = [];
+    const hb = createHeartbeat({ session, client, version: '1.7.0', onDirective: (d) => seen.push(d), setInterval: sched.setInterval, clearInterval: sched.clearInterval });
+
+    await hb.beat();
+
+    expect(seen).toEqual([{ targetVersion: '1.8.0' }]);
+  });
+
   test('each scheduled tick sends another heartbeat', async () => {
     const session = signedInSession('access-1');
     const client = { heartbeat: vi.fn().mockResolvedValue({ ok: true, status: 204 }) };

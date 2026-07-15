@@ -57,6 +57,10 @@ export function createAccountClient({ baseUrl, fetch: fetchImpl } = {}) {
     listDevices: ({ accessToken }) => request('GET', '/devices', { token: accessToken }),
     revokeDevice: ({ accessToken, deviceId }) =>
       request('POST', '/devices/revoke', { body: { deviceId }, token: accessToken }),
+    // Remote update (S2.7): set a converge-to target version on one of the owner's
+    // devices (null clears it). The host acts on it via its heartbeat response.
+    requestUpdate: ({ accessToken, deviceId, targetVersion }) =>
+      request('POST', '/devices/update', { body: { deviceId, targetVersion }, token: accessToken }),
     beginTotp: ({ accessToken }) => request('POST', '/2fa/begin', { body: {}, token: accessToken }),
     confirmTotp: ({ accessToken, code }) =>
       request('POST', '/2fa/confirm', { body: { code }, token: accessToken }),

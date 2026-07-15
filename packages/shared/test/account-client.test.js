@@ -107,6 +107,15 @@ describe('authenticated (Bearer) calls', () => {
     expect(JSON.parse(calls[0].init.body)).toEqual({ publicKey: 'PUB' });
   });
 
+  test('requestUpdate posts the target version to /devices/update', async () => {
+    const { impl, calls } = mockFetch({ status: 200, body: { ok: true } });
+    const res = await client(impl).requestUpdate({ accessToken: 'tok', deviceId: 'd1', targetVersion: '1.8.0' });
+    expect(res.ok).toBe(true);
+    expect(calls[0].url).toBe('https://auth.sovexa.org/devices/update');
+    expect(calls[0].init.headers.authorization).toBe('Bearer tok');
+    expect(JSON.parse(calls[0].init.body)).toEqual({ deviceId: 'd1', targetVersion: '1.8.0' });
+  });
+
   test('listDevices is a GET with the Bearer header and no body', async () => {
     const { impl, calls } = mockFetch({ status: 200, body: { devices: [{ id: 'd', online: true }] } });
     const res = await client(impl).listDevices({ accessToken: 'tok' });

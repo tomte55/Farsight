@@ -37,9 +37,11 @@ export function createAccountService({
   const keyStore = createDeviceKeyStore({ safeStorage, fs, filePath: deviceKeyFilePath ?? `${filePath}.key` });
 
   let currentSignalingId = null;
+  let directiveCb = null; // app-registered handler for management directives (S2.7)
   const heartbeat = createHeartbeat({
     session, client, version,
     getSignalingId: getSignalingId ?? (() => currentSignalingId),
+    onDirective: (data) => { if (directiveCb) directiveCb(data); },
     ...(intervalMs ? { intervalMs } : {}),
     ...(setI ? { setInterval: setI } : {}),
     ...(clearI ? { clearInterval: clearI } : {}),
@@ -127,6 +129,18 @@ export function createAccountService({
     // This install's account device id (null before login/resume). Bound into the
     // handshake transcript so both peers agree on who's who.
     getDeviceId() { return session.getDeviceId(); },
+
+    // ── remote update (S2.7) ──────────────────────────────────────────────────
+    // Console: set a converge-to target version on one of the owner's devices
+    // (null clears). The host acts on it via its heartbeat directive.
+    async requestDeviceUpdate(deviceId, targetVersion) {
+      const token = await session.getAccessToken();
+      if (!token) return { ok: false, error: 'not_signed_in' };
+      return client.requestUpdate({ accessToken: token, deviceId, targetVersion: targetVersion ?? null });
+    },
+    // Host: register a handler for management directives delivered on the heartbeat
+    // response (e.g. { targetVersion }). Called on each beat while signed in.
+    onUpdateDirective(cb) { directiveCb = typeof cb === 'function' ? cb : null; },
     // Sign the handshake transcript with this device's private key.
     signTranscript(message) { return signMessage(ensureKeys().privateKey, String(message)); },
     // Verify a peer's transcript signature.
