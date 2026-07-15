@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { UPDATE_STATUS, updateUiState, canInstallNow } from '../src/update-policy.js';
+import { UPDATE_STATUS, updateUiState, canInstallNow, shouldConverge } from '../src/update-policy.js';
 
 test('downloaded + idle → restart prompt', () => {
   const s = updateUiState({ status: 'downloaded', sessionActive: false, version: '1.2.0', downloaded: true });
@@ -51,4 +51,14 @@ test('canInstallNow: only when downloaded AND not in a session', () => {
 
 test('UPDATE_STATUS enumerates the states', () => {
   expect(UPDATE_STATUS.DOWNLOADED).toBe('downloaded');
+});
+
+test('shouldConverge only when the target is a newer version string', () => {
+  expect(shouldConverge({ currentVersion: '1.7.0', targetVersion: '1.8.0' })).toBe(true);
+  expect(shouldConverge({ currentVersion: '1.7.0', targetVersion: '1.7.0' })).toBe(false); // equal
+  expect(shouldConverge({ currentVersion: '1.8.0', targetVersion: '1.7.0' })).toBe(false); // already newer
+  expect(shouldConverge({ currentVersion: '1.7.0', targetVersion: null })).toBe(false);    // no directive
+  expect(shouldConverge({ currentVersion: '1.7.0', targetVersion: '' })).toBe(false);
+  expect(shouldConverge({ currentVersion: '', targetVersion: '1.8.0' })).toBe(false);      // unknown current
+  expect(shouldConverge({})).toBe(false);
 });

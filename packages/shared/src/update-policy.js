@@ -1,6 +1,7 @@
 // Runtime-agnostic decision logic for auto-update. No node:*, no Electron, no
 // electron-updater — the main process injects the updater. This is the tested
 // truth table; the orchestrator (updater.js) and app glue stay thin.
+import { isOlder } from './version.js';
 
 export const UPDATE_STATUS = {
   IDLE: 'idle',
@@ -48,4 +49,14 @@ export function updateUiState({ status, sessionActive, version, downloaded } = {
 // The gate the main process must pass before calling quitAndInstall().
 export function canInstallNow({ downloaded, sessionActive } = {}) {
   return downloaded === true && sessionActive === false;
+}
+
+// Remote update (S2.7): should a host with `currentVersion` act on a converge-to
+// `targetVersion` directive? Only when the target is a non-empty version STRING
+// strictly newer than the current version — so an equal/older/absent target is a
+// no-op (idempotent; once converged the host does nothing).
+export function shouldConverge({ currentVersion, targetVersion } = {}) {
+  if (typeof targetVersion !== 'string' || targetVersion.length === 0) return false;
+  if (typeof currentVersion !== 'string' || currentVersion.length === 0) return false;
+  return isOlder(currentVersion, targetVersion);
 }

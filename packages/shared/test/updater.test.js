@@ -63,6 +63,48 @@ test('installNow gates on downloaded + no session', () => {
   expect(u.quitAndInstall).toHaveBeenCalledTimes(1);
 });
 
+test('installWhenReady installs immediately when already downloaded (no session)', () => {
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: true, onStatus: vi.fn() });
+  up.start();
+  u.emit('update-downloaded', { version: '2.0.0' });
+  expect(up.installWhenReady()).toEqual({ ok: true });
+  expect(u.quitAndInstall).toHaveBeenCalledTimes(1);
+});
+
+test('installWhenReady triggers a check then installs when the download completes', () => {
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: true, onStatus: vi.fn() });
+  up.start();
+  u.checkForUpdates.mockClear();
+  const res = up.installWhenReady();               // not downloaded yet
+  expect(res).toEqual({ ok: true, pending: true });
+  expect(u.checkForUpdates).toHaveBeenCalledTimes(1);
+  expect(u.quitAndInstall).not.toHaveBeenCalled();
+  u.emit('update-downloaded', { version: '2.0.0' }); // download finishes → install
+  expect(u.quitAndInstall).toHaveBeenCalledTimes(1);
+});
+
+test('installWhenReady defers across an active session, installs on session end', () => {
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: true, onStatus: vi.fn() });
+  up.start();
+  up.setSessionActive(true);
+  up.installWhenReady();
+  u.emit('update-downloaded', { version: '2.0.0' });
+  expect(u.quitAndInstall).not.toHaveBeenCalled();   // deferred: session active
+  up.setSessionActive(false);
+  expect(u.quitAndInstall).toHaveBeenCalledTimes(1);  // applies on session end
+});
+
+test('installWhenReady is inert when not packaged', () => {
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: false, onStatus: vi.fn() });
+  up.start();
+  expect(up.installWhenReady()).toEqual({ ok: false, reason: 'not-packaged' });
+  expect(u.quitAndInstall).not.toHaveBeenCalled();
+});
+
 test('periodic check fires on the interval', () => {
   vi.useFakeTimers();
   const u = fakeUpdater();

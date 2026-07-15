@@ -13,8 +13,16 @@ export function createUpdater({ updater, isPackaged, onStatus, log = () => {}, i
   let version = null;
   let downloaded = false;
   let sessionActive = false;
+  // Remote update (S2.7): when set, install as soon as the download is ready and
+  // no session is active (deferring across an active session).
+  let installWhenDownloaded = false;
 
   const emit = () => onStatus(updateUiState({ status, sessionActive, version, downloaded }));
+  // The guarded install: only quitAndInstall when downloaded AND no active session.
+  const tryInstall = () => {
+    if (canInstallNow({ downloaded, sessionActive })) { updater.quitAndInstall(); return { ok: true }; }
+    return { ok: false, reason: sessionActive ? 'session-active' : 'not-downloaded' };
+  };
   const check = () => {
     try {
       updater.checkForUpdates().catch((err) => {
@@ -38,7 +46,7 @@ export function createUpdater({ updater, isPackaged, onStatus, log = () => {}, i
       updater.on('update-available', (info) => { status = 'available'; version = info?.version ?? version; log('info', `update available: ${version}`); emit(); });
       updater.on('update-not-available', () => { status = 'idle'; log('info', 'no update available (up to date)'); emit(); });
       updater.on('download-progress', () => { if (status !== 'downloading') log('info', 'downloading update'); status = 'downloading'; emit(); });
-      updater.on('update-downloaded', (info) => { status = 'downloaded'; downloaded = true; version = info?.version ?? version; log('info', `update downloaded: ${version}`); emit(); });
+      updater.on('update-downloaded', (info) => { status = 'downloaded'; downloaded = true; version = info?.version ?? version; log('info', `update downloaded: ${version}`); if (installWhenDownloaded) tryInstall(); emit(); });
       // The electron-updater 'error' event covers BOTH check and download
       // failures. Classify by the phase we were in: if we'd already found an
       // update (available/downloading), the download broke; otherwise the check
@@ -53,10 +61,22 @@ export function createUpdater({ updater, isPackaged, onStatus, log = () => {}, i
       setInterval(check, intervalMs);
     },
     checkNow() { if (isPackaged) check(); },
-    setSessionActive(active) { sessionActive = !!active; emit(); },
-    installNow() {
-      if (canInstallNow({ downloaded, sessionActive })) { updater.quitAndInstall(); return { ok: true }; }
-      return { ok: false, reason: sessionActive ? 'session-active' : 'not-downloaded' };
+    setSessionActive(active) {
+      sessionActive = !!active;
+      // If a remote update was pending and deferred for a live session, apply it
+      // the moment the session ends.
+      if (!sessionActive && installWhenDownloaded && downloaded) tryInstall();
+      emit();
+    },
+    installNow() { return tryInstall(); },
+    // Remote update (S2.7): converge now — install if already downloaded (deferring
+    // if a session is active), else trigger a check/download and install on ready.
+    installWhenReady() {
+      if (!isPackaged) return { ok: false, reason: 'not-packaged' };
+      installWhenDownloaded = true;
+      if (downloaded) return tryInstall();
+      check(); // autoDownload is on → 'update-downloaded' will fire tryInstall
+      return { ok: true, pending: true };
     },
   };
 }
