@@ -37,6 +37,9 @@ export function createSignalingServer({ port, config } = {}) {
   // R-2: bound the payload so a single frame can't exhaust memory before parse.
   const wss = new WebSocketServer({ port: listenPort, maxPayload: 64 * 1024 });
   const registry = createRegistry();
+  // SP3 (spec §4): multiplexed transfer sessions, keyed by an unguessable
+  // sessionId, decoupled from the 1:1 control peerSocket pairing.
+  const sessions = new Map();
   const limiter = createRateLimiter({ maxAttempts: cfg.maxAttempts, windowMs: cfg.windowMs });
   // L-1: bounds CONNECT attempts (offline target, bad password, or success)
   // per source IP, so probing for live host IDs is capped regardless of
@@ -76,7 +79,7 @@ export function createSignalingServer({ port, config } = {}) {
     // for normal ICE-candidate bursts, tight enough to stop message floods.
     const bucket = createTokenBucket({ capacity: cfg.msgBurst, refillPerSec: cfg.msgPerSec });
 
-    socket.farsight = { id: null, password: null, peerSocket: null, ip, registered: false, bucket, version: null, acceptsLinked: false };
+    socket.farsight = { id: null, password: null, peerSocket: null, ip, registered: false, bucket, version: null, acceptsLinked: false, transferSessionId: null };
 
     // R-2: close a socket that neither registers (host) nor pairs (controller)
     // within the idle window, so half-open sockets can't accumulate.
@@ -152,6 +155,24 @@ export function createSignalingServer({ port, config } = {}) {
               send(socket, MSG.ERROR, { reason: 'bad_password' });
               break;
             }
+          }
+          // SP3 (spec §4.2): a transfer session does NOT consume the target's
+          // control peerSocket — a host can serve a transfer while being
+          // controlled. Auth (password/linked + lockouts) has already passed above.
+          if (msg.kind === 'transfer') {
+            limiter.reset(key);
+            let sessionId;
+            do { sessionId = generateHostId(); } while (sessions.has(sessionId));
+            sessions.set(sessionId, { a: socket, b: null, targetId: msg.targetId });
+            socket.farsight.transferSessionId = sessionId;
+            clearIdle(); // the initiator is now settled into a session
+            send(target, MSG.TRANSFER_REQUEST, {
+              sessionId,
+              peerVersion: socket.farsight.version || undefined,
+              linked: wantsLinked || undefined,
+            });
+            log.event('transfer_request', { targetId: msg.targetId });
+            break;
           }
           // R-5: reject a second controller while the host is already paired.
           if (target.farsight.peerSocket) { send(socket, MSG.ERROR, { reason: 'busy' }); break; }
