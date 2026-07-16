@@ -52,6 +52,7 @@ ipcMain.handle('conn-auth:device-id', () => getAccountService().getDeviceId());
 ipcMain.handle('conn-auth:sign', (_e, message) => getAccountService().signTranscript(message));
 ipcMain.handle('conn-auth:verify', (_e, publicKey, message, signature) => getAccountService().verifyTranscript(publicKey, message, signature));
 ipcMain.handle('conn-auth:is-account-key', (_e, publicKey) => getAccountService().isAccountPublicKey(publicKey));
+ipcMain.handle('conn-auth:is-transfer-peer-key', (_e, publicKey) => getAccountService().isTransferPeerKey(publicKey));
 ipcMain.handle('account:status', () => getAccountService().status());
 ipcMain.handle('account:login', (_e, input) => getAccountService().login(input));
 ipcMain.handle('account:logout', () => getAccountService().logout());

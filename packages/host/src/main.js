@@ -65,6 +65,7 @@ ipcMain.handle('conn-auth:device-id', () => getAccountService().getDeviceId());
 ipcMain.handle('conn-auth:sign', (_e, message) => getAccountService().signTranscript(message));
 ipcMain.handle('conn-auth:verify', (_e, publicKey, message, signature) => getAccountService().verifyTranscript(publicKey, message, signature));
 ipcMain.handle('conn-auth:is-account-key', (_e, publicKey) => getAccountService().isAccountPublicKey(publicKey));
+ipcMain.handle('conn-auth:is-transfer-peer-key', (_e, publicKey) => getAccountService().isTransferPeerKey(publicKey));
 // Cached sign-in flag so the (synchronously-built) tray menu can gate the
 // diagnostics item without awaiting the account service on every rebuild.
 // Kept in sync from the three places sign-in state can change.

@@ -16,13 +16,22 @@ describe('transfer-worker conn-auth bridge (controller)', () => {
     expect(preload).toMatch(/farsightConnAuth/);
   });
 
-  it('bridges all five conn-auth IPC operations via invoke', () => {
-    for (const topic of ['conn-auth:device-id', 'conn-auth:public-key', 'conn-auth:sign', 'conn-auth:verify', 'conn-auth:is-account-key']) {
+  it('bridges the conn-auth IPC operations incl. the transfer-only peer predicate', () => {
+    for (const topic of ['conn-auth:device-id', 'conn-auth:public-key', 'conn-auth:sign', 'conn-auth:verify', 'conn-auth:is-account-key', 'conn-auth:is-transfer-peer-key']) {
       expect(preload).toContain(topic);
     }
   });
 
   it('main registers the conn-auth handlers process-wide so the worker can reach them', () => {
     expect(read('../src/main.js')).toMatch(/ipcMain\.handle\('conn-auth:sign'/);
+  });
+
+  it('main registers the transfer-only peer-key handler', () => {
+    expect(read('../src/main.js')).toMatch(/ipcMain\.handle\('conn-auth:is-transfer-peer-key'/);
+  });
+
+  it('the transfer worker handshake authenticates the peer via isTransferPeerKey (fleet OR contact), not the fleet-only isAccountKey', () => {
+    const worker = read('../src/transfer-worker/worker.js');
+    expect(worker).toMatch(/isAccountKey:\s*\(pk\)\s*=>\s*window\.farsightConnAuth\.isTransferPeerKey\(pk\)/);
   });
 });

@@ -118,7 +118,7 @@ async function maybeStartAuth() {
       remoteFingerprint: getFingerprints().remote,
       sign: (m) => window.farsightConnAuth.sign(m),
       verify: (pk, m, s) => window.farsightConnAuth.verify(pk, m, s),
-      isAccountKey: (pk) => window.farsightConnAuth.isAccountKey(pk),
+      isAccountKey: (pk) => window.farsightConnAuth.isTransferPeerKey(pk),
       nonce: authNonce, timeoutMs: 20000,
     });
     while (authEarly.length) { const e = authEarly.shift(); try { authChannel.onmessage(e); } catch { /* guarded */ } }

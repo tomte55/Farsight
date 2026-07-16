@@ -60,4 +60,5 @@ contextBridge.exposeInMainWorld('farsightConnAuth', {
   sign: (message) => ipcRenderer.invoke('conn-auth:sign', message),
   verify: (publicKey, message, signature) => ipcRenderer.invoke('conn-auth:verify', publicKey, message, signature),
   isAccountKey: (publicKey) => ipcRenderer.invoke('conn-auth:is-account-key', publicKey),
+  isTransferPeerKey: (publicKey) => ipcRenderer.invoke('conn-auth:is-transfer-peer-key', publicKey),
 });
