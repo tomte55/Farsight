@@ -1,4 +1,8 @@
 // packages/host/src/capture.js
+// Verbose diagnostic logging (see docs/private/superpowers): resolution/monitor
+// counts and ids only — never frame/pixel data.
+function noopLog() { const n = { debug() {}, info() {}, warn() {}, error() {}, child: () => n }; return n; }
+
 // Pure helper — no Electron import so it is unit-testable.
 export function pickPrimaryScreen(sources, primaryDisplayId) {
   if (!sources || sources.length === 0) return undefined;
@@ -6,11 +10,11 @@ export function pickPrimaryScreen(sources, primaryDisplayId) {
 }
 
 // Runtime helper (used by the renderer, exercised via manual verification).
-export async function captureScreenStream(desktopCapturer, screen, navigatorMediaDevices) {
+export async function captureScreenStream(desktopCapturer, screen, navigatorMediaDevices, log = noopLog()) {
   const sources = await desktopCapturer.getSources({ types: ['screen'] });
   const primaryId = screen.getPrimaryDisplay().id;
   const source = pickPrimaryScreen(sources, primaryId);
-  return navigatorMediaDevices.getUserMedia({
+  const stream = await navigatorMediaDevices.getUserMedia({
     audio: false,
     video: {
       mandatory: {
@@ -20,6 +24,12 @@ export async function captureScreenStream(desktopCapturer, screen, navigatorMedi
       },
     },
   });
+  const track = typeof stream.getVideoTracks === 'function' ? stream.getVideoTracks()[0] : undefined;
+  const settings = track && typeof track.getSettings === 'function' ? track.getSettings() : undefined;
+  const w = settings?.width ?? '?';
+  const h = settings?.height ?? '?';
+  log.info(`capture ${w}x${h} monitor=${primaryId}`);
+  return stream;
 }
 
 export function listDisplays(screen) {
@@ -37,6 +47,8 @@ export function displaySourceId(sources, display) {
   return (byId ?? sources[display.index] ?? sources[0])?.id;
 }
 
-export function monitorsForControl(displays) {
-  return displays.map((d) => ({ index: d.index, label: d.label, width: d.width, height: d.height, primary: d.primary }));
+export function monitorsForControl(displays, log = noopLog()) {
+  const monitors = displays.map((d) => ({ index: d.index, label: d.label, width: d.width, height: d.height, primary: d.primary }));
+  log.info(`monitors=${monitors.length}`);
+  return monitors;
 }

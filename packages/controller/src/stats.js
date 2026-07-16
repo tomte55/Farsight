@@ -2,6 +2,9 @@
 // Pure summarizer for RTCPeerConnection.getStats() output — no timing/interval
 // logic here (that lives in the renderer poller). Kept side-effect free and
 // runtime-agnostic so it's unit-testable without a real RTCPeerConnection.
+// Verbose diagnostic logging (see docs/private/superpowers): quality numbers
+// only — never SDP/ICE or any payload content.
+function noopLog() { const n = { debug() {}, info() {}, warn() {}, error() {}, child: () => n }; return n; }
 
 // Extract the fields we care about from a raw RTCStatsReport (Map-like of
 // stats objects, keyed by id). Does not do any cross-sample math.
@@ -44,7 +47,7 @@ export function throughputKbps(prev, cur) {
 
 // Build a "· "-joined display string from a summary: { rttMs, kbps, width,
 // height, transport }. Omits parts that are missing; "—" if nothing present.
-export function formatQuality(summary) {
+export function formatQuality(summary, log = noopLog()) {
   const parts = [];
   const { rttMs, kbps, width, height, transport } = summary || {};
 
@@ -55,5 +58,7 @@ export function formatQuality(summary) {
   if (typeof width === 'number' && typeof height === 'number') parts.push(`${width}×${height}`);
   if (transport) parts.push(transport);
 
-  return parts.length ? parts.join(' · ') : '—';
+  const label = parts.length ? parts.join(' · ') : '—';
+  log.debug(`quality ${label}`); // one line per poll sample — DEBUG (high-frequency)
+  return label;
 }
