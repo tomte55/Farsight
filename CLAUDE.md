@@ -41,6 +41,19 @@ apps — **host** (the controlled machine) and **controller** (where you drive f
   builds fail on a winCodeSign symlink-privilege error — that's local-only, ignore it.
 - A packaged app window that opens and shows static text does NOT prove the renderer ran — check
   DevTools console for `ERR_FILE_NOT_FOUND` / module-resolution errors.
+- **SP3 file-transfer worker** (`packages/*/src/transfer-worker*`, `shared/transfer-*`): a hidden
+  `BrowserWindow{show:false}` owns a dedicated RTCPeerConnection + signaling; main runs the
+  orchestrator and forwards frames over IPC. Gotchas that all bit v1.9.0 (DOA) and were fixed by
+  v1.9.7 — do not regress: (1) the worker's inline importmap needs a **sha256 CSP hash** (its CSP is
+  stricter — `script-src 'self'`, no `'unsafe-inline'`), guarded by `transfer-worker-importmap.test.js`;
+  (2) `webContents.send()` to the worker is **queued until `did-finish-load`** (Electron drops sends to
+  a not-yet-loaded renderer); (3) the worker uses a **dedicated one-shot signaling client**, NOT the
+  app's auto-registering main one; (4) hidden workers set `backgroundThrottling:false`; (5) completion
+  is a **two-sided delivery ACK** (receiver `complete{ok}` after every file is hash-verified; sender
+  waits before closing); (6) **byte-routing is by manifest-order cursor**, never by `FILE_BEGIN` timing
+  (ctrl/bulk are separate channels). **Test transfers with a real 2-machine / MULTI-chunk E2E** —
+  localhost + one-chunk files hide teardown-races and routing bugs. Worker/main emit diagnostics to the
+  app log (`[ft-worker]` heartbeat + `[transfer]` lifecycle) for field debugging.
 - **Two GATED, outward-facing actions** require explicit user approval per homelab ops rules: the
   signaling deploy (public subdomain) and opening coturn firewall ports.
 
