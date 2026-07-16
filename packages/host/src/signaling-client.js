@@ -9,10 +9,12 @@ import { assertSecureSignalingUrl } from '@farsight/shared/signaling-url';
 // host_offline. On every (re)connect it re-sends REGISTER; the caller's REGISTERED
 // handler then re-syncs the current password (UPDATE_PASSWORD) and reports the
 // fresh signaling id. WebSocket + timers are injectable for tests.
+function noopLog() { const n = { debug() {}, info() {}, warn() {}, error() {}, child: () => n }; return n; }
+
 export function createSignalingClient(
   url,
   handlers,
-  { password, version, acceptsLinked, WebSocketImpl, setTimeout: setT, clearTimeout: clearT } = {},
+  { password, version, acceptsLinked, WebSocketImpl, setTimeout: setT, clearTimeout: clearT, log = noopLog() } = {},
 ) {
   assertSecureSignalingUrl(url); // R-3: refuse plaintext ws:// off-localhost
   const WS = WebSocketImpl ?? WebSocket;
@@ -25,12 +27,14 @@ export function createSignalingClient(
   let reconnectTimer = null;
 
   const connect = () => {
+    log.debug('connecting');
     ws = new WS(url);
     ws.addEventListener('open', () => {
       attempt = 0;
       // SP1 version + SP2 acceptsLinked (opt into password-free linked connect)
       // ride REGISTER. The server assigns a fresh id → REGISTERED.
       ws.send(JSON.stringify(buildMessage(MSG.REGISTER, { password, version, acceptsLinked })));
+      log.info('socket open — register sent');
     });
     ws.addEventListener('message', (ev) => {
       let msg; try { msg = parseMessage(ev.data); } catch { return; }
@@ -41,9 +45,10 @@ export function createSignalingClient(
       // Capped exponential backoff: 1s, 2s, 4s, 8s, 15s (max).
       const delay = Math.min(1000 * 2 ** attempt, 15000);
       attempt += 1;
+      log.warn(`socket closed — reconnect attempt ${attempt} in ${delay}ms`);
       reconnectTimer = schedule(connect, delay);
     });
-    ws.addEventListener('error', () => { try { ws.close(); } catch { /* close triggers reconnect */ } });
+    ws.addEventListener('error', () => { log.warn('socket error'); try { ws.close(); } catch { /* close triggers reconnect */ } });
   };
   connect();
 
