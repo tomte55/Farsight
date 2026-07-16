@@ -34,6 +34,9 @@ const setupError = document.getElementById('setup-error');
 // can reference them; wired up at the bottom of this file).
 const sendPanelEl = document.getElementById('send-panel');
 const transfersPanelEl = document.getElementById('transfers-panel');
+// Contacts panel (friends list) — declared here for the same reason as the
+// transfer panels above (openFleet()/openContacts() cross-reference each other).
+const contactsPanelEl = document.getElementById('contacts-panel');
 let signalingUrl = null;
 let peer = null, signal = null;
 const overlayEl = document.getElementById('overlay');
@@ -496,6 +499,7 @@ function openFleet() {
   accountEl.hidden = false;
   sendPanelEl.hidden = true;
   transfersPanelEl.hidden = true;
+  contactsPanelEl.hidden = true;
   refreshAccountView();
 }
 function closeFleet() {
@@ -694,6 +698,145 @@ for (const el of [acctPassword, acctCode, acctEmail]) {
   el.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSignIn(); });
 }
 
+// ── Contacts (friends list) ─────────────────────────────────────────────────
+// A separate panel from the fleet console: contacts are OTHER people's Farsight
+// accounts (added by email, subject to accept/decline), not this account's own
+// devices. Sends to an accepted contact's device reuse the same password-free
+// "linked" transfer path as the fleet console (sendToFleetDevice), but the
+// target also carries contact:true so main/transfer-service route it through
+// the contact-consent path rather than the own-fleet auto-accept path.
+function openContacts() {
+  connectEl.style.display = 'none';
+  setupEl.hidden = true;
+  accountEl.hidden = true;
+  sendPanelEl.hidden = true;
+  transfersPanelEl.hidden = true;
+  contactsPanelEl.hidden = false;
+  loadContacts();
+}
+function closeContacts() {
+  contactsPanelEl.hidden = true;
+  connectEl.style.display = '';
+}
+
+async function loadContacts() {
+  setMsg(document.getElementById('contacts-error'), '');
+  const res = await window.farsightIpc.accountContacts();
+  if (!res.ok) {
+    if (res.error === 'not_signed_in') { closeContacts(); openFleet(); return; }
+    setMsg(document.getElementById('contacts-error'), 'Couldn’t load contacts. Check your connection.');
+    return;
+  }
+  renderContacts(res.data || { accepted: [], incoming: [], outgoing: [] });
+}
+
+function renderContacts(view) {
+  const accepted = view.accepted || [], incoming = view.incoming || [], outgoing = view.outgoing || [];
+  document.getElementById('contacts-sub').textContent =
+    `${accepted.length} contact${accepted.length === 1 ? '' : 's'}`;
+
+  // Incoming requests → Accept / Decline
+  const inc = document.getElementById('contacts-incoming');
+  inc.replaceChildren();
+  for (const r of incoming) {
+    const row = document.createElement('div'); row.className = 'host-row';
+    const main = document.createElement('div'); main.className = 'host-main';
+    const name = document.createElement('div'); name.className = 'host-name'; name.textContent = r.email;
+    const meta = document.createElement('div'); meta.className = 'host-meta'; meta.textContent = 'wants to connect';
+    main.append(name, meta);
+    const right = document.createElement('div'); right.className = 'host-right';
+    const acc = document.createElement('button'); acc.className = 'btn btn-primary'; acc.textContent = 'Accept';
+    acc.onclick = async () => { await window.farsightIpc.accountContactAccept(r.contactId); loadContacts(); };
+    const dec = document.createElement('button'); dec.className = 'btn btn-ghost'; dec.textContent = 'Decline';
+    dec.onclick = async () => { await window.farsightIpc.accountContactDecline(r.contactId); loadContacts(); };
+    right.append(acc, dec);
+    row.append(main, right);
+    inc.appendChild(row);
+  }
+
+  // Accepted contacts → one row per device, Files…/Folder… when online
+  const list = document.getElementById('contacts-list');
+  list.replaceChildren();
+  if (!accepted.length && !incoming.length && !outgoing.length) {
+    const empty = document.createElement('div'); empty.className = 'fleet-empty';
+    empty.textContent = 'No contacts yet. Add someone by their Farsight account email.';
+    list.appendChild(empty);
+  }
+  for (const c of accepted) {
+    const row = document.createElement('div'); row.className = 'host-row';
+    const dot = document.createElement('div'); dot.className = `host-dot ${c.online ? 'on' : ''}`;
+    const main = document.createElement('div'); main.className = 'host-main';
+    const name = document.createElement('div'); name.className = 'host-name'; name.textContent = c.email;
+    const meta = document.createElement('div'); meta.className = 'host-meta'; meta.textContent = c.online ? 'online' : 'offline';
+    main.append(name, meta);
+    const right = document.createElement('div'); right.className = 'host-right';
+    if (c.online && c.signalingId) {
+      for (const [label, mode] of [['Files…', 'files'], ['Folder…', 'folder']]) {
+        const b = document.createElement('button'); b.className = 'btn btn-ghost host-send'; b.textContent = label;
+        b.onclick = () => sendToContact(c, b, mode);
+        right.appendChild(b);
+      }
+    }
+    row.append(dot, main, right);
+    list.appendChild(row);
+  }
+
+  // Outgoing pending
+  const out = document.getElementById('contacts-outgoing');
+  out.replaceChildren();
+  for (const r of outgoing) {
+    const row = document.createElement('div'); row.className = 'host-row';
+    const main = document.createElement('div'); main.className = 'host-main';
+    const name = document.createElement('div'); name.className = 'host-name'; name.textContent = r.email;
+    const meta = document.createElement('div'); meta.className = 'host-meta'; meta.textContent = 'invite sent — waiting to accept';
+    main.append(name, meta);
+    row.appendChild(main);
+    out.appendChild(row);
+  }
+}
+
+async function sendToContact(c, btn, mode = 'files') {
+  const paths = await window.farsightIpc.transferPickPaths(mode);
+  if (!paths || paths.length === 0) return;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await window.farsightIpc.transferSend({
+      target: { id: c.signalingId, deviceId: c.deviceId, linked: true, contact: true }, paths,
+    });
+    closeContacts();
+    if (res && res.jobId) {
+      transferJobs.set(res.jobId, {
+        jobId: res.jobId, direction: 'send', target: { id: c.email || c.signalingId },
+        manifest: res.manifest, state: 'awaiting-approval', createdAt: Date.now(),
+      });
+      openTransfersPanel();
+    } else {
+      setMsg(document.getElementById('contacts-error'), (res && res.error) || 'Could not start the transfer.');
+    }
+  } catch {
+    setMsg(document.getElementById('contacts-error'), 'Could not start the transfer.');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+document.getElementById('menu-contacts').addEventListener('click', () => { settingsMenu.classList.remove('open'); openContacts(); });
+document.getElementById('contacts-close').addEventListener('click', closeContacts);
+document.getElementById('contacts-refresh').addEventListener('click', loadContacts);
+document.getElementById('contact-add-btn').addEventListener('click', async () => {
+  const email = document.getElementById('contact-add-email').value.trim();
+  if (!email) return;
+  const res = await window.farsightIpc.accountContactAdd(email);
+  if (!res.ok) {
+    setMsg(document.getElementById('contacts-error'), res.error === 'no_such_user'
+      ? 'No Farsight account with that email — ask them to sign up first.'
+      : 'Could not add that contact.');
+    return;
+  }
+  document.getElementById('contact-add-email').value = '';
+  loadContacts();
+});
+
 // Resume a persisted account session on launch so a signed-in controller starts
 // reporting presence immediately (heartbeat), without waiting for the fleet panel
 // to be opened. No stored token → no network call; status() just returns signed-out.
@@ -730,6 +873,7 @@ function openSendPanel() {
   setupEl.hidden = true;
   accountEl.hidden = true;
   transfersPanelEl.hidden = true;
+  contactsPanelEl.hidden = true;
   sendPanelEl.hidden = false;
   sendStatusEl.textContent = '';
 }
@@ -738,6 +882,7 @@ function openTransfersPanel() {
   setupEl.hidden = true;
   accountEl.hidden = true;
   sendPanelEl.hidden = true;
+  contactsPanelEl.hidden = true;
   transfersPanelEl.hidden = false;
   refreshTransfersList();
 }

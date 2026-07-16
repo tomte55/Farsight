@@ -101,6 +101,7 @@
 <button id="settings-cog" class="cog" title="Settings" aria-label="Settings">⚙</button>
 <div id="settings-menu" class="menu">
   <button id="menu-fleet">My fleet…</button>
+  <button id="menu-contacts">Contacts…</button>
   <button id="menu-send">Send files…</button>
   <button id="menu-transfers">Transfers…</button>
   <button id="menu-change-server">Change signaling server…</button>
@@ -177,6 +178,31 @@
       <p id="fleet-error" class="statusline" style="color:var(--danger-ink)"></p>
     </div>
     <button id="acct-close" class="linkbtn acct-back">← Back to connect</button>
+  </div>
+</div>
+
+<!-- Contacts (friends list): add-by-email, incoming/outgoing requests, and
+     accepted contacts (one row per device) with password-free send when
+     online — mirrors #acct-fleet, backed by window.farsightIpc.accountContacts*. -->
+<div id="contacts-panel" hidden>
+  <div class="acct-wrap">
+    <div class="card">
+      <div class="fleet-head">
+        <div><div class="acct-title">Contacts</div><div id="contacts-sub" class="statusline" style="margin-top:2px"></div></div>
+        <div class="fleet-head-actions">
+          <button id="contacts-refresh" class="btn btn-ghost" style="padding:7px 12px">Refresh</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin:10px 0">
+        <input id="contact-add-email" class="input" type="email" placeholder="Add a contact by email" style="flex:1" />
+        <button id="contact-add-btn" class="btn btn-primary">Add</button>
+      </div>
+      <p id="contacts-error" class="statusline" style="color:var(--danger-ink)"></p>
+      <div id="contacts-incoming"></div>
+      <div id="contacts-list"></div>
+      <div id="contacts-outgoing"></div>
+    </div>
+    <button id="contacts-close" class="linkbtn acct-back">← Back to connect</button>
   </div>
 </div>
 
