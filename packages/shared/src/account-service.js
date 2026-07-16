@@ -109,6 +109,21 @@ export function createAccountService({
   async function isTransferPeerKey(publicKey) {
     return (await classifyPublicKey(publicKey)) !== null;
   }
+  async function addContact(email) {
+    const token = await session.getAccessToken();
+    if (!token) return { ok: false, error: 'not_signed_in' };
+    return client.addContact({ accessToken: token, email });
+  }
+  async function acceptContact(contactId) {
+    const token = await session.getAccessToken();
+    if (!token) return { ok: false, error: 'not_signed_in' };
+    return client.acceptContact({ accessToken: token, contactId });
+  }
+  async function declineContact(contactId) {
+    const token = await session.getAccessToken();
+    if (!token) return { ok: false, error: 'not_signed_in' };
+    return client.declineContact({ accessToken: token, contactId });
+  }
 
   return {
     async login(input) {
@@ -157,6 +172,9 @@ export function createAccountService({
     contacts,
     classifyPublicKey,
     isTransferPeerKey,
+    addContact,
+    acceptContact,
+    declineContact,
 
     // ── connect-from-console: rendezvous + main-only crypto for the handshake ──
     // The host publishes its current signaling id through the heartbeat; main

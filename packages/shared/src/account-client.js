@@ -56,6 +56,9 @@ export function createAccountClient({ baseUrl, fetch: fetchImpl } = {}) {
       request('POST', '/devices/key', { body: { publicKey }, token: accessToken }),
     listDevices: ({ accessToken }) => request('GET', '/devices', { token: accessToken }),
     listContacts: ({ accessToken }) => request('GET', '/contacts', { token: accessToken }),
+    addContact: ({ accessToken, email }) => request('POST', '/contacts/add', { body: { email }, token: accessToken }),
+    acceptContact: ({ accessToken, contactId }) => request('POST', '/contacts/accept', { body: { contactId }, token: accessToken }),
+    declineContact: ({ accessToken, contactId }) => request('POST', '/contacts/decline', { body: { contactId }, token: accessToken }),
     revokeDevice: ({ accessToken, deviceId }) =>
       request('POST', '/devices/revoke', { body: { deviceId }, token: accessToken }),
     // Remote update (S2.7): set a converge-to target version on one of the owner's

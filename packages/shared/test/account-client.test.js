@@ -144,4 +144,24 @@ describe('authenticated (Bearer) calls', () => {
     expect(calls[0].init.headers.authorization).toBe('Bearer tok');
     expect(calls[0].init.body).toBeUndefined();
   });
+
+  test('addContact POSTs /contacts/add with the email and Bearer', async () => {
+    const { impl, calls } = mockFetch({ status: 200, body: { contactId: 'c1' } });
+    const res = await client(impl).addContact({ accessToken: 'tok', email: 'dad@x.y' });
+    expect(res.data).toEqual({ contactId: 'c1' });
+    expect(calls[0].init.method).toBe('POST');
+    expect(calls[0].url.endsWith('/contacts/add')).toBe(true);
+    expect(JSON.parse(calls[0].init.body)).toEqual({ email: 'dad@x.y' });
+    expect(calls[0].init.headers.authorization).toBe('Bearer tok');
+  });
+  test('acceptContact / declineContact POST the contactId with Bearer', async () => {
+    const a = mockFetch({ status: 200, body: { ok: true } });
+    await client(a.impl).acceptContact({ accessToken: 'tok', contactId: 'c1' });
+    expect(a.calls[0].url.endsWith('/contacts/accept')).toBe(true);
+    expect(JSON.parse(a.calls[0].init.body)).toEqual({ contactId: 'c1' });
+    const d = mockFetch({ status: 200, body: { ok: true } });
+    await client(d.impl).declineContact({ accessToken: 'tok', contactId: 'c1' });
+    expect(d.calls[0].url.endsWith('/contacts/decline')).toBe(true);
+    expect(JSON.parse(d.calls[0].init.body)).toEqual({ contactId: 'c1' });
+  });
 });

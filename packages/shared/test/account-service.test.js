@@ -288,6 +288,24 @@ describe('connect-from-console: device keypair lifecycle', () => {
     expect(await signedOut.isTransferPeerKey('ANY')).toBe(false);
     expect(await signedOut.classifyPublicKey('ANY')).toBe(null);
   });
+
+  test('addContact/acceptContact/declineContact are token-gated and proxy the client', async () => {
+    const service = svc({
+      '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } },
+      '/devices/key': { status: 200, body: {} },
+      '/devices/heartbeat': { status: 200, body: {} },
+      '/contacts/add': { status: 200, body: { contactId: 'c1' } },
+      '/contacts/accept': { status: 200, body: { ok: true } },
+      '/contacts/decline': { status: 200, body: { ok: true } },
+    });
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+    expect((await service.addContact('dad@x.y')).data).toEqual({ contactId: 'c1' });
+    expect((await service.acceptContact('c1')).ok).toBe(true);
+    expect((await service.declineContact('c1')).ok).toBe(true);
+
+    const out = svc({});
+    expect(await out.addContact('x@y.z')).toEqual({ ok: false, error: 'not_signed_in' });
+  });
 });
 
 describe('verbose diagnostic logging: uploadDiagnostics', () => {
