@@ -722,10 +722,19 @@ const XFER_ERROR_LABELS = {
 // here — NOT "active" — until the host actually accepts (the sender's 'accepted'
 // lifecycle event). Terminal states carry any error/decline reason.
 function stateLabel(j) {
+  // File-count is the intuitive progress signal — the byte bar is dominated by
+  // any large file, so it can read very differently from the receiver's bar even
+  // when both are nearly done. Showing "X / Y files" keeps the two sides legible
+  // and close.
+  const p = j.progress;
+  const total = p && Number.isFinite(p.filesTotal) ? p.filesTotal
+    : (j.manifest && (j.manifest.totalFiles ?? (j.manifest.entries || []).length));
+  const sent = p && Number.isFinite(p.filesSent) ? p.filesSent : (j.state === 'done' ? total : 0);
+  const hasCount = Number.isFinite(total) && total > 0;
   switch (j.state) {
     case 'awaiting-approval': return 'Waiting for approval…';
-    case 'active': return 'Transferring…';
-    case 'done': return 'Completed';
+    case 'active': return hasCount ? `Transferring · ${sent} / ${total} files` : 'Transferring…';
+    case 'done': return hasCount ? `Completed · ${total} file${total === 1 ? '' : 's'}` : 'Completed';
     case 'declined': return 'Declined by host';
     case 'canceled': return 'Canceled';
     case 'error': return `Failed${j.error ? ` — ${XFER_ERROR_LABELS[j.error] || j.error}` : ''}`;
@@ -733,6 +742,15 @@ function stateLabel(j) {
   }
 }
 const TERMINAL_STATES = ['done', 'canceled', 'error', 'declined'];
+
+// Bar fraction: multi-file → files-sent/total (agrees with the "X / Y files"
+// text and tracks the receiver); single file → byte fraction for smoothness.
+function sendFraction(j) {
+  const p = j.progress;
+  if (p && Number.isFinite(p.filesTotal) && p.filesTotal > 1 && Number.isFinite(p.filesSent)) return p.filesSent / p.filesTotal;
+  if (p && typeof p.fraction === 'number') return p.fraction;
+  return j.state === 'done' ? 1 : 0;
+}
 
 function jobRow(j) {
   const row = document.createElement('div');
@@ -750,7 +768,7 @@ function jobRow(j) {
   barWrap.className = 'xfer-bar';
   const barFill = document.createElement('div');
   barFill.className = 'xfer-bar-fill';
-  const fraction = (j.progress && typeof j.progress.fraction === 'number') ? j.progress.fraction : (j.state === 'done' ? 1 : 0);
+  const fraction = sendFraction(j);
   barFill.style.width = `${Math.round(Math.min(1, Math.max(0, fraction)) * 100)}%`;
   barWrap.appendChild(barFill);
 

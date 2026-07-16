@@ -567,6 +567,29 @@ document.getElementById('transfer-consent-reject').addEventListener('click', () 
 // createdAt }, seeded from transfer:list (persisted jobs-store records) and
 // kept live via transfer:event while a receive is actively running.
 const transferJobs = new Map();
+// File-count is the intuitive progress signal (the byte bar is dominated by any
+// large file — 60/61 small files done can read as 5% while one big file arrives,
+// which looks stuck/out-of-sync with the sender). Surface "X / Y files" so the
+// receive tracks the send closely and completion is obvious.
+// Bar fraction: for MULTI-file transfers use files-done/total so the bar agrees
+// with the "X / Y files" text and tracks the sender (a byte bar is dominated by
+// one large file and reads as ~5% with 60/61 files done). For a single file,
+// keep the byte fraction so a big file still shows smooth progress.
+function receiveFraction(j) {
+  const p = j.progress;
+  if (p && Number.isFinite(p.filesTotal) && p.filesTotal > 1 && Number.isFinite(p.filesDone)) return p.filesDone / p.filesTotal;
+  if (p && typeof p.fraction === 'number') return p.fraction;
+  return j.state === 'done' ? 1 : 0;
+}
+function receiveMetaText(j) {
+  const p = j.progress;
+  const total = p && Number.isFinite(p.filesTotal) ? p.filesTotal
+    : (j.manifest && (j.manifest.totalFiles ?? (j.manifest.entries || []).length));
+  const done = p && Number.isFinite(p.filesDone) ? p.filesDone : (j.state === 'done' ? total : 0);
+  const label = j.state === 'done' ? 'Completed' : j.state === 'error' ? 'Failed'
+    : j.state === 'canceled' ? 'Canceled' : 'Receiving';
+  return Number.isFinite(total) && total > 0 ? `${label} · ${done} / ${total} files` : (label);
+}
 function transferJobRow(j) {
   const row = document.createElement('div');
   row.className = 'host-row xfer-row';
@@ -580,12 +603,12 @@ function transferJobRow(j) {
   barWrap.className = 'xfer-bar';
   const barFill = document.createElement('div');
   barFill.className = 'xfer-bar-fill';
-  const fraction = (j.progress && typeof j.progress.fraction === 'number') ? j.progress.fraction : (j.state === 'done' ? 1 : 0);
+  const fraction = receiveFraction(j);
   barFill.style.width = `${Math.round(Math.min(1, Math.max(0, fraction)) * 100)}%`;
   barWrap.appendChild(barFill);
   const meta = document.createElement('div');
   meta.className = 'host-meta';
-  meta.textContent = j.state || 'active';
+  meta.textContent = receiveMetaText(j);
   main.append(title, barWrap, meta);
   row.appendChild(main);
   return row;
