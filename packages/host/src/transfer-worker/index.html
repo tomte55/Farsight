@@ -18,7 +18,7 @@
   CSP blocks the importmap, worker.js can't resolve @farsight/shared/*, and the
   transfer rendezvous never starts (the v1.9.0 file-transfer regression).
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'sha256-Qo+p/z1rfM3t6PFfDSI/DoZxp24fz8oIKs4gypfWjI4='; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'sha256-3c6+e4bWEhMvfFWWd+fVSao9OXZhD6x5o91BJUrAkTs='; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>Farsight Transfer Worker</title>
 <!--
   Import map: same mechanism as ../renderer/index.html — resolves bare
@@ -31,7 +31,10 @@
 {
   "imports": {
     "@farsight/shared/protocol": "../shared/protocol.js",
-    "@farsight/shared/signaling-url": "../shared/signaling-url.js"
+    "@farsight/shared/signaling-url": "../shared/signaling-url.js",
+    "@farsight/shared/connection-auth": "../shared/connection-auth.js",
+    "@farsight/shared/connect-transcript": "../shared/connect-transcript.js",
+    "@farsight/shared/transfer-auth-gate": "../shared/transfer-auth-gate.js"
   }
 }
 </script>
