@@ -81,6 +81,35 @@ export function createAccountService({
     return client.listDevices({ accessToken: token });
   }
 
+  // Accepted/incoming/outgoing contacts (SP3 Phase 2 §4.4) — devices belonging
+  // to other users that this owner has an accepted contact relationship with.
+  async function contacts() {
+    const token = await session.getAccessToken();
+    if (!token) return { ok: false, error: 'not_signed_in' };
+    return client.listContacts({ accessToken: token });
+  }
+  // Classify a peer's public key against the owner's own devices (fleet) and
+  // accepted contacts. Fail-closed: unknown / signed-out / error → null.
+  async function classifyPublicKey(publicKey) {
+    const f = await fleet();
+    if (f.ok) {
+      const devices = (f.data && f.data.devices) || [];
+      if (devices.some((d) => d.publicKey && d.publicKey === publicKey)) return 'fleet';
+    }
+    const c = await contacts();
+    if (c.ok) {
+      const accepted = (c.data && c.data.accepted) || [];
+      if (accepted.some((d) => d.publicKey && d.publicKey === publicKey)) return 'contact';
+    }
+    return null;
+  }
+  // Transfer-only trust predicate: a transfer peer may be a fleet device OR an
+  // accepted contact. NOT used for remote CONTROL auth (that stays fleet-only via
+  // isAccountPublicKey) — see design §5.2.
+  async function isTransferPeerKey(publicKey) {
+    return (await classifyPublicKey(publicKey)) !== null;
+  }
+
   return {
     async login(input) {
       const res = await session.login(input);
@@ -125,6 +154,9 @@ export function createAccountService({
     },
 
     fleet,
+    contacts,
+    classifyPublicKey,
+    isTransferPeerKey,
 
     // ── connect-from-console: rendezvous + main-only crypto for the handshake ──
     // The host publishes its current signaling id through the heartbeat; main

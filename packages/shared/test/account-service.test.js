@@ -256,6 +256,38 @@ describe('connect-from-console: device keypair lifecycle', () => {
     const service = svc({});
     expect(await service.isAccountPublicKey('ANY')).toBe(false);
   });
+
+  test('classifyPublicKey → fleet for own device, contact for a contact device, null otherwise', async () => {
+    const service = svc({
+      '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } },
+      '/devices/key': { status: 200, body: {} },
+      '/devices/heartbeat': { status: 200, body: {} },
+      '/devices': { status: 200, body: { devices: [{ id: 'd1', publicKey: 'MINE', online: true }] } },
+      '/contacts': { status: 200, body: { accepted: [{ contactUserId: 'u2', deviceId: 'd2', publicKey: 'CONTACT', online: true }], incoming: [], outgoing: [] } },
+    });
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+    expect(await service.classifyPublicKey('MINE')).toBe('fleet');
+    expect(await service.classifyPublicKey('CONTACT')).toBe('contact');
+    expect(await service.classifyPublicKey('STRANGER')).toBe(null);
+  });
+
+  test('isTransferPeerKey is true for a fleet OR contact key, false for a stranger and when signed out', async () => {
+    const service = svc({
+      '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } },
+      '/devices/key': { status: 200, body: {} },
+      '/devices/heartbeat': { status: 200, body: {} },
+      '/devices': { status: 200, body: { devices: [{ id: 'd1', publicKey: 'MINE', online: true }] } },
+      '/contacts': { status: 200, body: { accepted: [{ deviceId: 'd2', publicKey: 'CONTACT', online: true }], incoming: [], outgoing: [] } },
+    });
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+    expect(await service.isTransferPeerKey('MINE')).toBe(true);
+    expect(await service.isTransferPeerKey('CONTACT')).toBe(true);
+    expect(await service.isTransferPeerKey('STRANGER')).toBe(false);
+
+    const signedOut = svc({});
+    expect(await signedOut.isTransferPeerKey('ANY')).toBe(false);
+    expect(await signedOut.classifyPublicKey('ANY')).toBe(null);
+  });
 });
 
 describe('verbose diagnostic logging: uploadDiagnostics', () => {

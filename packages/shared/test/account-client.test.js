@@ -134,4 +134,14 @@ describe('authenticated (Bearer) calls', () => {
     expect(JSON.parse(calls[0].init.body)).toEqual({ deviceId: 'd9' });
     expect(calls[0].init.headers.authorization).toBe('Bearer tok');
   });
+
+  test('listContacts is a GET with the Bearer header and no body', async () => {
+    const { impl, calls } = mockFetch({ status: 200, body: { accepted: [], incoming: [], outgoing: [] } });
+    const res = await client(impl).listContacts({ accessToken: 'tok' });
+    expect(res.data).toEqual({ accepted: [], incoming: [], outgoing: [] });
+    expect(calls[0].init.method).toBe('GET');
+    expect(calls[0].url.endsWith('/contacts')).toBe(true);
+    expect(calls[0].init.headers.authorization).toBe('Bearer tok');
+    expect(calls[0].init.body).toBeUndefined();
+  });
 });
