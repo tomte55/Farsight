@@ -12,7 +12,7 @@
 // auth (own-fleet device-keypair handshake, design §4.3 — wiring the
 // handshake itself is a later phase; this file only ensures the channel
 // exists and is reachable).
-import { createSignalingClient } from '../signaling-client.js';
+import { createSignalingClient } from './signaling-client.js';
 import { MSG } from '@farsight/shared/protocol';
 
 let pc = null;
@@ -20,6 +20,12 @@ let signal = null;
 let ctrlChannel = null;
 let bulkChannel = null;
 let authChannel = null;
+// Ctrl frames the orchestrator emits before the ft-ctrl data channel is open —
+// notably the initiator's very first OFFER frame, which main sends the instant
+// the send starts, long before ICE/DTLS brings the channel up. Without this
+// buffer those frames are dropped on the floor and the transfer deadlocks (the
+// receiver never sees the offer, never consents, never accepts).
+const pendingCtrlOut = [];
 
 function reportState(state) {
   try { window.farsightTransfer.reportSessionState(state); } catch { /* guarded */ }
@@ -28,6 +34,9 @@ function reportState(state) {
 function wireDataChannel(ch) {
   if (ch.label === 'ft-ctrl') {
     ctrlChannel = ch;
+    // Flush anything queued before the channel opened (e.g. the OFFER frame).
+    const flush = () => { while (pendingCtrlOut.length) { try { ch.send(pendingCtrlOut.shift()); } catch { /* guarded */ } } };
+    if (ch.readyState === 'open') flush(); else ch.addEventListener('open', flush);
     ch.addEventListener('message', (m) => {
       if (typeof m.data === 'string') { try { window.farsightTransfer.emitCtrl(m.data); } catch { /* guarded */ } }
     });
@@ -124,10 +133,27 @@ window.farsightTransfer.onStartRendezvous(async (params) => {
 
 // Frames main wants sent OUT over the data channels.
 window.farsightTransfer.onSendCtrl((str) => {
-  try { if (ctrlChannel && ctrlChannel.readyState === 'open') ctrlChannel.send(str); } catch { /* guarded */ }
+  // Buffer until the ft-ctrl channel is actually open, then flush in order (see
+  // pendingCtrlOut) — dropping pre-open frames deadlocked the transfer.
+  try {
+    if (ctrlChannel && ctrlChannel.readyState === 'open') ctrlChannel.send(str);
+    else pendingCtrlOut.push(str);
+  } catch { /* guarded */ }
 });
 window.farsightTransfer.onSendBulk((buf) => {
-  try { if (bulkChannel && bulkChannel.readyState === 'open') bulkChannel.send(buf); } catch { /* guarded */ }
+  try {
+    if (!(bulkChannel && bulkChannel.readyState === 'open')) return;
+    bulkChannel.send(buf);
+    // Credit-based backpressure grants exactly one credit per chunk. Grant it NOW
+    // if the channel still has room (buffered <= threshold); otherwise the
+    // 'bufferedamountlow' handler grants it once the buffer drains. Granting ONLY
+    // on bufferedamountlow deadlocked every sub-threshold send — the buffer never
+    // rose above the threshold, so that event never fired and the sender's
+    // per-chunk sendBulk await never resolved (the transfer hung right after accept).
+    if (bulkChannel.bufferedAmount <= bulkChannel.bufferedAmountLowThreshold) {
+      try { window.farsightTransfer.emitCredit(); } catch { /* guarded */ }
+    }
+  } catch { /* guarded */ }
 });
 
 // getStats bridge: the RTCPeerConnection lives here, not in main.

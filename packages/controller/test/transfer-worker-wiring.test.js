@@ -64,11 +64,23 @@ describe('createTransferWorker() exports the documented factory surface', () => 
   // Electron drops a webContents.send() to a not-yet-loaded renderer, so the
   // kickoff must be buffered until did-finish-load — otherwise no CONNECT/ATTACH
   // is ever sent and the transfer hangs at 0 (verified live in Electron).
-  test('buffers startRendezvous until the worker renderer is ready (did-finish-load)', () => {
+  test('queues ALL sends to the worker until did-finish-load (kickoff AND the first OFFER frame)', () => {
     expect(worker).toMatch(/did-finish-load/);
-    expect(worker).toMatch(/pendingRendezvous/);
-    // startRendezvous must gate on readiness, not send unconditionally.
-    expect(worker).toMatch(/startRendezvous\(params\)\s*\{[\s\S]*?rendererReady/);
+    expect(worker).toMatch(/preReadyQueue/);
+    // sendToWorker queues until the renderer is ready, then flushes in order.
+    expect(worker).toMatch(/rendererReady/);
+  });
+});
+
+describe('transfer-worker/worker.js survives the real-WebRTC channel timing', () => {
+  test('buffers outgoing ctrl frames until the ft-ctrl channel is open (the OFFER must not be dropped)', () => {
+    expect(workerRenderer).toMatch(/pendingCtrlOut/);
+    expect(workerRenderer).toMatch(/addEventListener\('open'/);
+  });
+
+  test('grants a bulk credit when the channel has room, not only on bufferedamountlow (no sub-threshold deadlock)', () => {
+    expect(workerRenderer).toMatch(/bufferedAmount\s*<=\s*bulkChannel\.bufferedAmountLowThreshold/);
+    expect(workerRenderer).toMatch(/emitCredit/);
   });
 });
 
@@ -110,8 +122,16 @@ describe('transfer-worker-preload.cjs exposes the farsightTransfer bridge', () =
 });
 
 describe('transfer-worker/worker.js bridges IPC <-> the ft-ctrl/ft-bulk/auth data channels', () => {
-  test('reuses signaling-client.js (not a reimplementation)', () => {
-    expect(workerRenderer).toMatch(/from\s*['"]\.\.\/signaling-client\.js['"]/);
+  test('uses the transfer-worker\'s DEDICATED one-shot signaling client, not the app\'s main one', () => {
+    // Must be the sibling ./signaling-client.js — the host's main
+    // ../signaling-client.js auto-registers as a host and has no `ready`, which
+    // silently dropped the ATTACH and broke every receive.
+    expect(workerRenderer).toMatch(/from\s*['"]\.\/signaling-client\.js['"]/);
+    expect(workerRenderer).not.toMatch(/from\s*['"]\.\.\/signaling-client\.js['"]/);
+    // The dedicated client exposes `ready` and never sends REGISTER.
+    const twSignaling = readFileSync(path.join(dir, '../src/transfer-worker/signaling-client.js'), 'utf8');
+    expect(twSignaling).toMatch(/ready/);
+    expect(twSignaling).not.toMatch(/REGISTER/);
   });
 
   test('creates the three transfer data channels by label', () => {

@@ -64,24 +64,26 @@ export function createTransferWorker() {
     ipcMain.on(topic, handler);
     registeredListeners.push([topic, handler]);
   }
-  function sendToWorker(topic, payload) {
-    if (!win.isDestroyed()) win.webContents.send(topic, payload);
-  }
-
-  // The worker renderer only registers its IPC listeners (onStartRendezvous et
-  // al.) once worker.js has loaded and executed. A webContents.send() issued
-  // before that is silently DROPPED by Electron — which is exactly what happened
-  // to the rendezvous kickoff (openChannel calls startRendezvous synchronously
-  // right after loadFile), so no CONNECT/ATTACH was ever sent and every transfer
-  // hung at 0. Buffer the rendezvous params until did-finish-load, then flush.
+  // The worker renderer only registers its IPC listeners (onStartRendezvous,
+  // onSendCtrl, …) once worker.js has loaded and executed. A webContents.send()
+  // issued before that is silently DROPPED by Electron — which hit BOTH the
+  // rendezvous kickoff AND the sender's first OFFER frame (main emits it the
+  // instant the send starts, right after loadFile), so no CONNECT/ATTACH was
+  // sent and the receiver never saw the offer → every transfer hung at 0. Queue
+  // ALL sends until did-finish-load, then flush in order.
   let rendererReady = false;
-  let pendingRendezvous = null;
+  const preReadyQueue = [];
+  function sendToWorker(topic, payload) {
+    if (win.isDestroyed()) return;
+    if (!rendererReady) { preReadyQueue.push([topic, payload]); return; }
+    win.webContents.send(topic, payload);
+  }
   win.webContents.on('did-finish-load', () => {
     rendererReady = true;
-    if (pendingRendezvous !== null) {
-      sendToWorker(topics.startRendezvous, pendingRendezvous);
-      pendingRendezvous = null;
+    for (const [topic, payload] of preReadyQueue) {
+      if (!win.isDestroyed()) win.webContents.send(topic, payload);
     }
+    preReadyQueue.length = 0;
   });
 
   // The orchestrator's generic 'ft-ctrl'/'ft-bulk' topic names, mapped onto
@@ -110,9 +112,8 @@ export function createTransferWorker() {
     // role:'attach' (see main.js's openChannel) — 'initiator' support is kept
     // for parity with the shared worker.js so both apps run the identical file.
     startRendezvous(params) {
-      // Gate on renderer-ready so the kickoff is never dropped (see did-finish-load).
-      if (rendererReady) sendToWorker(topics.startRendezvous, params);
-      else pendingRendezvous = params;
+      // sendToWorker queues until did-finish-load, so the kickoff is never dropped.
+      sendToWorker(topics.startRendezvous, params);
     },
     channel,
     onSessionState(cb) { sessionStateCb = cb; },
