@@ -51,9 +51,15 @@ apps — **host** (the controlled machine) and **controller** (where you drive f
   app's auto-registering main one; (4) hidden workers set `backgroundThrottling:false`; (5) completion
   is a **two-sided delivery ACK** (receiver `complete{ok}` after every file is hash-verified; sender
   waits before closing); (6) **byte-routing is by manifest-order cursor**, never by `FILE_BEGIN` timing
-  (ctrl/bulk are separate channels). **Test transfers with a real 2-machine / MULTI-chunk E2E** —
-  localhost + one-chunk files hide teardown-races and routing bugs. Worker/main emit diagnostics to the
-  app log (`[ft-worker]` heartbeat + `[transfer]` lifecycle) for field debugging.
+  (ctrl/bulk are separate channels); (7) **no single `ft-ctrl` frame may exceed the ~256KB WebRTC
+  data-channel `send()` limit** — a frame over it throws and KILLS the channel before delivery (v1.11.2:
+  a 2974-file folder's one-shot OFFER was 346KB → `dc-error` + stuck at 0). Any per-file-scaling frame
+  must chunk or filter: the OFFER chunks (`offer_begin`→`offer_entries*`→`offer_end`, ≤48KB batches), the
+  accept sends only non-zero resume offsets, and **Phase-5 remote-FS directory listings must paginate**.
+  **Test transfers with a real 2-machine / MULTI-chunk / MANY-file E2E** — localhost + one-chunk +
+  few-file transfers hide teardown-races, routing bugs, AND the frame-size limit. Worker/main emit
+  diagnostics to the app log (`[ft-worker]` heartbeat with ctrl/bulk counters + `[transfer]` lifecycle);
+  the `[ft-worker]` counters (`ctrlOut`/`ctrlIn`, `dc-error`) are what pinpoint these from field logs.
 - **Two GATED, outward-facing actions** require explicit user approval per homelab ops rules: the
   signaling deploy (public subdomain) and opening coturn firewall ports.
 - **Logging: connection modules run in the RENDERER**, not main — they log via the `log:renderer`
