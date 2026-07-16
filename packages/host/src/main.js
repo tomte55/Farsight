@@ -50,6 +50,7 @@ function getAccountService() {
       deviceKeyFilePath: path.join(app.getPath('userData'), 'device-key.enc'),
       fetch: globalThis.fetch,
       version: app.getVersion(),
+      log: log?.child('account'),
     });
   }
   return accountService;
@@ -207,9 +208,10 @@ function getInjector() {
     const displays = listDisplays(screen);
     const primary = displays.find((d) => d.primary) ?? displays[0];
     injector = createInjector({
-      nut: createNutFacade(),
+      nut: createNutFacade({ log: log?.child('nut') }),
       display: primary,
       dipToScreen: (p) => screen.dipToScreenPoint(p),
+      log: log?.child('injector'),
     });
   }
   return injector;

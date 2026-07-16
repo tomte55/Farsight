@@ -20,6 +20,11 @@ import { createHeartbeat } from './account-heartbeat.js';
 import { createDeviceKeyStore } from './device-key-store.js';
 import { generateDeviceKeyPair, signMessage, verifyMessage } from './device-keypair.js';
 
+// Verbose diagnostic logging (see docs/private/superpowers): sign-in state
+// changes only — never the access/refresh token or password. The session (login
+// resume / refresh) and heartbeat sub-modules get their own child scopes.
+function noopLog() { const n = { debug() {}, info() {}, warn() {}, error() {}, child: () => n }; return n; }
+
 // The maintainer's deployed account service (SP2). Overridable via config/env.
 export const DEFAULT_ACCOUNT_URL = 'https://auth.sovexa.org';
 
@@ -27,11 +32,11 @@ export function createAccountService({
   baseUrl = DEFAULT_ACCOUNT_URL,
   safeStorage, fs, filePath, deviceKeyFilePath, fetch, now,
   version, intervalMs, setInterval: setI, clearInterval: clearI,
-  getSignalingId,
+  getSignalingId, log = noopLog(),
 } = {}) {
   const client = createAccountClient({ baseUrl, fetch });
   const store = createTokenStore({ safeStorage, fs, filePath });
-  const session = createAccountSession({ client, store, ...(now ? { now } : {}) });
+  const session = createAccountSession({ client, store, ...(now ? { now } : {}), log });
   // Connect-from-console: this device's keypair store. Falls back to a filePath
   // sibling if a dedicated path isn't given, so older callers keep working.
   const keyStore = createDeviceKeyStore({ safeStorage, fs, filePath: deviceKeyFilePath ?? `${filePath}.key` });
@@ -45,6 +50,7 @@ export function createAccountService({
     ...(intervalMs ? { intervalMs } : {}),
     ...(setI ? { setInterval: setI } : {}),
     ...(clearI ? { clearInterval: clearI } : {}),
+    log: log.child('heartbeat'),
   });
 
   // This device's keypair — loaded once, generated + persisted on first use.
@@ -79,6 +85,7 @@ export function createAccountService({
     async login(input) {
       const res = await session.login(input);
       if (res.ok) {
+        log.info('logged in');
         const token = await session.getAccessToken();
         if (token) await ensureUploaded(token);
         await heartbeat.start(); // report presence once signed in
@@ -97,7 +104,9 @@ export function createAccountService({
           try { await client.revokeDevice({ accessToken: token, deviceId }); } catch { /* clear locally anyway */ }
         }
       }
-      return session.logout();
+      const result = await session.logout();
+      log.info('logged out');
+      return result;
     },
     register: (input) => client.register(input),
     verifyEmail: (input) => client.verifyEmail(input),

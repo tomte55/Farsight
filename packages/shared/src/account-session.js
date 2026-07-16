@@ -9,6 +9,10 @@
 // store interface: { getRefreshToken(): Promise<string|null>,
 //                    setTokens({accessToken, refreshToken}): Promise<void>,
 //                    clear(): Promise<void> }
+//
+// Verbose diagnostic logging (see docs/private/superpowers): refresh
+// success/failure + HTTP status only — never the access/refresh token.
+function noopLog() { const n = { debug() {}, info() {}, warn() {}, error() {}, child: () => n }; return n; }
 
 // Decode a JWT payload WITHOUT verifying it — purely for client-side use (refresh
 // scheduling, reading our own deviceId). Returns the parsed claims, or null on
@@ -34,7 +38,7 @@ export function jwtExpMs(token) {
   return typeof exp === 'number' ? exp * 1000 : null;
 }
 
-export function createAccountSession({ client, store, now = () => Date.now(), skewMs = 30_000 }) {
+export function createAccountSession({ client, store, now = () => Date.now(), skewMs = 30_000, log = noopLog() }) {
   let accessToken = null;
   let accessExp = null; // epoch ms, or null
   let deviceId = null;  // this install's device row id (for self-revoke on logout)
@@ -50,10 +54,11 @@ export function createAccountSession({ client, store, now = () => Date.now(), sk
     const refreshToken = await store.getRefreshToken();
     if (!refreshToken) return null;
     const res = await client.refresh({ refreshToken });
-    if (!res.ok) return null;
+    if (!res.ok) { log.warn(`refresh failed status=${res.status}`); return null; }
     cache(res.data.accessToken);
     // Keep the same refresh token; persist so the store stays authoritative.
     await store.setTokens({ accessToken: res.data.accessToken, refreshToken });
+    log.info('token refreshed');
     return accessToken;
   }
 

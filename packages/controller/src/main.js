@@ -36,6 +36,7 @@ function getAccountService() {
       deviceKeyFilePath: path.join(app.getPath('userData'), 'device-key.enc'),
       fetch: globalThis.fetch,
       version: app.getVersion(), // reported to the fleet console via the presence heartbeat
+      log: log?.child('account'),
     });
   }
   return accountService;

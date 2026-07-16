@@ -10,6 +10,10 @@
 // 90s, so the default interval (30s) is comfortably shorter. A skipped beat (no
 // usable token) or a failed request never throws out of a tick, so a transient
 // sign-out or network blip doesn't kill the loop — it recovers on the next beat.
+//
+// Verbose diagnostic logging (see docs/private/superpowers): ok/fail + HTTP
+// status only — never the access token.
+function noopLog() { const n = { debug() {}, info() {}, warn() {}, error() {}, child: () => n }; return n; }
 
 export function createHeartbeat({
   session,
@@ -20,6 +24,7 @@ export function createHeartbeat({
   intervalMs = 30_000,
   setInterval: setI,
   clearInterval: clearI,
+  log = noopLog(),
 } = {}) {
   const schedule = setI ?? (typeof setInterval !== 'undefined' ? setInterval : null);
   const cancel = clearI ?? (typeof clearInterval !== 'undefined' ? clearInterval : null);
@@ -37,6 +42,8 @@ export function createHeartbeat({
       // owner's console knows where to dial this device (undefined → omitted).
       const signalingId = getSignalingId ? getSignalingId() : undefined;
       const res = await client.heartbeat({ accessToken: token, version, signalingId: signalingId || undefined });
+      if (res && res.ok) log.debug('heartbeat ok');
+      else if (res) log.warn(`heartbeat failed status=${res.status}`);
       // Surface any management directive in the response (S2.7: a converge-to
       // target version) so the app can act on it. Best-effort; never throws.
       if (onDirective && res && res.ok && res.data) {
