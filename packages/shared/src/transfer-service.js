@@ -165,7 +165,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
       result = { jobId, ok: false, error: reason };
       // Own-fleet + a recoverable (transport) failure → resumable `interrupted`,
       // and poke the resume watcher to try again as soon as the peer is online.
-      const recoverable = tier === 'fleet' && !isTerminalReason(reason);
+      const recoverable = (tier === 'fleet' || tier === 'contact') && !isTerminalReason(reason);
       try { await saveSendRecord({ jobId, manifest, createdAt, jobState: recoverable ? 'interrupted' : 'error', peer, tier, sourceRoots }); } catch { /* best effort */ }
       if (recoverable) { emit(jobId, 'send', { type: 'interrupted' }); if (resumeWatcher) resumeWatcher.notify(); }
     } finally {
@@ -290,7 +290,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // file already on disk (rsync-like), so only the remainder transfers.
   if (typeof getFleet === 'function') {
     const listInterrupted = async () =>
-      (await store.list()).filter((j) => j.jobState === 'interrupted' && j.tier === 'fleet' && j.dir === 'send');
+      (await store.list()).filter((j) => j.jobState === 'interrupted' && (j.tier === 'fleet' || j.tier === 'contact') && j.dir === 'send');
     const reestablish = async (job, signalingId) => {
       let walked = null;
       try { walked = await walkSource((job.sourceRoots || []).map((p) => ({ path: p }))); } catch { walked = null; }
@@ -304,7 +304,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
         manifest: buildManifest(walked.entries),
         sources: walked.sources,
         sourceRoots: job.sourceRoots,
-        target: { id: signalingId, deviceId: job.peer && job.peer.deviceId, linked: true },
+        target: { id: signalingId, deviceId: job.peer && job.peer.deviceId, linked: true, contact: job.tier === 'contact' },
       });
     };
     resumeWatcher = createResumeWatcher({ listInterrupted, getFleet, reestablish, ...resumeOpts });

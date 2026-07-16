@@ -39,4 +39,15 @@ describe('nextResumeAction', () => {
       expect(nextResumeAction({ ...fleetJob, jobState: s }, onlineA).type).toBe('noop');
     }
   });
+
+  it('re-establishes an interrupted CONTACT job when its peer comes online', () => {
+    const contactJob = { jobId: 'jc', jobState: 'interrupted', tier: 'contact', peer: { deviceId: 'devC' } };
+    expect(nextResumeAction(contactJob, { deviceId: 'devC', online: true }))
+      .toEqual({ type: 'reestablish', jobId: 'jc', deviceId: 'devC' });
+  });
+
+  it('still does nothing for an ad-hoc job', () => {
+    const adhoc = { jobId: 'j1', jobState: 'interrupted', tier: 'adhoc', peer: { deviceId: 'devA' } };
+    expect(nextResumeAction(adhoc, { deviceId: 'devA', online: true }).type).toBe('noop');
+  });
 });

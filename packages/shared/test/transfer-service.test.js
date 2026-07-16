@@ -257,6 +257,42 @@ test('SP3 P4: the resume watcher re-walks sourceRoots and re-sends an interrupte
   svc.stopResumeWatcher();
 });
 
+test('SP3 P4: the resume watcher preserves contact:true when re-sending an interrupted CONTACT job', async () => {
+  const srcDir = tmp();
+  const srcFile = join(srcDir, 'resume-contact.txt');
+  writeFileSync(srcFile, Buffer.from('contact resume payload '.repeat(20)));
+  const sendStore = createJobsStore({ dir: tmp() });
+
+  // Seed the store directly with an already-interrupted CONTACT send record
+  // (as if a prior send dropped) rather than driving it through a real send.
+  await sendStore.save({
+    jobId: 'jc-resume',
+    dir: 'send',
+    tier: 'contact',
+    peer: { id: 'sig-OLD', deviceId: 'devC' },
+    sourceRoots: [srcFile],
+    destRoot: null,
+    manifest: { entries: [] },
+    perFile: [],
+    jobState: 'interrupted',
+    createdAt: Date.now(),
+  });
+
+  let capturedTarget = null;
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true, rendezvousTimeoutMs: 60,
+    // The fleet reports the contact device online at its CURRENT signalingId.
+    getFleet: async () => [{ deviceId: 'devC', signalingId: 'sig-NEW', online: true }],
+    openChannel: async (args) => { capturedTarget = args.target; return { channel: deadChannel(), close: async () => {} }; },
+  });
+  svc.startResumeWatcher();
+
+  await svc.resumeSweepNow();
+  svc.stopResumeWatcher();
+
+  expect(capturedTarget).toMatchObject({ id: 'sig-NEW', deviceId: 'devC', linked: true, contact: true });
+});
+
 test('SP3 P4: a recoverable own-fleet drop records interrupted; a terminal reason records error', async () => {
   const { manifest, sources } = await oneFileSource();
   const store = createJobsStore({ dir: tmp() });

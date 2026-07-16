@@ -6,7 +6,7 @@
 export function nextResumeAction(job, event, { inFlight = new Set() } = {}) {
   if (!job || !event) return { type: 'noop', reason: 'no_input' };
   if (event.online !== true) return { type: 'noop', reason: 'peer_not_online' };
-  if (job.tier !== 'fleet') return { type: 'noop', reason: 'not_own_fleet' };
+  if (job.tier !== 'fleet' && job.tier !== 'contact') return { type: 'noop', reason: 'not_resumable_tier' };
   if (job.jobState !== 'interrupted') return { type: 'noop', reason: `state_${job.jobState}` };
   const deviceId = job.peer && job.peer.deviceId;
   if (!deviceId || deviceId !== event.deviceId) return { type: 'noop', reason: 'peer_mismatch' };
