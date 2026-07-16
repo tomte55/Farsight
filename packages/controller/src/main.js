@@ -60,6 +60,10 @@ ipcMain.handle('account:register', (_e, input) => getAccountService().register(i
 ipcMain.handle('account:resend-verification', (_e, input) => getAccountService().resendVerification(input));
 ipcMain.handle('account:request-password-reset', (_e, input) => getAccountService().requestPasswordReset(input));
 ipcMain.handle('account:fleet', () => getAccountService().fleet());
+ipcMain.handle('account:contacts', () => getAccountService().contacts());
+ipcMain.handle('account:contact-add', (_e, input) => getAccountService().addContact(input?.email));
+ipcMain.handle('account:contact-accept', (_e, input) => getAccountService().acceptContact(input?.contactId));
+ipcMain.handle('account:contact-decline', (_e, input) => getAccountService().declineContact(input?.contactId));
 // Remote update (S2.7): set a converge-to target version on a fleet device.
 ipcMain.handle('account:request-update', (_e, input) => getAccountService().requestDeviceUpdate(input?.deviceId, input?.targetVersion));
 

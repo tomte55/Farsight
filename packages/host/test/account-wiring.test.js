@@ -42,6 +42,16 @@ describe('host account enrollment wiring', () => {
       expect(preload).toMatch(new RegExp(`\\b${fn}\\b`));
     }
   });
+
+  test('wires contacts IPC + preload bridges', () => {
+    for (const topic of ['account:contacts', 'account:contact-add', 'account:contact-accept', 'account:contact-decline']) {
+      expect(main).toContain(topic);
+    }
+    expect(preload).toMatch(/accountContacts:/);
+    expect(preload).toMatch(/accountContactAdd:/);
+    expect(preload).toMatch(/accountContactAccept:/);
+    expect(preload).toMatch(/accountContactDecline:/);
+  });
 });
 
 describe('host connect-from-console wiring (SP2 §4.4)', () => {
