@@ -128,6 +128,14 @@ function getTransferService() {
         log?.child('transfer').info(`send ev=${ev.type || 'progress'} job=${ev.jobId}${prog}${ev.reason ? ` reason=${ev.reason}` : ''}`);
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('transfer:event', ev);
       },
+      // SP3 Phase 4 auto-resume: the watcher resolves an interrupted own-fleet job's
+      // peer to its CURRENT signalingId via the account fleet. Fails soft (returns
+      // [] until signed in), so starting the watcher on launch is safe.
+      getFleet: async () => {
+        try {
+          return (await getAccountService().fleet()).map((d) => ({ deviceId: d.id, signalingId: d.signalingId, online: d.online }));
+        } catch { return []; }
+      },
     });
   }
   return transferService;
@@ -157,7 +165,9 @@ ipcMain.handle('transfer:send', async (_e, input) => {
     // transfer finishes, so awaiting it here would block the renderer's
     // transferSend() call for the entire transfer. Progress is instead
     // delivered incrementally via the 'transfer:event' push above.
-    getTransferService().startSend({ jobId, manifest, sources, target })
+    // `sourceRoots: paths` is persisted so an interrupted own-fleet send can be
+    // re-walked and auto-resumed after an app restart (SP3 Phase 4).
+    getTransferService().startSend({ jobId, manifest, sources, target, sourceRoots: paths })
       .catch((err) => log?.child('transfer').warn(`send failed: ${err?.message || err}`));
     return { jobId, manifest };
   } catch (err) {
@@ -284,6 +294,10 @@ app.whenReady().then(() => {
   });
 
   createWindow();
+  // SP3 Phase 4 auto-resume: start the resume watcher on launch so an own-fleet
+  // send interrupted in a PREVIOUS run resumes once its device is online again
+  // (across-restart). Idle/no-op until signed in and an interrupted job exists.
+  try { getTransferService().startResumeWatcher(); } catch (e) { log?.child('transfer').warn(`resume watcher start failed: ${e?.message || e}`); }
   autoUpdater.logger = {
     info: (m) => log?.child('updater').info(String(m)),
     warn: (m) => log?.child('updater').warn(String(m)),

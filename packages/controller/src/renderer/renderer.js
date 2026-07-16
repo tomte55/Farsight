@@ -784,6 +784,8 @@ function stateLabel(j) {
   const hasCount = Number.isFinite(total) && total > 0;
   switch (j.state) {
     case 'awaiting-approval': return 'Waiting for approval…';
+    case 'interrupted': return hasCount ? `Interrupted — will resume · ${sent} / ${total} files` : 'Interrupted — will resume';
+    case 'reconnecting': return 'Reconnecting…';
     case 'active': return hasCount ? `Transferring · ${sent} / ${total} files` : 'Transferring…';
     case 'finishing': return 'Finishing — verifying on host…';
     case 'done': return hasCount ? `Completed · ${total} file${total === 1 ? '' : 's'}` : 'Completed';
@@ -892,6 +894,11 @@ window.farsightIpc.onTransferEvent((ev) => {
   if (ev.type === 'accepted') {
     // The host approved — ONLY now is the transfer genuinely active.
     existing.state = 'active';
+  } else if (ev.type === 'interrupted') {
+    // Recoverable own-fleet drop — the resume watcher will retry (not terminal).
+    existing.state = 'interrupted';
+  } else if (ev.type === 'reconnecting') {
+    existing.state = 'reconnecting';
   } else if (ev.type === 'all-sent') {
     // All bytes are on the wire, but NOT yet confirmed received+verified. Hold at
     // "Finishing" until the host's delivery ack ('completed') — do not claim done.
