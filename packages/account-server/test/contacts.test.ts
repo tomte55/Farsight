@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
 import { createTestDb, type TestDb } from './helpers/test-db.js';
 import { addContact, acceptContact, declineContact, listContacts } from '../src/contacts.js';
+import type { AccountEmail, EmailTransport } from '../src/email.js';
 
 const NOW = 1_700_000_000_000;
 let db: TestDb;
@@ -68,6 +69,34 @@ describe('addContact', () => {
         data: { requesterId: me, addresseeId: them, inviteCode: 'other', pairKey },
       }),
     ).rejects.toThrow();
+  });
+
+  test('sends a notification email to the addressee on a NEW edge only', async () => {
+    const outbox: AccountEmail[] = [];
+    const email: EmailTransport = { send: async (e) => void outbox.push(e) };
+    const me = await mkUser('me@example.com');
+    await mkUser('dad@example.com');
+    const d = { prisma: db.prisma, now: NOW, email, baseUrl: 'https://auth.example', inviterEmail: 'me@example.com' };
+
+    await addContact(d, { requesterId: me, email: 'dad@example.com' });
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]!.to).toBe('dad@example.com');
+    expect(outbox[0]!.text).toContain('me@example.com');
+
+    // idempotent re-add does NOT re-send
+    await addContact(d, { requesterId: me, email: 'dad@example.com' });
+    expect(outbox).toHaveLength(1);
+  });
+
+  test('a failing email transport does not fail the add', async () => {
+    const email: EmailTransport = { send: async () => { throw new Error('smtp down'); } };
+    const me = await mkUser('me@example.com');
+    await mkUser('dad@example.com');
+    const res = await addContact(
+      { prisma: db.prisma, now: NOW, email, baseUrl: 'https://auth.example', inviterEmail: 'me@example.com' },
+      { requesterId: me, email: 'dad@example.com' },
+    );
+    expect(res.ok).toBe(true);
   });
 });
 

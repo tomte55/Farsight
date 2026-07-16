@@ -5,11 +5,15 @@
 import { randomBytes } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { normalizeEmail } from './email.js';
+import type { EmailTransport } from './email.js';
 import { DEFAULT_ONLINE_WINDOW_MS } from './presence.js';
 
 export interface ContactsDeps {
   prisma: PrismaClient;
   now: number; // epoch ms
+  email?: EmailTransport;
+  baseUrl?: string;
+  inviterEmail?: string; // shown to the addressee in the nudge
 }
 
 export async function addContact(
@@ -41,6 +45,16 @@ export async function addContact(
         createdAt: new Date(deps.now),
       },
     });
+    if (deps.email && deps.baseUrl) {
+      try {
+        await deps.email.send({
+          to: addressee.email,
+          subject: 'Someone added you as a Farsight contact',
+          text: `${deps.inviterEmail ?? 'A Farsight user'} wants to connect with you on Farsight.\n`
+            + `Open the Farsight app → Contacts to accept the request.`,
+        });
+      } catch { /* best-effort nudge — never fail the add on a mail error */ }
+    }
     return { ok: true, contactId: contact.id };
   } catch (err: any) {
     // Race backstop: another concurrent add for the same pair won the unique

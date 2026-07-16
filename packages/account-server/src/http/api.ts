@@ -313,7 +313,11 @@ const handlers: Record<string, Handler> = {
     if ('status' in auth) return auth;
     const email = str(req.body, 'email');
     if (!email) return badRequest();
-    const res = await addContact(contactsDeps(ctx), { requesterId: auth.userId, email });
+    const inviter = await ctx.prisma.user.findUnique({ where: { id: auth.userId } });
+    const res = await addContact(
+      { prisma: ctx.prisma, now: ctx.now(), email: ctx.email, baseUrl: ctx.baseUrl, inviterEmail: inviter?.email },
+      { requesterId: auth.userId, email },
+    );
     if (res.ok) return ok({ contactId: res.contactId });
     // Authenticated route — surfacing no_such_user is an accepted trade-off (the UI
     // needs to tell the inviter "ask them to sign up first"); 'self' is a bad request.
