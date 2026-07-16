@@ -129,12 +129,22 @@ function getTransferService() {
         log?.child('transfer').info(`send ev=${ev.type || 'progress'} job=${ev.jobId}${prog}${ev.reason ? ` reason=${ev.reason}` : ''}`);
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('transfer:event', ev);
       },
-      // SP3 Phase 4 auto-resume: the watcher resolves an interrupted own-fleet job's
-      // peer to its CURRENT signalingId via the account fleet. Fails soft (returns
-      // [] until signed in), so starting the watcher on launch is safe.
+      // SP3 Phase 4 auto-resume: the watcher resolves an interrupted job's peer to
+      // its CURRENT signalingId via the account fleet AND accepted contacts. Fails
+      // soft (returns [] until signed in), so starting the watcher on launch is safe.
       getFleet: async () => {
         try {
-          return (await getAccountService().fleet()).map((d) => ({ deviceId: d.id, signalingId: d.signalingId, online: d.online }));
+          const svc = getAccountService();
+          const fleetRes = await svc.fleet();
+          const fleetDevices = (fleetRes && fleetRes.ok && fleetRes.data && fleetRes.data.devices) || [];
+          const own = fleetDevices.map((d) => ({ deviceId: d.id, signalingId: d.signalingId, online: d.online }));
+          // A contact peer resumes exactly like an own-fleet peer: match the durable
+          // deviceId -> current signalingId. GET /contacts returns one row per contact
+          // DEVICE, already carrying deviceId/signalingId/online.
+          const contactsRes = await getAccountService().contacts();
+          const accepted = (contactsRes && contactsRes.ok && contactsRes.data && contactsRes.data.accepted) || [];
+          const peers = accepted.map((c) => ({ deviceId: c.deviceId, signalingId: c.signalingId, online: c.online }));
+          return [...own, ...peers];
         } catch { return []; }
       },
     });

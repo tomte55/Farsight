@@ -24,6 +24,12 @@ describe('controller main: auto-resume wiring', () => {
   test('transfer:send persists sourceRoots (the picked paths) for resume', () => {
     expect(main).toMatch(/startSend\(\{[^}]*sourceRoots:\s*paths/s);
   });
+
+  test('getFleet merges accepted contacts into the resume-watcher presence feed', () => {
+    expect(main).toMatch(/getAccountService\(\)\.contacts\(\)/);
+    // maps a contact device's stable id + current signalingId, same shape as fleet devices
+    expect(main).toMatch(/deviceId:\s*\w+\.deviceId/);
+  });
 });
 
 describe('controller renderer: interrupted/reconnecting states', () => {
