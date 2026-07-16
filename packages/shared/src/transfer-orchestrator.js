@@ -67,6 +67,10 @@ export function createSender({ channel, jobId, manifest, sources, chunkSize = 13
       channel.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
       return finished;
     },
+    // Externally abort a send that can never make progress — e.g. the rendezvous
+    // failed or the peer never accepted before the timeout. Rejects start()'s
+    // promise (idempotent via `settled`); a no-op once the send has settled.
+    abort(reason = 'aborted') { canceled = true; fail(new Error(reason)); },
   };
 }
 

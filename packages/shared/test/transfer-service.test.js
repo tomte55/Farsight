@@ -85,6 +85,57 @@ test('loopback send -> receive through the service layer lands files byte-identi
   expect(sendRec.peer).toEqual({ id: 'device-t1' });
 });
 
+// A channel that never feeds anything back — models a peer that never attaches/
+// accepts (offline host, dropped rendezvous).
+function deadChannel() {
+  return { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} };
+}
+async function oneFileSource() {
+  const src = join(tmp(), 'payload');
+  mkdirSync(src, { recursive: true });
+  writeFileSync(join(src, 'a.txt'), Buffer.from('x'.repeat(64)));
+  const { entries, sources } = await walkSource([{ path: src }]);
+  return { manifest: buildManifestReal(entries), sources };
+}
+
+test('a send that is never accepted fails after the rendezvous timeout and surfaces an error event (no infinite "waiting for approval")', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const events = [];
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: deadChannel(), close: async () => {} }),
+    onEvent: (ev) => events.push(ev),
+    rendezvousTimeoutMs: 80,
+  });
+  const res = await svc.startSend({ jobId: 'jt', manifest, sources, target: { id: 'off' } });
+  expect(res.ok).toBe(false);
+  expect(res.error).toMatch(/no_response/);
+  expect(events.some((e) => e.type === 'error' && e.reason === 'no_response')).toBe(true);
+});
+
+test('a rendezvous error from the channel (e.g. bad_password) fails the send with that reason and an error event, without waiting for the timeout', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const events = [];
+  let fireError = null;
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({
+      channel: deadChannel(), close: async () => {},
+      onRendezvousError: (cb) => { fireError = cb; },
+    }),
+    onEvent: (ev) => events.push(ev),
+    rendezvousTimeoutMs: 60000, // long — the error path must fire well before this
+  });
+  const p = svc.startSend({ jobId: 'jb', manifest, sources, target: { id: 'x', password: 'wrong' } });
+  await new Promise((r) => setTimeout(r, 20)); // let openChannel register the callback
+  expect(typeof fireError).toBe('function');
+  fireError('bad_password'); // signaling rejected the password
+  const res = await p;
+  expect(res.ok).toBe(false);
+  expect(res.error).toMatch(/bad_password/);
+  expect(events.some((e) => e.type === 'error' && e.reason === 'bad_password')).toBe(true);
+});
+
 test('serial queue: two enqueued sends never have more than one active channel at once, both complete', async () => {
   let openCount = 0;
   let activeCount = 0;

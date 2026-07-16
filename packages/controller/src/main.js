@@ -88,6 +88,16 @@ function getTransferService() {
           envUrl: process.env.FARSIGHT_SIGNALING_URL,
           storedUrl: stored.signalingUrl,
         }).url;
+        // Surface signaling-level rendezvous failures (host_offline, bad_password,
+        // transfer_timeout, busy, locked) to the transfer-service so a send fails
+        // fast with the real reason instead of hanging in "waiting for approval".
+        // The worker reports these as 'error:<reason>' session states.
+        let rendezvousErrorCb = null;
+        worker.onSessionState((state) => {
+          if (typeof state === 'string' && state.startsWith('error:') && rendezvousErrorCb) {
+            rendezvousErrorCb(state.slice('error:'.length));
+          }
+        });
         if (role === 'initiate') {
           worker.startRendezvous({
             role: 'initiator',
@@ -99,7 +109,11 @@ function getTransferService() {
         } else {
           worker.startRendezvous({ role: 'attach', signalingUrl, sessionId, version: app.getVersion() });
         }
-        return { channel: worker.channel, close: async () => worker.close() };
+        return {
+          channel: worker.channel,
+          close: async () => worker.close(),
+          onRendezvousError: (cb) => { rendezvousErrorCb = cb; },
+        };
       },
       onEvent: (ev) => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('transfer:event', ev);

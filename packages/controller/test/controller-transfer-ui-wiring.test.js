@@ -61,6 +61,12 @@ describe('main.js: SP3 send-path IPC handlers', () => {
     expect(main).toMatch(/ipcMain\.handle\('transfer:pick-paths',\s*async\s*\([^)]*mode/);
   });
 
+  test('openChannel surfaces worker session-state errors via onRendezvousError (a stuck send fails fast with the real reason)', () => {
+    expect(main).toMatch(/worker\.onSessionState/);
+    expect(main).toMatch(/onRendezvousError/);
+    expect(main).toMatch(/startsWith\('error:'\)/);
+  });
+
   test('the legacy pick-file/save-file handlers (interim single-file transfer) are retired', () => {
     expect(main).not.toContain("ipcMain.handle('pick-file'");
     expect(main).not.toContain("ipcMain.handle('save-file'");

@@ -707,6 +707,17 @@ function fmtCount(manifest) {
   return `${n} file${n === 1 ? '' : 's'}`;
 }
 
+// Friendly text for the signaling/transfer error reasons a send can surface.
+const XFER_ERROR_LABELS = {
+  host_offline: 'host is offline',
+  bad_password: 'wrong password',
+  transfer_timeout: 'the host didn’t respond',
+  no_response: 'the host didn’t respond',
+  busy: 'the host is busy',
+  locked: 'too many attempts — locked',
+  rate_limited: 'rate limited — try again shortly',
+};
+
 // Human-readable status. 'awaiting-approval' is the crucial one: a send sits
 // here — NOT "active" — until the host actually accepts (the sender's 'accepted'
 // lifecycle event). Terminal states carry any error/decline reason.
@@ -717,7 +728,7 @@ function stateLabel(j) {
     case 'done': return 'Completed';
     case 'declined': return 'Declined by host';
     case 'canceled': return 'Canceled';
-    case 'error': return j.error ? `Failed — ${j.error}` : 'Failed';
+    case 'error': return `Failed${j.error ? ` — ${XFER_ERROR_LABELS[j.error] || j.error}` : ''}`;
     default: return j.state || 'Transferring…';
   }
 }

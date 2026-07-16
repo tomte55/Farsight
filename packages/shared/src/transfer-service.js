@@ -36,7 +36,7 @@ function errMessage(err) {
   return (err && err.message) ? err.message : String(err);
 }
 
-export function createTransferService({ store, transferDir, consent, openChannel, onEvent = () => {} }) {
+export function createTransferService({ store, transferDir, consent, openChannel, onEvent = () => {}, rendezvousTimeoutMs = 30000 }) {
   const queue = createQueue();
   const pendingSends = new Map(); // jobId -> { manifest, sources, target, createdAt, resolve, reject }
   let sendRunning = false;
@@ -77,17 +77,48 @@ export function createTransferService({ store, transferDir, consent, openChannel
     const peer = peerFor(target);
     let channel = null;
     let close = null;
+    let onRendezvousError = null;
     let result;
+    // Guards so a send never sits "waiting for approval" forever: a rendezvous
+    // failure (openChannel surfaces the signaling reason) aborts immediately with
+    // that reason; otherwise a timer fires if the peer never ACCEPTS. Both are
+    // disarmed the instant the transfer becomes active (the 'accepted' event).
+    let accepted = false;
+    let approvalTimer = null;
+    const disarmApprovalTimer = () => { if (approvalTimer) { clearTimeout(approvalTimer); approvalTimer = null; } };
     try {
-      ({ channel, close } = await openChannel({ role: 'initiate', target }));
+      ({ channel, close, onRendezvousError } = await openChannel({ role: 'initiate', target }));
       if (pendingSends.has(jobId)) {
         // Still wanted: cancel() may have already removed it while the
         // channel was opening (see cancel() below) — don't start sending.
         activeClose = close;
         const sender = createSender({
           channel, jobId, manifest, sources,
-          onEvent: (ev) => emit(jobId, 'send', ev),
+          onEvent: (ev) => {
+            if (ev.type === 'accepted') { accepted = true; disarmApprovalTimer(); }
+            emit(jobId, 'send', ev);
+          },
         });
+        // Signaling-level rendezvous errors (host_offline, bad_password,
+        // transfer_timeout, …) surface here BEFORE any accept — fail fast with
+        // the real reason instead of hanging until the timeout.
+        if (typeof onRendezvousError === 'function') {
+          onRendezvousError((reason) => {
+            if (accepted) return;
+            disarmApprovalTimer();
+            emit(jobId, 'send', { type: 'error', reason: reason || 'rendezvous_failed' });
+            sender.abort(reason || 'rendezvous_failed');
+          });
+        }
+        if (rendezvousTimeoutMs > 0) {
+          approvalTimer = setTimeout(() => {
+            if (accepted) return;
+            approvalTimer = null;
+            emit(jobId, 'send', { type: 'error', reason: 'no_response' });
+            sender.abort('no_response');
+          }, rendezvousTimeoutMs);
+          if (approvalTimer.unref) approvalTimer.unref();
+        }
         await sender.start(); // resolves with no value on success, rejects/throws on failure
         result = { jobId, ok: true };
         await saveSendRecord({ jobId, manifest, createdAt, jobState: 'done', peer });
@@ -98,6 +129,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
       result = { jobId, ok: false, error: errMessage(err) };
       try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'error', peer }); } catch { /* best effort */ }
     } finally {
+      disarmApprovalTimer();
       if (activeClose === close) activeClose = null; // don't clobber a NEWER job's handle
       if (close) { try { await close(); } catch { /* ignore close errors */ } }
     }
