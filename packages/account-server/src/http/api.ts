@@ -19,6 +19,7 @@ import {
 import { heartbeat, listFleet, type PresenceDeps } from '../presence.js';
 import { setDevicePublicKey } from '../device-keys.js';
 import { setTargetVersion } from '../device-update.js';
+import { addContact, acceptContact, declineContact, listContacts } from '../contacts.js';
 
 export interface ApiContext {
   prisma: PrismaClient;
@@ -97,6 +98,9 @@ function twoFactorDeps(ctx: ApiContext): TwoFactorDeps {
   return { prisma: ctx.prisma, now: ctx.now() };
 }
 function presenceDeps(ctx: ApiContext): PresenceDeps {
+  return { prisma: ctx.prisma, now: ctx.now() };
+}
+function contactsDeps(ctx: ApiContext): { prisma: PrismaClient; now: number } {
   return { prisma: ctx.prisma, now: ctx.now() };
 }
 
@@ -301,6 +305,43 @@ const handlers: Record<string, Handler> = {
     if ('status' in auth) return auth;
     const devices = await listFleet(presenceDeps(ctx), { userId: auth.userId });
     return ok({ devices });
+  },
+
+  // ── contacts (SP3 §5.1): the in-app "friends list" ───────────────────────
+  'POST /contacts/add': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    const email = str(req.body, 'email');
+    if (!email) return badRequest();
+    const res = await addContact(contactsDeps(ctx), { requesterId: auth.userId, email });
+    if (res.ok) return ok({ contactId: res.contactId });
+    // Authenticated route — surfacing no_such_user is an accepted trade-off (the UI
+    // needs to tell the inviter "ask them to sign up first"); 'self' is a bad request.
+    return res.reason === 'no_such_user' ? json(404, { error: 'no_such_user' }) : badRequest();
+  },
+
+  'POST /contacts/accept': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    const contactId = str(req.body, 'contactId');
+    if (!contactId) return badRequest();
+    const res = await acceptContact(contactsDeps(ctx), { userId: auth.userId, contactId });
+    return res.ok ? ok() : json(404, { error: 'not_found' });
+  },
+
+  'POST /contacts/decline': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    const contactId = str(req.body, 'contactId');
+    if (!contactId) return badRequest();
+    const res = await declineContact(contactsDeps(ctx), { userId: auth.userId, contactId });
+    return res.ok ? ok() : json(404, { error: 'not_found' });
+  },
+
+  'GET /contacts': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    return ok(await listContacts(contactsDeps(ctx), { userId: auth.userId }));
   },
 
   // Verbose diagnostic logging: an authenticated device/console uploads a
