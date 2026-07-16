@@ -199,6 +199,45 @@ test('SP3 P4: an own-fleet (linked) receive auto-accepts — no consent prompt (
   }
 });
 
+test('SP3 P4: the resume watcher re-walks sourceRoots and re-sends an interrupted own-fleet job to completion', async () => {
+  const srcDir = tmp();
+  const srcFile = join(srcDir, 'resume-me.txt');
+  writeFileSync(srcFile, Buffer.from('resume payload '.repeat(60)));
+  const { entries, sources } = await walkSource([{ path: srcFile }]);
+  const manifest = buildManifestReal(entries);
+  const dest = tmp();
+  const sendStore = createJobsStore({ dir: tmp() });
+  const recvStore = createJobsStore({ dir: tmp() });
+
+  let attempt = 0;
+  let liveReceiver = null;
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true, rendezvousTimeoutMs: 60,
+    // The fleet reports the device online at its CURRENT signalingId (not the stale one).
+    getFleet: async () => [{ deviceId: 'dev-1', signalingId: 'sig-CURRENT', online: true }],
+    openChannel: async () => {
+      attempt += 1;
+      if (attempt === 1) return { channel: deadChannel(), close: async () => {} }; // 1st: drop
+      const { sideA, sideB } = loopback(); // 2nd: live channel + a receiver
+      const rxSvc = createTransferService({ store: recvStore, transferDir: dest, consent: async () => true, openChannel: async () => ({ channel: sideB, close: async () => {} }), receiveCloseGraceMs: 0 });
+      liveReceiver = rxSvc.startReceive({ rendezvous: { sessionId: 's', linked: true } });
+      return { channel: sideA, close: async () => {} };
+    },
+  });
+  svc.startResumeWatcher();
+
+  await svc.startSend({ jobId: 'jr', manifest, sources, target: { id: 'sig-OLD', deviceId: 'dev-1', linked: true }, sourceRoots: [srcFile] });
+  expect((await sendStore.list()).find((j) => j.jobId === 'jr').jobState).toBe('interrupted');
+
+  await svc.resumeSweepNow();                       // re-walk + re-send; resolves after it settles
+  await liveReceiver;
+
+  const rec = (await sendStore.list()).find((j) => j.jobId === 'jr');
+  expect(rec.jobState).toBe('done');                // re-established send completed
+  expect(readFileSync(join(dest, 'resume-me.txt'))).toEqual(readFileSync(srcFile));
+  svc.stopResumeWatcher();
+});
+
 test('SP3 P4: a recoverable own-fleet drop records interrupted; a terminal reason records error', async () => {
   const { manifest, sources } = await oneFileSource();
   const store = createJobsStore({ dir: tmp() });

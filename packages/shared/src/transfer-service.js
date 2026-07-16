@@ -12,6 +12,9 @@
 import { createSender, createReceiver } from './transfer-orchestrator.js';
 import { createQueue, selectResumable } from './transfer-queue.js';
 import { parseCtrlFrame } from './transfer-protocol.js';
+import { walkSource } from './transfer-io.js';
+import { buildManifest } from './transfer-manifest.js';
+import { createResumeWatcher } from './transfer-resume-watcher.js';
 
 // Wrap a channel so we can observe the jobId as soon as it appears on the wire
 // (the OFFER frame) without altering behavior — the real onCtrl callback still
@@ -43,7 +46,11 @@ function isTerminalReason(reason) {
   return /rejected:|receiver_incomplete|canceled|aborted|bad_manifest|nospace|proto|declined/.test(String(reason || ''));
 }
 
-export function createTransferService({ store, transferDir, consent, openChannel, onEvent = () => {}, rendezvousTimeoutMs = 30000, receiveCloseGraceMs = 2000, delay = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export function createTransferService({ store, transferDir, consent, openChannel, onEvent = () => {}, rendezvousTimeoutMs = 30000, receiveCloseGraceMs = 2000, delay = (ms) => new Promise((r) => setTimeout(r, ms)),
+  // SP3 Phase 4 auto-resume: when provided, an own-fleet interrupted send is
+  // re-established via the resume watcher (getFleet resolves the peer's current
+  // signalingId by deviceId). resumeOpts injects the watcher's timers for tests.
+  getFleet, resumeOpts = {} }) {
   const queue = createQueue();
   let resumeWatcher = null; // set below when getFleet is provided (own-fleet auto-resume)
   const pendingSends = new Map(); // jobId -> { manifest, sources, target, createdAt, resolve, reject }
@@ -217,7 +224,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     return { ok: true };
   }
 
-  return {
+  const api = {
     startSend({ jobId, manifest, sources, target, sourceRoots = [] }) {
       return new Promise((resolve, reject) => {
         pendingSends.set(jobId, { manifest, sources, target, sourceRoots, createdAt: Date.now(), resolve, reject });
@@ -269,5 +276,38 @@ export function createTransferService({ store, transferDir, consent, openChannel
     async resumable() {
       return selectResumable(await store.list());
     },
+
+    startResumeWatcher() { if (resumeWatcher) resumeWatcher.start(); },
+    stopResumeWatcher() { if (resumeWatcher) resumeWatcher.stop(); },
+    // Trigger one immediate resume sweep (used by tests; also handy to force a
+    // retry). No-op if auto-resume isn't configured.
+    resumeSweepNow() { return resumeWatcher ? resumeWatcher.sweep() : Promise.resolve(); },
   };
+
+  // Own-fleet auto-resume: re-walk an interrupted job's source roots and re-run the
+  // linked send to the peer's CURRENT signalingId. The receiver skip-existings every
+  // file already on disk (rsync-like), so only the remainder transfers.
+  if (typeof getFleet === 'function') {
+    const listInterrupted = async () =>
+      (await store.list()).filter((j) => j.jobState === 'interrupted' && j.tier === 'fleet' && j.dir === 'send');
+    const reestablish = async (job, signalingId) => {
+      let walked = null;
+      try { walked = await walkSource((job.sourceRoots || []).map((p) => ({ path: p }))); } catch { walked = null; }
+      if (!walked || !walked.entries.length) {
+        try { await store.save({ ...job, jobState: 'error' }); } catch { /* best effort */ }
+        return;
+      }
+      emit(job.jobId, 'send', { type: 'reconnecting' });
+      await api.startSend({
+        jobId: job.jobId,
+        manifest: buildManifest(walked.entries),
+        sources: walked.sources,
+        sourceRoots: job.sourceRoots,
+        target: { id: signalingId, deviceId: job.peer && job.peer.deviceId, linked: true },
+      });
+    };
+    resumeWatcher = createResumeWatcher({ listInterrupted, getFleet, reestablish, ...resumeOpts });
+  }
+
+  return api;
 }

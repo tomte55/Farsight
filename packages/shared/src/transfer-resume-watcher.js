@@ -13,11 +13,15 @@ export function createResumeWatcher({ listInterrupted, getFleet, reestablish, po
 
   function arm() { if (running && !timer) timer = setTimer(() => { tick(); }, pollMs); }
 
-  async function tick() {
+  // awaitReestablish=true (sweep/tests) resolves only after the re-established
+  // sends settle; the interval path leaves them fire-and-forget (single-flight via
+  // inFlight so a poll during an in-progress resume never spawns a duplicate).
+  async function tick(awaitReestablish = false) {
     timer = null;
     if (!running) return;
     let jobs = [];
     try { jobs = await listInterrupted(); } catch { jobs = []; }
+    const started = [];
     if (jobs.length) {
       let fleet = [];
       try { fleet = await getFleet(); } catch { fleet = []; }
@@ -28,12 +32,13 @@ export function createResumeWatcher({ listInterrupted, getFleet, reestablish, po
         const action = nextResumeAction(job, { deviceId, online: !!(d && d.online) }, { inFlight });
         if (action.type === 'reestablish' && d && d.signalingId) {
           inFlight.add(job.jobId);
-          Promise.resolve(reestablish(job, d.signalingId)).catch(() => {}).finally(() => inFlight.delete(job.jobId));
+          started.push(Promise.resolve(reestablish(job, d.signalingId)).catch(() => {}).finally(() => inFlight.delete(job.jobId)));
         }
       }
       arm(); // more work remains → keep polling
     }
     // jobs empty → don't re-arm (idle; notify() re-arms when a new drop happens)
+    if (awaitReestablish) await Promise.all(started);
   }
 
   return {
@@ -42,5 +47,8 @@ export function createResumeWatcher({ listInterrupted, getFleet, reestablish, po
     // A job just became interrupted — make sure a poll is scheduled (re-arms an
     // idle watcher so it picks the job up within pollMs).
     notify() { arm(); },
+    // Run one sweep immediately and resolve after the re-established sends settle
+    // (an eager first retry / test hook). Requires start().
+    sweep() { return running ? tick(true) : Promise.resolve(); },
   };
 }
