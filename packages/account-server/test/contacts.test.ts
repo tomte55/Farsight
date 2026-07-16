@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
 import { createTestDb, type TestDb } from './helpers/test-db.js';
-import { addContact } from '../src/contacts.js';
+import { addContact, acceptContact, declineContact } from '../src/contacts.js';
 
 const NOW = 1_700_000_000_000;
 let db: TestDb;
@@ -68,5 +68,56 @@ describe('addContact', () => {
         data: { requesterId: me, addresseeId: them, inviteCode: 'other', pairKey },
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe('acceptContact / declineContact', () => {
+  async function pending(reqEmail: string, addrEmail: string) {
+    const requesterId = await mkUser(reqEmail);
+    const addresseeId = await mkUser(addrEmail);
+    const res = await addContact(deps(), { requesterId, email: addrEmail });
+    return { requesterId, addresseeId, contactId: (res as any).contactId };
+  }
+
+  test('the addressee accepts a pending edge', async () => {
+    const { addresseeId, contactId } = await pending('me@example.com', 'dad@example.com');
+    const res = await acceptContact(deps(), { userId: addresseeId, contactId });
+    expect(res).toEqual({ ok: true });
+    const row = await db.prisma.contact.findUnique({ where: { id: contactId } });
+    expect(row?.status).toBe('accepted');
+    expect(row?.respondedAt).not.toBeNull();
+  });
+
+  test('accept is idempotent for the addressee', async () => {
+    const { addresseeId, contactId } = await pending('me@example.com', 'dad@example.com');
+    await acceptContact(deps(), { userId: addresseeId, contactId });
+    expect(await acceptContact(deps(), { userId: addresseeId, contactId })).toEqual({ ok: true });
+  });
+
+  test('the requester (not the addressee) cannot accept → not_found', async () => {
+    const { requesterId, contactId } = await pending('me@example.com', 'dad@example.com');
+    expect(await acceptContact(deps(), { userId: requesterId, contactId }))
+      .toEqual({ ok: false, reason: 'not_found' });
+    expect((await db.prisma.contact.findUnique({ where: { id: contactId } }))?.status).toBe('pending');
+  });
+
+  test('a stranger cannot accept → not_found', async () => {
+    const { contactId } = await pending('me@example.com', 'dad@example.com');
+    const stranger = await mkUser('evil@example.com');
+    expect(await acceptContact(deps(), { userId: stranger, contactId }))
+      .toEqual({ ok: false, reason: 'not_found' });
+  });
+
+  test('the addressee declines → row removed', async () => {
+    const { addresseeId, contactId } = await pending('me@example.com', 'dad@example.com');
+    expect(await declineContact(deps(), { userId: addresseeId, contactId })).toEqual({ ok: true });
+    expect(await db.prisma.contact.findUnique({ where: { id: contactId } })).toBeNull();
+  });
+
+  test('decline by a non-addressee → not_found, row intact', async () => {
+    const { requesterId, contactId } = await pending('me@example.com', 'dad@example.com');
+    expect(await declineContact(deps(), { userId: requesterId, contactId }))
+      .toEqual({ ok: false, reason: 'not_found' });
+    expect(await db.prisma.contact.findUnique({ where: { id: contactId } })).not.toBeNull();
   });
 });

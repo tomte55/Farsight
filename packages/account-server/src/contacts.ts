@@ -52,3 +52,29 @@ export async function addContact(
     throw err;
   }
 }
+
+export async function acceptContact(
+  deps: ContactsDeps,
+  input: { userId: string; contactId: string },
+): Promise<{ ok: true } | { ok: false; reason: 'not_found' }> {
+  const row = await deps.prisma.contact.findUnique({ where: { id: input.contactId } });
+  // Only the addressee acts on the request. An already-accepted edge the caller
+  // addresses is a no-op success (idempotent).
+  if (!row || row.addresseeId !== input.userId) return { ok: false, reason: 'not_found' };
+  if (row.status === 'accepted') return { ok: true };
+  await deps.prisma.contact.update({
+    where: { id: row.id },
+    data: { status: 'accepted', respondedAt: new Date(deps.now) },
+  });
+  return { ok: true };
+}
+
+export async function declineContact(
+  deps: ContactsDeps,
+  input: { userId: string; contactId: string },
+): Promise<{ ok: true } | { ok: false; reason: 'not_found' }> {
+  const row = await deps.prisma.contact.findUnique({ where: { id: input.contactId } });
+  if (!row || row.addresseeId !== input.userId) return { ok: false, reason: 'not_found' };
+  await deps.prisma.contact.delete({ where: { id: row.id } });
+  return { ok: true };
+}
