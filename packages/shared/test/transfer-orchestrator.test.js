@@ -330,6 +330,41 @@ function loopback() {
   }
 }
 
+test('multi-chunk files survive ctrl/bulk cross-channel skew (FILE_BEGIN arriving AFTER the bytes)', async () => {
+  const srcRoot = tmp();
+  const src = join(srcRoot, 'many');
+  mkdirSync(src, { recursive: true });
+  // Several MULTI-chunk files (each spans multiple chunks, distinct content) —
+  // the exact shape that corrupted on a real 2-machine transfer (98 x ~1.5MB:
+  // files 1-6 fine, 7-98 all hash-failed) once the ctrl channel lagged the bulk.
+  for (let i = 0; i < 10; i++) writeFileSync(join(src, `f${i}.bin`), Buffer.alloc(5000 + i * 271, (i * 37 + 3) % 251));
+  const { entries, sources } = await walkSource([{ path: src }]);
+  const manifest = buildManifestReal(entries);
+  const dest = tmp();
+
+  const { sender: sCh, receiver: rCh } = loopback();
+  // SKEW: deliver ctrl frames to the receiver a macrotask LATER than bulk, so a
+  // file's bytes routinely arrive before its FILE_BEGIN — exactly what happens
+  // over the wire once the (small, prompt) ctrl channel falls behind the
+  // (large, backpressured) bulk channel.
+  const skewed = {
+    sendCtrl: (s) => rCh.sendCtrl(s),
+    sendBulk: (b) => rCh.sendBulk(b),
+    onCtrl: (cb) => rCh.onCtrl((s) => setTimeout(() => cb(s), 3)),
+    onBulk: (cb) => rCh.onBulk((b) => cb(b)),
+  };
+  const rx = createReceiver({ channel: skewed, destRoot: dest, store: memStore(), consent: async () => true });
+  const rxDone = rx.start();
+  const tx = createSender({ channel: sCh, jobId: 'skew1', manifest, sources, chunkSize: 1000 });
+  tx.start().catch(() => {});
+  const res = await rxDone;
+
+  expect(res.ok).toBe(true); // every file received and hash-verified despite the skew
+  for (const e of manifest.entries) {
+    expect(readFileSync(join(dest, ...e.path.split('/')))).toEqual(readFileSync(sources.get(e.fileId)));
+  }
+});
+
 test('loopback: a multi-file folder transfers, verifies, and finalizes every file', async () => {
   const srcRoot = tmp();
   const src = join(srcRoot, 'game');

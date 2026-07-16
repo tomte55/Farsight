@@ -127,16 +127,19 @@ export function createReceiver({
   let job = null, manifest = null, jobId = null, ok = true;
   let jobDoneSeen = false;
   const doneIds = new Set(), failedIds = new Set();
-  // `queue` is the ORDERED byte-routing structure (spec §5 correctness rule 1):
-  // bulk chunks are counted against the head file's remaining bytes regardless
-  // of ctrl-channel arrival order. `pending` maps fileId -> item so file_end can
-  // attach a hash to an item that has ALREADY been fully written (bulk and ctrl
-  // are independently ordered — bytes routinely finish before FILE_END arrives).
-  // Routing advancement (queue.shift) must NOT wait on the hash, or a late
-  // FILE_END would stall the queue head forever and hang routing for every file
-  // queued behind it.
-  const queue = []; // {entry, expected, received, partFile, hash, finalizing}
-  const pending = new Map(); // fileId -> item
+  // Byte-routing is driven by a manifest-order CURSOR built at accept time — NOT
+  // by FILE_BEGIN frames. ft-ctrl and ft-bulk are independently-timed channels,
+  // so a file's bytes can (and on a real network DO) arrive before its FILE_BEGIN;
+  // routing off FILE_BEGIN then sends bytes to the wrong file and cascades into
+  // corrupting every file after (observed live: 98x1.5MB, files 1-6 fine then
+  // 7-98 all hash-failed). The sender streams files in strict manifest order, so
+  // a cursor over that same order routes correctly regardless of ctrl timing.
+  // `seq` is every file's item in manifest order; `cursor` is the file currently
+  // receiving bytes. `pending` maps fileId -> item so FILE_END can attach a hash
+  // to a file whose bytes have already finished.
+  const seq = [];            // {entry, offset, expected, received, partFile, hash, finalizing} in manifest order
+  let cursor = 0;            // index in seq of the file currently consuming bulk bytes
+  const pending = new Map(); // fileId -> item, until finalized
   let settled = false;
   let resolve, reject;
   const finished = new Promise((res, rej) => { resolve = res; reject = rej; });
@@ -163,12 +166,12 @@ export function createReceiver({
   const run = serializer(fail);
 
   // Resolves the receiver's promise only once JOB_DONE has actually been seen
-  // AND every file has finished routing (queue empty) AND finalized (pending
-  // empty) — job_done and the last file's bulk bytes/FILE_END are independently
-  // ordered, so job_done can arrive first and must NOT resolve early.
+  // AND every file has finalized (pending empty) — job_done and the last file's
+  // bulk bytes/FILE_END are independently ordered, so job_done can arrive first
+  // and must NOT resolve early. A file leaves `pending` only when finalized.
   async function maybeComplete() {
     if (settled) return;
-    if (jobDoneSeen && queue.length === 0 && pending.size === 0) {
+    if (jobDoneSeen && pending.size === 0) {
       await saveRecord('done');
       // Acknowledge delivery so the SENDER can resolve/close (it waits for this —
       // without it the sender would tear the channel down mid-drain). Best effort:
@@ -200,7 +203,7 @@ export function createReceiver({
   }
 
   async function tryFinalize(item) {
-    if (item.finalizing || item.received < item.expected || item.hash == null) return;
+    if (item.finalizing || !item.partFile || item.received < item.expected || item.hash == null) return;
     item.finalizing = true;
     await item.partFile.fsync();
     await item.partFile.close();
@@ -213,9 +216,14 @@ export function createReceiver({
 
   channel.onBulk((buf) => run(async () => {
     pokeWatchdog(); // fresh bytes — the transfer is alive
+    if (!job) return; // bytes before accept: impossible in practice, guard anyway
     let chunk = Buffer.from(buf);
-    while (chunk.length > 0 && queue.length > 0) {
-      const item = queue[0];
+    while (chunk.length > 0 && cursor < seq.length) {
+      const item = seq[cursor];
+      if (item.expected <= 0) { cursor += 1; continue; } // fully-resumed file: no bytes, finalized via FILE_END
+      // Open the .part lazily when the cursor first reaches this file (keeps at
+      // most one fd open at a time — matters for huge file counts).
+      if (!item.partFile) item.partFile = await createPartFile({ destRoot, relPath: item.entry.path, resumeFrom: item.offset, hashLive: true });
       const need = item.expected - item.received;
       const take = chunk.subarray(0, need);
       await item.partFile.write(take);
@@ -223,12 +231,12 @@ export function createReceiver({
       job.onBytes(item.entry.fileId, take.length);
       chunk = chunk.subarray(take.length);
       if (item.received >= item.expected) {
-        queue.shift(); // byte-complete: advance routing NOW, independent of hash arrival
+        cursor += 1; // byte-complete: advance the cursor NOW, independent of hash arrival
         await tryFinalize(item); // finalizes only if FILE_END's hash already landed
       }
     }
-    // Any bytes still left in `chunk` here mean the queue ran empty (no file is
-    // currently expecting bytes) — deliberately discarded silently; not an error.
+    // Trailing bytes past the last file (cursor === seq.length) shouldn't happen
+    // for a well-formed stream — discarded silently, not an error.
   }));
 
   channel.onCtrl((str) => run(async () => {
@@ -270,6 +278,19 @@ export function createReceiver({
       const have = {};
       for (const e of m.entries) have[e.fileId] = await resumeOffsetFor(destRoot, e);
       job = createReceiveJob({ manifest: m, have });
+      // Build the byte-routing sequence from the MANIFEST (the order the sender
+      // streams files) so routing never depends on FILE_BEGIN timing. Part files
+      // open lazily as the cursor reaches each file — except fully-resumed files
+      // (no bytes to receive), whose .part we open now so FILE_END can finalize.
+      for (const e of m.entries) {
+        const offset = have[e.fileId] || 0;
+        const item = { entry: e, offset, expected: e.size - offset, received: 0, partFile: null, hash: null, finalizing: false };
+        if (item.expected <= 0) {
+          item.partFile = await createPartFile({ destRoot, relPath: e.path, resumeFrom: offset, hashLive: true });
+        }
+        pending.set(e.fileId, item);
+        seq.push(item);
+      }
       await saveRecord('active');
       channel.sendCtrl(acceptFrame({ jobId, resume: job.resumePlan() }));
       watching = true; pokeWatchdog(); // now expecting a steady stream of bytes
@@ -277,15 +298,9 @@ export function createReceiver({
     }
     if (!jobId || f.jobId !== jobId) return;
     if (f.t === 'file_begin') {
-      const e = manifest.entries.find((x) => x.fileId === f.fileId);
-      if (!e) return;
-      if (pending.has(f.fileId)) return; // duplicate FILE_BEGIN — a part file is already tracked, ignore
-      job.onFileBegin({ fileId: f.fileId, offset: f.offset });
-      const partFile = await createPartFile({ destRoot, relPath: e.path, resumeFrom: f.offset, hashLive: true });
-      const item = { entry: e, expected: e.size - f.offset, received: 0, partFile, hash: null, finalizing: false };
-      pending.set(e.fileId, item);
-      if (item.expected > 0) queue.push(item);
-      else await tryFinalize(item); // zero remaining bytes (e.g. fully-resumed tail); waits on file_end's hash
+      // Advisory now — routing is driven by the manifest cursor (see onBulk), so
+      // FILE_BEGIN no longer creates the part file or seeds the queue. Kept in the
+      // protocol for the sender's per-file framing; nothing to do on receipt.
     } else if (f.t === 'file_end') {
       const item = pending.get(f.fileId);
       if (item) { job.onFileEnd({ fileId: f.fileId }); item.hash = f.hash; await tryFinalize(item); }
