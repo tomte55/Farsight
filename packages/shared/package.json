@@ -10,6 +10,7 @@
     "./password": "./src/password.js",
     "./credentials": "./src/credentials.js",
     "./credentials-format": "./src/credentials-format.js",
+    "./idle-rotator": "./src/idle-rotator.js",
     "./version": "./src/version.js",
     "./host-id": "./src/host-id.js",
     "./turn": "./src/turn.js",
@@ -38,7 +39,8 @@
     "./updater": "./src/updater.js",
     "./log": "./src/log.js",
     "./log-file-sink": "./src/log-file-sink.js",
-    "./app-log": "./src/app-log.js"
+    "./app-log": "./src/app-log.js",
+    "./diagnostics-bundle": "./src/diagnostics-bundle.js"
   },
   "dependencies": {
     "argon2": "^0.41.1"
