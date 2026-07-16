@@ -420,7 +420,8 @@ app.whenReady().then(() => {
 
   ipcMain.on('log:renderer', (_e, entry) => {
     const level = ['debug', 'info', 'warn', 'error'].includes(entry?.level) ? entry.level : 'error';
-    log?.child('renderer')[level](String(entry?.msg ?? ''));
+    const scope = typeof entry?.scope === 'string' && entry.scope ? `renderer:${entry.scope}` : 'renderer';
+    log?.child(scope)[level](String(entry?.msg ?? ''));
   });
 
   createWindow();

@@ -19,3 +19,8 @@ test('controller wires the renderer error bridge', () => {
   expect(main).toMatch(/['"]log:renderer['"]/);
   expect(preload).toMatch(/reportError/);
 });
+
+test('exposes a scoped renderer log bridge', () => {
+  expect(preload).toMatch(/log:\s*\(entry\)\s*=>\s*ipcRenderer\.send\('log:renderer'/);
+  expect(main).toMatch(/renderer:\$\{|`renderer:/); // handler prefixes scope
+});

@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   readClipboard: () => ipcRenderer.invoke('clipboard-read'),
   writeClipboard: (text) => ipcRenderer.send('clipboard-write', text),
   reportError: (entry) => ipcRenderer.send('log:renderer', entry),
+  log: (entry) => ipcRenderer.send('log:renderer', entry),
 
   // Account enrollment (SP2): sign in on the host to link this machine to your
   // account (§4.3 local-login consent gate) and report presence. Mirrors the

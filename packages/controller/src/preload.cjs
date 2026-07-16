@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   readClipboard: () => ipcRenderer.invoke('clipboard-read'),
   writeClipboard: (text) => ipcRenderer.send('clipboard-write', text),
   reportError: (entry) => ipcRenderer.send('log:renderer', entry),
+  log: (entry) => ipcRenderer.send('log:renderer', entry),
   openLogs: () => ipcRenderer.invoke('open-logs'),
   // Account / saved-hosts console (SP2)
   accountStatus: () => ipcRenderer.invoke('account:status'),
