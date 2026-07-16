@@ -46,3 +46,17 @@ contextBridge.exposeInMainWorld('farsightTransfer', {
   // message counters) — surfaced in the app log to diagnose stalled transfers.
   logStatus: (obj) => ipcRenderer.send(topics.statusLog, obj),
 });
+
+// SP3 Phase 4: own-fleet device-keypair handshake (shared/connection-auth.js) run
+// over the transfer connection's dedicated 'auth' data channel. The account device
+// keypair lives in MAIN — the worker only forwards transcripts to be signed/verified.
+// These conn-auth:* handlers are registered process-wide in main.js (module top), so
+// they are NOT per-worker namespaced (stateless signing with the account's single
+// key; no cross-worker stream concern). Mirrors the visible renderer's connAuth* IPC.
+contextBridge.exposeInMainWorld('farsightConnAuth', {
+  deviceId: () => ipcRenderer.invoke('conn-auth:device-id'),
+  publicKey: () => ipcRenderer.invoke('conn-auth:public-key'),
+  sign: (message) => ipcRenderer.invoke('conn-auth:sign', message),
+  verify: (publicKey, message, signature) => ipcRenderer.invoke('conn-auth:verify', publicKey, message, signature),
+  isAccountKey: (publicKey) => ipcRenderer.invoke('conn-auth:is-account-key', publicKey),
+});
