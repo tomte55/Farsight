@@ -5,6 +5,7 @@
 import { randomBytes } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { normalizeEmail } from './email.js';
+import { DEFAULT_ONLINE_WINDOW_MS } from './presence.js';
 
 export interface ContactsDeps {
   prisma: PrismaClient;
@@ -79,4 +80,70 @@ export async function declineContact(
     where: { id: input.contactId, addresseeId: input.userId, status: 'pending' },
   });
   return res.count === 1 ? { ok: true } : { ok: false, reason: 'not_found' };
+}
+
+export interface ContactDevice {
+  contactUserId: string;
+  email: string;
+  deviceId: string;
+  name: string;
+  signalingId: string | null;
+  publicKey: string | null;
+  online: boolean;
+}
+
+export interface PendingContact {
+  contactId: string;
+  email: string;
+}
+
+export interface ContactsView {
+  accepted: ContactDevice[];
+  incoming: PendingContact[];
+  outgoing: PendingContact[];
+}
+
+export async function listContacts(
+  deps: ContactsDeps,
+  input: { userId: string; onlineWindowMs?: number },
+): Promise<ContactsView> {
+  const windowMs = input.onlineWindowMs ?? DEFAULT_ONLINE_WINDOW_MS;
+  const edges = await deps.prisma.contact.findMany({
+    where: { OR: [{ requesterId: input.userId }, { addresseeId: input.userId }] },
+    include: { requester: true, addressee: true },
+  });
+
+  const accepted: ContactDevice[] = [];
+  const incoming: PendingContact[] = [];
+  const outgoing: PendingContact[] = [];
+
+  for (const e of edges) {
+    const iAmRequester = e.requesterId === input.userId;
+    const other = iAmRequester ? e.addressee : e.requester;
+    if (!other) continue; // addressee is non-null in this design, but guard anyway
+
+    if (e.status === 'accepted') {
+      const devices = await deps.prisma.device.findMany({
+        where: { userId: other.id, revokedAt: null },
+        orderBy: { createdAt: 'asc' },
+      });
+      for (const d of devices) {
+        accepted.push({
+          contactUserId: other.id,
+          email: other.email,
+          deviceId: d.id,
+          name: d.name,
+          signalingId: d.signalingId,
+          publicKey: d.publicKey,
+          online: d.lastSeenAt !== null && deps.now - d.lastSeenAt.getTime() <= windowMs,
+        });
+      }
+    } else if (e.status === 'pending') {
+      // I am the addressee → it's an incoming request I can accept; else outgoing.
+      if (e.addresseeId === input.userId) incoming.push({ contactId: e.id, email: other.email });
+      else outgoing.push({ contactId: e.id, email: other.email });
+    }
+  }
+
+  return { accepted, incoming, outgoing };
 }

@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
 import { createTestDb, type TestDb } from './helpers/test-db.js';
-import { addContact, acceptContact, declineContact } from '../src/contacts.js';
+import { addContact, acceptContact, declineContact, listContacts } from '../src/contacts.js';
 
 const NOW = 1_700_000_000_000;
 let db: TestDb;
@@ -136,5 +136,58 @@ describe('acceptContact / declineContact', () => {
     expect(await declineContact(deps(), { userId: addresseeId, contactId })).toEqual({ ok: true });
     expect(await declineContact(deps(), { userId: addresseeId, contactId }))
       .toEqual({ ok: false, reason: 'not_found' });
+  });
+});
+
+describe('listContacts', () => {
+  test('accepted contact exposes its online devices; pending exposes no devices', async () => {
+    const me = await mkUser('me@example.com');
+    const dad = await mkUser('dad@example.com');
+    // dad has one online device (heartbeat = now) with a signalingId + publicKey
+    await db.prisma.device.create({
+      data: { userId: dad, name: 'dad-pc', signalingId: 'sig-DAD', publicKey: 'PK-DAD', lastSeenAt: new Date(NOW) },
+    });
+    const added = await addContact(deps(), { requesterId: me, email: 'dad@example.com' });
+
+    // While pending: dad sees an incoming request; me sees an outgoing one; no devices leak.
+    const meView1 = await listContacts(deps(), { userId: me });
+    const dadView1 = await listContacts(deps(), { userId: dad });
+    expect(meView1.accepted).toEqual([]);
+    expect(meView1.outgoing).toEqual([{ contactId: (added as any).contactId, email: 'dad@example.com' }]);
+    expect(dadView1.incoming).toEqual([{ contactId: (added as any).contactId, email: 'me@example.com' }]);
+    expect(dadView1.accepted).toEqual([]);
+
+    // After dad accepts: me sees dad's device with presence.
+    await acceptContact(deps(), { userId: dad, contactId: (added as any).contactId });
+    const meView2 = await listContacts(deps(), { userId: me });
+    expect(meView2.accepted).toEqual([{
+      contactUserId: dad, email: 'dad@example.com', deviceId: expect.any(String),
+      name: 'dad-pc', signalingId: 'sig-DAD', publicKey: 'PK-DAD', online: true,
+    }]);
+    expect(meView2.incoming).toEqual([]);
+    expect(meView2.outgoing).toEqual([]);
+  });
+
+  test('a stale device (no recent heartbeat) is listed offline', async () => {
+    const me = await mkUser('me@example.com');
+    const dad = await mkUser('dad@example.com');
+    await db.prisma.device.create({
+      data: { userId: dad, name: 'dad-pc', signalingId: 'sig', lastSeenAt: new Date(NOW - 200_000) },
+    });
+    const added = await addContact(deps(), { requesterId: me, email: 'dad@example.com' });
+    await acceptContact(deps(), { userId: dad, contactId: (added as any).contactId });
+    const view = await listContacts(deps(), { userId: me });
+    expect(view.accepted[0]!.online).toBe(false);
+  });
+
+  test('does not leak a third party\'s edges or devices', async () => {
+    const me = await mkUser('me@example.com');
+    const a = await mkUser('a@example.com');
+    const b = await mkUser('b@example.com');
+    await db.prisma.device.create({ data: { userId: b, name: 'b-pc', lastSeenAt: new Date(NOW) } });
+    const ab = await addContact(deps(), { requesterId: a, email: 'b@example.com' });
+    await acceptContact(deps(), { userId: b, contactId: (ab as any).contactId });
+    const view = await listContacts(deps(), { userId: me });
+    expect(view).toEqual({ accepted: [], incoming: [], outgoing: [] });
   });
 });
