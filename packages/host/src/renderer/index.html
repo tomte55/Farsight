@@ -62,7 +62,12 @@
   .xfer-row .host-main { display: flex; flex-direction: column; gap: 5px; }
   .xfer-bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
   .xfer-bar-fill { height: 100%; background: linear-gradient(135deg, var(--acc), var(--acc2)); transition: width .2s ease; }
-  #transfer-consent .card { width: 420px; max-width: 92vw; max-height: 82vh; display: flex; flex-direction: column; overflow: hidden; }
+  /* position:relative lifts the card into the positioned-paint layer so it sits
+     ABOVE the absolutely-positioned .veil (which is earlier in DOM). Without it a
+     static .card paints UNDER the veil — the veil blurs the card and intercepts
+     every click, so the consent buttons are unreachable (mirrors .toast, which
+     the controller's overlay relies on for exactly this reason). */
+  #transfer-consent .card { position: relative; width: 420px; max-width: 92vw; max-height: 82vh; display: flex; flex-direction: column; overflow: hidden; }
   .xfer-tree-wrap { max-height: 220px; overflow-y: auto; background: var(--bg2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; margin-top: 4px; }
   .xfer-tree, .xfer-tree ul { list-style: none; margin: 0; padding-left: 16px; font-size: 12.5px; }
   .xfer-tree { padding-left: 0; }

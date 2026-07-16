@@ -16,3 +16,14 @@ test('renderer links farsight.css via the packaging-safe ../shared path', () => 
   expect(m[1]).toBe('../shared/farsight.css');
   expect(existsSync(resolve(__dirname, '../../shared/src/farsight.css'))).toBe(true);
 });
+
+// The consent modal reuses the shared .overlay/.veil, but its content is a
+// static .card (not the positioned .toast). The .veil is position:absolute, so
+// without lifting the card into the positioned-paint layer the veil paints OVER
+// the card — blurring it and swallowing every click (verified live: the Accept
+// button was unreachable). The card MUST be positioned. Guard it.
+test('the transfer-consent card is positioned above the veil (position:relative) so its buttons are clickable', () => {
+  const rule = html.match(/#transfer-consent\s+\.card\s*\{([^}]*)\}/);
+  expect(rule, '#transfer-consent .card rule must exist').not.toBeNull();
+  expect(rule[1]).toMatch(/position:\s*(relative|absolute|fixed|sticky)/);
+});
