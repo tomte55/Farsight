@@ -36,3 +36,36 @@ test('prune removes files older than the ttl, keeps fresh ones', () => {
   expect(fresh.prune().removed).toBe(1);
   expect(fs.files.size).toBe(1);
 });
+
+test('save logs a diagnostics_saved event with id, userId, file count and byte size', () => {
+  const fs = fakeFs();
+  const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+  const store = createDiagnosticsStore({
+    dir: '/diag', fs: fs as any, gzipSync, now: () => 1_000_000, ttlMs: 100, randomId: () => 'DIAG7F',
+    log: (event, fields) => events.push({ event, fields }),
+  });
+  store.save({ userId: 'u1!weird/../', meta: {}, files: { 'main.log': 'a', 'main.log.1': 'b' } });
+  const saved = events.find((e) => e.event === 'diagnostics_saved');
+  expect(saved).toBeTruthy();
+  expect(saved!.fields.id).toBe('DIAG7F');
+  expect(saved!.fields.userId).toBe('u1weird'); // sanitized, no path chars
+  expect(saved!.fields.files).toBe(2);
+  expect(typeof saved!.fields.bytes).toBe('number');
+  expect(saved!.fields.bytes as number).toBeGreaterThan(0);
+});
+
+test('prune logs a diagnostics_pruned event with the removed count', () => {
+  const fs = fakeFs();
+  let t = 1_000_000;
+  const events: Array<{ event: string; fields: Record<string, unknown> }> = [];
+  const store = createDiagnosticsStore({
+    dir: '/diag', fs: fs as any, gzipSync, now: () => t, ttlMs: 100, randomId: () => 'old',
+    log: (event, fields) => events.push({ event, fields }),
+  });
+  store.save({ userId: 'u1', meta: {}, files: {} });
+  t = 1_000_200; // now past the ttl
+  store.prune();
+  const pruned = events.find((e) => e.event === 'diagnostics_pruned');
+  expect(pruned).toBeTruthy();
+  expect(pruned!.fields.removed).toBe(1);
+});

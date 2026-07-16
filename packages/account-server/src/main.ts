@@ -44,6 +44,7 @@ function main(): void {
     now: () => Date.now(),
     ttlMs: ttlDays * 86_400_000,
     randomId: () => randomBytes(4).toString('hex').toUpperCase(),
+    log, // emit diagnostics_saved / diagnostics_pruned to the server JSON log
   });
   diagnostics.prune(); // startup sweep
   const pruneTimer = setInterval(() => diagnostics.prune(), 86_400_000);
