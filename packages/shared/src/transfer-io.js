@@ -127,6 +127,28 @@ export async function finalizeReceivedFile({ partFile, expectedHash, mtime }) {
   return { ok: true };
 }
 
+// Publish a file the receiver ALREADY has in full at accept time — i.e. a
+// skip-existing file (the final already on disk, matched by path+size+mtime) or a
+// complete `.part` left by a prior run. The sender skips such a file entirely (no
+// FILE_END), so the receiver must finalize it here rather than wait for a frame
+// that never arrives (otherwise the receive hangs). If a full `.part` exists, it
+// is renamed over the final and its mtime set; if only the final exists, this is a
+// no-op (any stray `.part` is cleaned). Idempotent.
+export async function publishFullyReceivedFile({ destRoot, relPath, mtime }) {
+  const finalPath = confineDestPath(destRoot, relPath);
+  const partPath = `${finalPath}.part`;
+  try {
+    await stat(partPath); // a complete .part from a prior run → publish it
+    await rename(partPath, finalPath); // rename overwrites an existing final
+    const secs = mtime / 1000;
+    await utimes(finalPath, secs, secs);
+  } catch {
+    // No .part (the common skip-existing case: the final file is already present
+    // and correct). Remove any stray/empty .part so it can't linger.
+    await rm(partPath, { force: true });
+  }
+}
+
 // Stream a file to the peer while computing its whole-file SHA-256. On resume
 // (offset > 0) the bytes before offset are hashed but NOT resent — the receiver
 // already has them (spec §6.1/§6.4). onChunk is awaited for backpressure.

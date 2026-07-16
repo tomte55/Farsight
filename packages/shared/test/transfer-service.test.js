@@ -2,11 +2,11 @@
 // receiver orchestrator, jobs-store, and serial send queue into an app-facing
 // service. Exercised via loopback channels — no Electron, no real WebRTC.
 import { expect, test, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTransferService } from '../src/transfer-service.js';
-import { createReceiver } from '@farsight/shared/transfer-orchestrator';
+import { createReceiver, createSender } from '@farsight/shared/transfer-orchestrator';
 import { walkSource } from '@farsight/shared/transfer-io';
 import { buildManifest as buildManifestReal } from '@farsight/shared/transfer-manifest';
 import { createJobsStore } from '@farsight/shared/jobs-store';
@@ -129,6 +129,37 @@ test('SP3 P4: startReceive threads the own-fleet linked flag into openChannel', 
   svc.startReceive({ rendezvous: { sessionId: 's-link', linked: true } });
   await new Promise((r) => setTimeout(r, 20));
   expect(recvOpenArgs).toMatchObject({ role: 'attach', sessionId: 's-link', linked: true });
+});
+
+test('SP3 bugfix: a file the receiver ALREADY HAS (skip-existing) completes instead of hanging, and leaves no .part', async () => {
+  // Repro of the field bug: sending a file whose name already exists in the dest
+  // (identical size+mtime) → the sender skips it entirely (no FILE_END), but the
+  // receiver used to park it in `pending` awaiting a FILE_END that never comes →
+  // stalled receive + orphaned .part + sender hung on the delivery ack.
+  const srcDir = tmp();
+  const srcFile = join(srcDir, 'note.txt');
+  writeFileSync(srcFile, Buffer.from('identical content '.repeat(80)));
+  const { entries, sources } = await walkSource([{ path: srcFile }]);
+  const manifest = buildManifestReal(entries);
+  const entry = manifest.entries[0];
+
+  // Dest already holds an identical file with matching size+mtime → skip-existing.
+  const dest = tmp();
+  writeFileSync(join(dest, entry.path), readFileSync(srcFile));
+  const secs = entry.mtime / 1000;
+  utimesSync(join(dest, entry.path), secs, secs);
+
+  const { sideA, sideB } = loopback();
+  const rx = createReceiver({ channel: sideB, destRoot: dest, store: memStore(), consent: async () => true, inactivityMs: 800 });
+  const sender = createSender({ channel: sideA, jobId: 'jdup', manifest, sources, chunkSize: 64, completionTimeoutMs: 3000 });
+  const rxP = rx.start();
+  const sndP = sender.start();
+
+  const rxRes = await rxP;                 // must RESOLVE (not reject 'stalled')
+  expect(rxRes).toEqual({ jobId: 'jdup', ok: true });
+  await sndP;                              // sender resolves only on the complete ack
+  expect(existsSync(join(dest, entry.path + '.part'))).toBe(false); // no orphan .part
+  expect(readFileSync(join(dest, entry.path))).toEqual(readFileSync(srcFile));
 });
 
 // A channel that never feeds anything back — models a peer that never attaches/

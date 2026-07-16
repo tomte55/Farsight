@@ -9,7 +9,7 @@ import {
 } from './transfer-protocol.js';
 import { buildManifest, skipExisting } from './transfer-manifest.js';
 import { createSendJob, createReceiveJob } from './transfer-engine.js';
-import { sendFile, createPartFile, finalizeReceivedFile, hasFreeSpace, confineDestPath } from './transfer-io.js';
+import { sendFile, createPartFile, finalizeReceivedFile, hasFreeSpace, confineDestPath, publishFullyReceivedFile } from './transfer-io.js';
 import { stat } from 'node:fs/promises';
 
 // Serialize async event handlers so awaited writes never interleave. Handler
@@ -286,7 +286,19 @@ export function createReceiver({
         const offset = have[e.fileId] || 0;
         const item = { entry: e, offset, expected: e.size - offset, received: 0, partFile: null, hash: null, finalizing: false };
         if (item.expected <= 0) {
-          item.partFile = await createPartFile({ destRoot, relPath: e.path, resumeFrom: offset, hashLive: true });
+          // Already fully present (skip-existing final, or a complete .part from a
+          // prior run). The sender sends NOTHING for such a file — no FILE_BEGIN/
+          // END/bytes (createSendJob marks it `sent` up front) — so we must finalize
+          // it NOW. Parking it in `pending` to await a FILE_END that never arrives
+          // hangs the whole receive (field bug: "stuck at verifying" + orphan .part).
+          // Keep it in `seq` (onBulk's cursor skips expected<=0 items) but not in
+          // `pending`; publish any full .part and mark it done.
+          await publishFullyReceivedFile({ destRoot, relPath: e.path, mtime: e.mtime });
+          doneIds.add(e.fileId);
+          job.markVerified(e.fileId);
+          onEvent({ type: 'file-done', fileId: e.fileId, progress: job.progress() });
+          seq.push(item);
+          continue;
         }
         pending.set(e.fileId, item);
         seq.push(item);
