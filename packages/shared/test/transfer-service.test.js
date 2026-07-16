@@ -199,6 +199,26 @@ test('SP3 P4: an own-fleet (linked) receive auto-accepts — no consent prompt (
   }
 });
 
+test('SP3 P4: a recoverable own-fleet drop records interrupted; a terminal reason records error', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const store = createJobsStore({ dir: tmp() });
+  const svc = createTransferService({ store, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: deadChannel(), close: async () => {} }), rendezvousTimeoutMs: 60 });
+  const jobId = newJobId();
+  const res = await svc.startSend({ jobId, manifest, sources, target: { id: 'sig', deviceId: 'dev', linked: true }, sourceRoots: ['/r'] });
+  expect(res.ok).toBe(false);
+  expect(res.error).toMatch(/no_response/); // recoverable transport failure
+  expect((await store.list()).find((j) => j.jobId === jobId).jobState).toBe('interrupted');
+
+  // Ad-hoc (no deviceId, not linked) → the same recoverable failure stays terminal 'error'.
+  const store2 = createJobsStore({ dir: tmp() });
+  const svc2 = createTransferService({ store: store2, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: deadChannel(), close: async () => {} }), rendezvousTimeoutMs: 60 });
+  const jobId2 = newJobId();
+  await svc2.startSend({ jobId: jobId2, manifest, sources, target: { id: 'sig', password: 'pw' } });
+  expect((await store2.list()).find((j) => j.jobId === jobId2).jobState).toBe('error');
+});
+
 test('SP3 P4: a send record persists sourceRoots + peer.deviceId (for across-restart resume)', async () => {
   const { manifest, sources } = await oneFileSource();
   const store = createJobsStore({ dir: tmp() });

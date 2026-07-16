@@ -36,8 +36,16 @@ function errMessage(err) {
   return (err && err.message) ? err.message : String(err);
 }
 
+// A send failure is TERMINAL (won't fix itself on retry) or recoverable (a
+// transport/availability problem). Recoverable own-fleet failures become a
+// resumable `interrupted`; everything else is `error`.
+function isTerminalReason(reason) {
+  return /rejected:|receiver_incomplete|canceled|aborted|bad_manifest|nospace|proto|declined/.test(String(reason || ''));
+}
+
 export function createTransferService({ store, transferDir, consent, openChannel, onEvent = () => {}, rendezvousTimeoutMs = 30000, receiveCloseGraceMs = 2000, delay = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   const queue = createQueue();
+  let resumeWatcher = null; // set below when getFleet is provided (own-fleet auto-resume)
   const pendingSends = new Map(); // jobId -> { manifest, sources, target, createdAt, resolve, reject }
   let sendRunning = false;
   // Handle to the ACTIVE send's openChannel-returned close(), so cancel(jobId)
@@ -145,8 +153,13 @@ export function createTransferService({ store, transferDir, consent, openChannel
         result = { jobId, ok: false, canceled: true };
       }
     } catch (err) {
-      result = { jobId, ok: false, error: errMessage(err) };
-      try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'error', peer, tier, sourceRoots }); } catch { /* best effort */ }
+      const reason = errMessage(err);
+      result = { jobId, ok: false, error: reason };
+      // Own-fleet + a recoverable (transport) failure → resumable `interrupted`,
+      // and poke the resume watcher to try again as soon as the peer is online.
+      const recoverable = tier === 'fleet' && !isTerminalReason(reason);
+      try { await saveSendRecord({ jobId, manifest, createdAt, jobState: recoverable ? 'interrupted' : 'error', peer, tier, sourceRoots }); } catch { /* best effort */ }
+      if (recoverable) { emit(jobId, 'send', { type: 'interrupted' }); if (resumeWatcher) resumeWatcher.notify(); }
     } finally {
       disarmApprovalTimer();
       if (activeClose === close) activeClose = null; // don't clobber a NEWER job's handle
