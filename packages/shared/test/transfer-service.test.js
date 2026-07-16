@@ -199,6 +199,22 @@ test('SP3 P4: an own-fleet (linked) receive auto-accepts — no consent prompt (
   }
 });
 
+test('SP3 P4: a send record persists sourceRoots + peer.deviceId (for across-restart resume)', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const store = createJobsStore({ dir: tmp() });
+  const { sideA, sideB } = loopback();
+  const rx = createTransferService({ store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true, openChannel: async () => ({ channel: sideB, close: async () => {} }), receiveCloseGraceMs: 0 });
+  const tx = createTransferService({ store, transferDir: tmp(), consent: async () => true, openChannel: async () => ({ channel: sideA, close: async () => {} }) });
+  const jobId = newJobId();
+  const rp = rx.startReceive({ rendezvous: { sessionId: 's', linked: true } });
+  await tx.startSend({ jobId, manifest, sources, target: { id: 'sig-1', deviceId: 'dev-1', linked: true }, sourceRoots: ['/src/root'] });
+  await rp;
+  const rec = (await store.list()).find((j) => j.jobId === jobId);
+  expect(rec.peer).toEqual({ id: 'sig-1', deviceId: 'dev-1' });
+  expect(rec.sourceRoots).toEqual(['/src/root']);
+  expect(rec.tier).toBe('fleet');
+});
+
 test('SP3 P4: startReceive threads the own-fleet linked flag into openChannel', async () => {
   let recvOpenArgs = null;
   const svc = createTransferService({

@@ -54,7 +54,10 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // shape the apps use (not the opaque strings some tests pass), so we never
   // invent data we don't have.
   function peerFor(target) {
-    return (target && typeof target === 'object' && typeof target.id === 'string') ? { id: target.id } : {};
+    if (!target || typeof target !== 'object' || typeof target.id !== 'string') return {};
+    // Keep the stable account deviceId when present (own-fleet) — auto-resume matches
+    // a presence entry by deviceId and re-resolves the CURRENT (ephemeral) signalingId.
+    return typeof target.deviceId === 'string' ? { id: target.id, deviceId: target.deviceId } : { id: target.id };
   }
 
   // SP3 Phase 4: own-fleet (linked) sends are recorded tier:'fleet' — they
@@ -64,12 +67,15 @@ export function createTransferService({ store, transferDir, consent, openChannel
     return (target && target.linked) ? 'fleet' : 'adhoc';
   }
 
-  function saveSendRecord({ jobId, manifest, createdAt, jobState, peer, tier = 'adhoc' }) {
+  function saveSendRecord({ jobId, manifest, createdAt, jobState, peer, tier = 'adhoc', sourceRoots = [] }) {
     return store.save({
       jobId,
       dir: 'send',
       tier,
       peer: peer || {},
+      // The original root paths, persisted so an interrupted own-fleet send can be
+      // re-walked and resumed after an app restart (across-restart auto-resume).
+      sourceRoots,
       destRoot: null,
       manifest,
       perFile: manifest.entries.map((e) => ({ fileId: e.fileId, status: jobState === 'done' ? 'done' : jobState === 'error' ? 'error' : 'pending' })),
@@ -80,7 +86,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
 
   async function runSend(jobId) {
     const entry = pendingSends.get(jobId);
-    const { manifest, sources, target, createdAt } = entry;
+    const { manifest, sources, target, createdAt, sourceRoots } = entry;
     const peer = peerFor(target);
     const tier = tierFor(target);
     let channel = null;
@@ -134,13 +140,13 @@ export function createTransferService({ store, transferDir, consent, openChannel
         }
         await sender.start(); // resolves with no value on success, rejects/throws on failure
         result = { jobId, ok: true };
-        await saveSendRecord({ jobId, manifest, createdAt, jobState: 'done', peer, tier });
+        await saveSendRecord({ jobId, manifest, createdAt, jobState: 'done', peer, tier, sourceRoots });
       } else {
         result = { jobId, ok: false, canceled: true };
       }
     } catch (err) {
       result = { jobId, ok: false, error: errMessage(err) };
-      try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'error', peer, tier }); } catch { /* best effort */ }
+      try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'error', peer, tier, sourceRoots }); } catch { /* best effort */ }
     } finally {
       disarmApprovalTimer();
       if (activeClose === close) activeClose = null; // don't clobber a NEWER job's handle
@@ -191,7 +197,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     }
 
     try {
-      await saveSendRecord({ jobId, manifest: entry.manifest, createdAt: entry.createdAt, jobState: 'canceled', peer: peerFor(entry.target), tier: tierFor(entry.target) });
+      await saveSendRecord({ jobId, manifest: entry.manifest, createdAt: entry.createdAt, jobState: 'canceled', peer: peerFor(entry.target), tier: tierFor(entry.target), sourceRoots: entry.sourceRoots });
     } catch { /* best effort */ }
     entry.resolve({ jobId, ok: false, canceled: true });
     if (isActive) advanceSendQueue();
@@ -199,9 +205,9 @@ export function createTransferService({ store, transferDir, consent, openChannel
   }
 
   return {
-    startSend({ jobId, manifest, sources, target }) {
+    startSend({ jobId, manifest, sources, target, sourceRoots = [] }) {
       return new Promise((resolve, reject) => {
-        pendingSends.set(jobId, { manifest, sources, target, createdAt: Date.now(), resolve, reject });
+        pendingSends.set(jobId, { manifest, sources, target, sourceRoots, createdAt: Date.now(), resolve, reject });
         queue.add(jobId);
         advanceSendQueue();
       });
