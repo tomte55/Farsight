@@ -120,4 +120,21 @@ describe('acceptContact / declineContact', () => {
       .toEqual({ ok: false, reason: 'not_found' });
     expect(await db.prisma.contact.findUnique({ where: { id: contactId } })).not.toBeNull();
   });
+
+  test('declining an already-accepted edge → not_found, row intact', async () => {
+    const { addresseeId, contactId } = await pending('me@example.com', 'dad@example.com');
+    await acceptContact(deps(), { userId: addresseeId, contactId });
+    expect(await declineContact(deps(), { userId: addresseeId, contactId }))
+      .toEqual({ ok: false, reason: 'not_found' });
+    const row = await db.prisma.contact.findUnique({ where: { id: contactId } });
+    expect(row).not.toBeNull();
+    expect(row?.status).toBe('accepted');
+  });
+
+  test('decline is safe to call twice (double-submit) — second call → not_found, no throw', async () => {
+    const { addresseeId, contactId } = await pending('me@example.com', 'dad@example.com');
+    expect(await declineContact(deps(), { userId: addresseeId, contactId })).toEqual({ ok: true });
+    expect(await declineContact(deps(), { userId: addresseeId, contactId }))
+      .toEqual({ ok: false, reason: 'not_found' });
+  });
 });

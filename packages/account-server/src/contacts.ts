@@ -57,24 +57,26 @@ export async function acceptContact(
   deps: ContactsDeps,
   input: { userId: string; contactId: string },
 ): Promise<{ ok: true } | { ok: false; reason: 'not_found' }> {
-  const row = await deps.prisma.contact.findUnique({ where: { id: input.contactId } });
-  // Only the addressee acts on the request. An already-accepted edge the caller
-  // addresses is a no-op success (idempotent).
-  if (!row || row.addresseeId !== input.userId) return { ok: false, reason: 'not_found' };
-  if (row.status === 'accepted') return { ok: true };
-  await deps.prisma.contact.update({
-    where: { id: row.id },
+  // Atomic transition: only the addressee of a still-pending edge flips it to accepted.
+  const res = await deps.prisma.contact.updateMany({
+    where: { id: input.contactId, addresseeId: input.userId, status: 'pending' },
     data: { status: 'accepted', respondedAt: new Date(deps.now) },
   });
-  return { ok: true };
+  if (res.count === 1) return { ok: true };
+  // Idempotent: an addressee re-accepting an already-accepted edge is a no-op success.
+  const row = await deps.prisma.contact.findUnique({ where: { id: input.contactId } });
+  if (row && row.addresseeId === input.userId && row.status === 'accepted') return { ok: true };
+  return { ok: false, reason: 'not_found' };
 }
 
 export async function declineContact(
   deps: ContactsDeps,
   input: { userId: string; contactId: string },
 ): Promise<{ ok: true } | { ok: false; reason: 'not_found' }> {
-  const row = await deps.prisma.contact.findUnique({ where: { id: input.contactId } });
-  if (!row || row.addresseeId !== input.userId) return { ok: false, reason: 'not_found' };
-  await deps.prisma.contact.delete({ where: { id: row.id } });
-  return { ok: true };
+  // Atomic: only the addressee of a still-pending edge can decline; deleteMany never
+  // throws on 0 matches (no P2025 on a double-submit), unlike delete().
+  const res = await deps.prisma.contact.deleteMany({
+    where: { id: input.contactId, addresseeId: input.userId, status: 'pending' },
+  });
+  return res.count === 1 ? { ok: true } : { ok: false, reason: 'not_found' };
 }
