@@ -33,6 +33,7 @@ let isInitiator = false;
 let linkedTransfer = false;
 let authGate = createTransferAuthGate({ linked: false });
 let authStarted = false;
+let verifiedPeerKey = null; // SP3 Task 5: captured by the isAccountKey closure below, reported to main on auth-ok
 let authDeviceId = null, authPublicKey = null; // pre-fetched so the pump has no async gap
 const authEarly = [];      // auth-channel messages buffered before the pump wires onmessage (host-role hello)
 const pendingCtrlIn = [];  // inbound ctrl frames held until authOk (linked)
@@ -118,12 +119,13 @@ async function maybeStartAuth() {
       remoteFingerprint: getFingerprints().remote,
       sign: (m) => window.farsightConnAuth.sign(m),
       verify: (pk, m, s) => window.farsightConnAuth.verify(pk, m, s),
-      isAccountKey: (pk) => window.farsightConnAuth.isTransferPeerKey(pk),
+      isAccountKey: (pk) => { verifiedPeerKey = pk; return window.farsightConnAuth.isTransferPeerKey(pk); },
       nonce: authNonce, timeoutMs: 20000,
     });
     while (authEarly.length) { const e = authEarly.shift(); try { authChannel.onmessage(e); } catch { /* guarded */ } }
     await p;
     authGate.resolve(true);
+    try { window.farsightTransfer.reportPeerAuth({ publicKey: verifiedPeerKey }); } catch { /* guarded */ }
     logStatus({ event: 'auth-ok' });
     releaseAfterAuth();
   } catch (e) {

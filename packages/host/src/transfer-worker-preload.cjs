@@ -23,6 +23,7 @@ const topics = {
   statsRequest: `ft-stats-request:${workerId}`,
   statsResponse: `ft-stats-response:${workerId}`,
   statusLog: `ft-status-log:${workerId}`,
+  peerAuth: `ft-peer-auth:${workerId}`,
 };
 
 contextBridge.exposeInMainWorld('farsightTransfer', {
@@ -46,6 +47,9 @@ contextBridge.exposeInMainWorld('farsightTransfer', {
   // Periodic diagnostic status (connection/data-channel state, backpressure,
   // message counters) — surfaced in the app log to diagnose stalled transfers.
   logStatus: (obj) => ipcRenderer.send(topics.statusLog, obj),
+  // SP3 Task 5: the device-keypair-VERIFIED peer, reported once on auth-ok so
+  // main can classify it (fleet vs contact) for the consent decision (Task 6).
+  reportPeerAuth: (obj) => ipcRenderer.send(topics.peerAuth, obj),
 });
 
 // SP3 Phase 4: own-fleet device-keypair handshake (shared/connection-auth.js) run

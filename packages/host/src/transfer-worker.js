@@ -38,6 +38,7 @@ function topicsFor(workerId) {
     statsRequest: `ft-stats-request:${workerId}`, // main -> worker renderer: please report getStats()
     statsResponse: `ft-stats-response:${workerId}`, // worker renderer -> main: getStats() result
     statusLog: `ft-status-log:${workerId}`, // worker renderer -> main: periodic diagnostic status
+    peerAuth: `ft-peer-auth:${workerId}`, // worker renderer -> main: device-keypair-verified peer publicKey (on auth-ok)
   };
 }
 
@@ -110,6 +111,12 @@ export function createTransferWorker({ onLog } = {}) {
   let sessionStateCb = null;
   onIpc(topics.sessionState, (_e, state) => { if (sessionStateCb) sessionStateCb(state); });
 
+  // SP3 Task 5: the worker reports the device-keypair-VERIFIED peer once on
+  // auth-ok, so main can classify it (fleet vs contact) for the consent
+  // decision (Task 6). Mirrors sessionState's onIpc + callback plumbing.
+  let peerAuthCb = null;
+  onIpc(topics.peerAuth, (_e, obj) => { if (peerAuthCb) peerAuthCb(obj); });
+
   // Diagnostic: the worker renderer periodically reports its transport status
   // (connection/data-channel state, bufferedAmount, message counters). Routed to
   // the app log so a stalled transfer can be diagnosed from a user's logs.
@@ -129,6 +136,7 @@ export function createTransferWorker({ onLog } = {}) {
     },
     channel,
     onSessionState(cb) { sessionStateCb = cb; },
+    onPeerAuth(cb) { peerAuthCb = cb; },
     // Round-trips a getStats() request to the worker renderer's
     // RTCPeerConnection (main has no direct WebRTC handle — the PC lives in
     // the worker renderer). Resolves [] on timeout/teardown rather than

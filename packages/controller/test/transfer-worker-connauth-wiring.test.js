@@ -32,6 +32,18 @@ describe('transfer-worker conn-auth bridge (controller)', () => {
 
   it('the transfer worker handshake authenticates the peer via isTransferPeerKey (fleet OR contact), not the fleet-only isAccountKey', () => {
     const worker = read('../src/transfer-worker/worker.js');
-    expect(worker).toMatch(/isAccountKey:\s*\(pk\)\s*=>\s*window\.farsightConnAuth\.isTransferPeerKey\(pk\)/);
+    expect(worker).toMatch(/isAccountKey:\s*\(pk\)\s*=>\s*\{[\s\S]*?window\.farsightConnAuth\.isTransferPeerKey\(pk\)/);
+  });
+
+  // SP3 Task 5: the worker captures the device-keypair-VERIFIED peer's publicKey
+  // in the isAccountKey closure and reports it to main on auth-ok, so main can
+  // classify the peer (fleet vs contact) for the consent decision (Task 6).
+  it('reports the verified peer to main on auth-ok', () => {
+    const worker = read('../src/transfer-worker/worker.js');
+    expect(worker).toMatch(/reportPeerAuth/);            // worker reports the peer
+    const wrapper = read('../src/transfer-worker.js');
+    expect(wrapper).toMatch(/onPeerAuth/);               // main-side callback exists
+    const preload = read('../src/transfer-worker-preload.cjs');
+    expect(preload).toMatch(/reportPeerAuth/);           // preload bridge exists
   });
 });
