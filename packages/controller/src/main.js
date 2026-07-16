@@ -109,8 +109,13 @@ function getTransferService() {
   return transferService;
 }
 
-ipcMain.handle('transfer:pick-paths', async () => {
-  const r = await dialog.showOpenDialog({ properties: ['openFile', 'multiSelections', 'openDirectory'] });
+ipcMain.handle('transfer:pick-paths', async (_e, mode) => {
+  // Windows and Linux cannot show a single dialog that selects BOTH files and
+  // directories — when 'openFile' and 'openDirectory' are combined there, the OS
+  // silently degrades to a folder-only picker (why the old combined dialog showed
+  // no files). So the UI offers two explicit choices and passes the mode here.
+  const properties = mode === 'folder' ? ['openDirectory'] : ['openFile', 'multiSelections'];
+  const r = await dialog.showOpenDialog({ properties });
   return r.canceled ? [] : r.filePaths;
 });
 

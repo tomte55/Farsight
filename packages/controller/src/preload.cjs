@@ -31,7 +31,7 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   // SP3 file transfer (send path): pick files/folders via the OS dialog, start
   // a send to a target {id,password}, list persisted jobs, best-effort cancel,
   // and subscribe to live progress pushed from main as 'transfer:event'.
-  transferPickPaths: () => ipcRenderer.invoke('transfer:pick-paths'),
+  transferPickPaths: (mode) => ipcRenderer.invoke('transfer:pick-paths', mode),
   transferSend: (input) => ipcRenderer.invoke('transfer:send', input),
   transferList: () => ipcRenderer.invoke('transfer:list'),
   transferCancel: (jobId) => ipcRenderer.invoke('transfer:cancel', jobId),

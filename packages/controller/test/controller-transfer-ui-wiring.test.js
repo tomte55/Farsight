@@ -50,8 +50,15 @@ describe('main.js: SP3 send-path IPC handlers', () => {
     expect(main).toMatch(/mainWindow\.webContents\.send\(['"]transfer:event['"]/);
   });
 
-  test('pick-paths uses an OS dialog with file+multi-select+directory support', () => {
-    expect(main).toMatch(/showOpenDialog\(\{\s*properties:\s*\[[^\]]*openFile[^\]]*multiSelections[^\]]*openDirectory[^\]]*\]/);
+  test('pick-paths offers files (multi-select) OR a folder by mode — never a combined dialog (Windows/Linux cannot show both)', () => {
+    // Files mode: multi-select files. Folder mode: a single directory.
+    expect(main).toMatch(/\['openFile',\s*'multiSelections'\]/);
+    expect(main).toMatch(/\['openDirectory'\]/);
+    // The buggy combined [openFile, multiSelections, openDirectory] dialog — which
+    // silently degrades to folder-only on Windows/Linux — must be gone.
+    expect(main).not.toMatch(/openFile[^\]]*multiSelections[^\]]*openDirectory/);
+    // The mode is threaded from the renderer through the IPC arg.
+    expect(main).toMatch(/ipcMain\.handle\('transfer:pick-paths',\s*async\s*\([^)]*mode/);
   });
 
   test('the legacy pick-file/save-file handlers (interim single-file transfer) are retired', () => {
@@ -68,7 +75,7 @@ describe('preload.cjs: SP3 transfer bridge', () => {
   });
 
   test('transferSend/transferList/transferCancel invoke; onTransferEvent subscribes', () => {
-    expect(preload).toMatch(/ipcRenderer\.invoke\(['"]transfer:pick-paths['"]\)/);
+    expect(preload).toMatch(/ipcRenderer\.invoke\(['"]transfer:pick-paths['"],\s*mode\)/);
     expect(preload).toMatch(/ipcRenderer\.invoke\(['"]transfer:send['"]/);
     expect(preload).toMatch(/ipcRenderer\.invoke\(['"]transfer:list['"]\)/);
     expect(preload).toMatch(/ipcRenderer\.invoke\(['"]transfer:cancel['"]/);
@@ -86,7 +93,9 @@ describe('renderer: Send… entry point + Transfers panel', () => {
     expect(html).toMatch(/<div id="send-panel"/);
     expect(html).toMatch(/<input id="send-host-id" class="input"/);
     expect(html).toMatch(/<input id="send-host-pw" class="input"/);
-    expect(html).toMatch(/<button id="send-choose-btn"/);
+    // Two explicit choices (Windows/Linux can't combine file+folder in one dialog).
+    expect(html).toMatch(/<button id="send-files-btn"/);
+    expect(html).toMatch(/<button id="send-folder-btn"/);
   });
 
   test('index.html has a transfers panel with a job list container', () => {
@@ -94,8 +103,10 @@ describe('renderer: Send… entry point + Transfers panel', () => {
     expect(html).toMatch(/<div id="transfers-list">/);
   });
 
-  test('renderer.js wires the Send… button to transferPickPaths + transferSend', () => {
-    expect(renderer).toMatch(/window\.farsightIpc\.transferPickPaths\(\)/);
+  test('renderer.js wires both send buttons (files/folder) through transferPickPaths(mode) + transferSend', () => {
+    expect(renderer).toMatch(/window\.farsightIpc\.transferPickPaths\(mode\)/);
+    expect(renderer).toMatch(/doSend\(['"]files['"]\)/);
+    expect(renderer).toMatch(/doSend\(['"]folder['"]\)/);
     expect(renderer).toMatch(/window\.farsightIpc\.transferSend\(/);
   });
 

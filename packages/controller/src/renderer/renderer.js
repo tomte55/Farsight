@@ -660,7 +660,8 @@ window.farsightIpc.accountStatus();
 // yet (main.js's consent always declines) — send-only for this phase.
 const sendHostId = document.getElementById('send-host-id');
 const sendHostPw = document.getElementById('send-host-pw');
-const sendBtn = document.getElementById('send-choose-btn');
+const sendFilesBtn = document.getElementById('send-files-btn');
+const sendFolderBtn = document.getElementById('send-folder-btn');
 const sendStatusEl = document.getElementById('send-status');
 const transfersListEl = document.getElementById('transfers-list');
 const transfersEmptyEl = document.getElementById('transfers-empty');
@@ -794,33 +795,38 @@ window.farsightIpc.onTransferEvent((ev) => {
   if (!transfersPanelEl.hidden) renderTransfers();
 });
 
-async function doSend() {
+// mode: 'files' (multi-select files) or 'folder' (one directory). Windows/Linux
+// can't offer both in one dialog, so the panel has a button per mode.
+async function doSend(mode) {
   const targetId = normalizeHostId(sendHostId.value);
   const candidates = passwordCandidates(sendHostPw.value);
   if (!isValidHostId(targetId)) { sendStatusEl.textContent = 'Invalid ID.'; return; }
   if (candidates.length === 0) { sendStatusEl.textContent = 'Enter the host password.'; return; }
-  const paths = await window.farsightIpc.transferPickPaths();
+  const paths = await window.farsightIpc.transferPickPaths(mode);
   if (!paths || paths.length === 0) return; // dialog cancelled — leave the form as-is
-  sendBtn.disabled = true;
+  sendFilesBtn.disabled = true;
+  sendFolderBtn.disabled = true;
   sendStatusEl.textContent = 'Starting…';
   try {
     const res = await window.farsightIpc.transferSend({ target: { id: targetId, password: candidates[0] }, paths });
     if (res && res.jobId) {
       transferJobs.set(res.jobId, {
         jobId: res.jobId, direction: 'send', target: { id: targetId },
-        manifest: res.manifest, state: 'active', createdAt: Date.now(),
+        manifest: res.manifest, state: 'awaiting-approval', createdAt: Date.now(),
       });
-      sendStatusEl.textContent = `Sending to ${targetId}… (see Transfers)`;
+      sendStatusEl.textContent = `Waiting for ${targetId} to accept… (see Transfers)`;
     } else {
       sendStatusEl.textContent = (res && res.error) || 'Could not start the transfer.';
     }
   } catch {
     sendStatusEl.textContent = 'Could not start the transfer.';
   } finally {
-    sendBtn.disabled = false;
+    sendFilesBtn.disabled = false;
+    sendFolderBtn.disabled = false;
   }
 }
-sendBtn.addEventListener('click', doSend);
+sendFilesBtn.addEventListener('click', () => doSend('files'));
+sendFolderBtn.addEventListener('click', () => doSend('folder'));
 
 document.getElementById('menu-send').addEventListener('click', () => { settingsMenu.classList.remove('open'); openSendPanel(); });
 document.getElementById('menu-transfers').addEventListener('click', () => { settingsMenu.classList.remove('open'); openTransfersPanel(); });
