@@ -34,8 +34,37 @@ function preferVideoCodecs(transceiver) {
   } catch { /* leave default negotiation */ }
 }
 
-export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = () => {}, onControl = () => {}, onAuthChannel = () => {} }) {
+// Verbose diagnostic logging (see docs/private/superpowers): never log SDP or
+// candidate strings — states/types/counts only.
+function noopLog() { const n = { debug() {}, info() {}, warn() {}, error() {}, child: () => n }; return n; }
+
+async function logSelectedPair(pc, log) {
+  try {
+    const stats = await pc.getStats();
+    let pair = null;
+    stats.forEach((r) => { if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r; });
+    if (!pair) return;
+    const local = stats.get(pair.localCandidateId);
+    const remote = stats.get(pair.remoteCandidateId);
+    log.info(`selected pair local=${local?.candidateType || '?'} remote=${remote?.candidateType || '?'} proto=${local?.protocol || '?'}`);
+  } catch { /* stats unavailable */ }
+}
+
+export function attachPeerLogging(pc, log) {
+  pc.addEventListener('iceconnectionstatechange', () => log.info(`ice ${pc.iceConnectionState}`));
+  pc.addEventListener('connectionstatechange', () => {
+    const s = pc.connectionState;
+    (s === 'failed' ? log.warn : log.info).call(log, `conn ${s}`);
+    if (s === 'connected') logSelectedPair(pc, log);
+  });
+  pc.addEventListener('signalingstatechange', () => log.debug(`signaling ${pc.signalingState}`));
+  pc.addEventListener('icegatheringstatechange', () => log.debug(`gathering ${pc.iceGatheringState}`));
+  pc.addEventListener('icecandidateerror', (e) => log.warn(`ice candidate error code=${e?.errorCode ?? '?'}`));
+}
+
+export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = () => {}, onControl = () => {}, onAuthChannel = () => {}, log = noopLog() }) {
   const pc = new RTCPeerConnection({ iceServers });
+  attachPeerLogging(pc, log);
   let videoSender = null;
   for (const track of stream.getTracks()) {
     if (track.kind === 'video') { try { track.contentHint = 'detail'; } catch {} }
@@ -50,6 +79,8 @@ export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = 
   let hostControlChannel = null;
   pc.addEventListener('datachannel', (e) => {
     const ch = e.channel;
+    ch.addEventListener('open', () => log.info(`datachannel open label=${ch.label}`));
+    ch.addEventListener('close', () => log.info(`datachannel close label=${ch.label}`));
     if (ch.label === 'auth') {
       // Connect-from-console (SP2 §4.4): surface the E2E keypair-handshake channel
       // so the renderer can authenticate the peer BEFORE showing consent/capturing.
