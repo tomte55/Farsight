@@ -79,6 +79,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // authenticated via the device keypair, not a session password, and are the
   // only tier eligible for presence-driven auto-resume (see transfer-resume.js).
   function tierFor(target) {
+    if (target && target.contact) return 'contact';
     return (target && target.linked) ? 'fleet' : 'adhoc';
   }
 

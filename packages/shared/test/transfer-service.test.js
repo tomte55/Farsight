@@ -166,6 +166,25 @@ test('SP3 P4: an own-fleet (linked) send passes target.linked to openChannel and
   expect(sendRec.tier).toBe('fleet');
 });
 
+test('a contact send records tier:contact and still passes linked:true to openChannel', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const sendStore = memStore();
+  let sendOpenArgs;
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true,
+    openChannel: async (args) => { sendOpenArgs = args; return { channel: deadChannel(), close: async () => {} }; },
+    getFleet: async () => [],
+    rendezvousTimeoutMs: 60,
+  });
+  await svc.startSend({ jobId: 'jc', manifest, sources,
+    target: { id: 'sig-1', deviceId: 'devC', linked: true, contact: true }, sourceRoots: [] })
+    .catch(() => {}); // deadChannel → send fails; we only assert the recorded tier + openChannel args
+  expect(sendOpenArgs.target).toMatchObject({ id: 'sig-1', linked: true, contact: true });
+  const rec = sendStore.saved.find((s) => s.jobId === 'jc');
+  expect(rec.tier).toBe('contact');
+  expect(rec.peer).toEqual({ id: 'sig-1', deviceId: 'devC' });
+});
+
 test('SP3 P4: an own-fleet (linked) receive auto-accepts — no consent prompt (consent callback bypassed)', async () => {
   const srcDir = tmp();
   writeFileSync(join(srcDir, 'a.txt'), Buffer.from('own-fleet payload '.repeat(40)));
