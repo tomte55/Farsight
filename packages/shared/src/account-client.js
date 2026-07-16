@@ -65,5 +65,9 @@ export function createAccountClient({ baseUrl, fetch: fetchImpl } = {}) {
     confirmTotp: ({ accessToken, code }) =>
       request('POST', '/2fa/confirm', { body: { code }, token: accessToken }),
     disableTotp: ({ accessToken }) => request('POST', '/2fa/disable', { body: {}, token: accessToken }),
+    // Verbose diagnostic logging: upload a redaction-safe log bundle (built by
+    // buildDiagnosticsBundle) for support triage.
+    uploadDiagnostics: ({ accessToken, meta, files }) =>
+      request('POST', '/diagnostics', { body: { meta, files }, token: accessToken }),
   };
 }
