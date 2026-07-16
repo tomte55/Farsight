@@ -130,6 +130,18 @@ describe('renderer: Send… entry point + Transfers panel', () => {
     expect(renderer).toMatch(/window\.farsightIpc\.transferCancel\(/);
   });
 
+  test("a send only shows 'Completed' on the delivery ack — it holds at 'finishing' after all bytes are sent", () => {
+    // The sender emits 'all-sent' (bytes on the wire) then 'completed' (receiver
+    // confirmed every file received + hash-verified). The controller must NOT
+    // claim done on 'all-sent' / fraction===1 — only on 'completed'.
+    expect(renderer).toMatch(/ev\.type === 'all-sent'/);
+    expect(renderer).toMatch(/state = 'finishing'/);
+    expect(renderer).toMatch(/ev\.type === 'completed'/);
+    expect(renderer).toMatch(/case 'finishing'/);
+    // No path that flips a send to 'done' merely because the byte fraction hit 1.
+    expect(renderer).not.toMatch(/fraction >= 1 \? 'done'/);
+  });
+
   test("a send shows 'awaiting-approval' until the peer's 'accepted' event — never a fake 'active' at 0", () => {
     // Fresh send starts awaiting approval, not active.
     expect(renderer).toMatch(/state:\s*'awaiting-approval'/);

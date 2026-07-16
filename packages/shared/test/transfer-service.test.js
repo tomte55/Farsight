@@ -54,6 +54,7 @@ test('loopback send -> receive through the service layer lands files byte-identi
   const receiverSvc = createTransferService({
     store: recvStore, transferDir: dest, consent: async () => true,
     openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    receiveCloseGraceMs: 0,
   });
   const senderSvc = createTransferService({
     store: sendStore, transferDir: tmp(), consent: async () => true,
@@ -313,6 +314,7 @@ test('receiver declining consent resolves ok:false with no file written, and set
 
   const receiverSvc = createTransferService({
     store: recvStore, transferDir: dest, consent: async () => false,
+    receiveCloseGraceMs: 0,
     openChannel: async () => ({ channel: sideB, close: async () => {} }),
   });
   const senderSvc = createTransferService({

@@ -36,7 +36,7 @@ function errMessage(err) {
   return (err && err.message) ? err.message : String(err);
 }
 
-export function createTransferService({ store, transferDir, consent, openChannel, onEvent = () => {}, rendezvousTimeoutMs = 30000 }) {
+export function createTransferService({ store, transferDir, consent, openChannel, onEvent = () => {}, rendezvousTimeoutMs = 30000, receiveCloseGraceMs = 2000, delay = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   const queue = createQueue();
   const pendingSends = new Map(); // jobId -> { manifest, sources, target, createdAt, resolve, reject }
   let sendRunning = false;
@@ -217,6 +217,10 @@ export function createTransferService({ store, transferDir, consent, openChannel
       try {
         return await receiver.start();
       } finally {
+        // Grace before tearing down the worker so the receiver's `complete` ack
+        // has time to flush to the sender over the wire — otherwise destroying the
+        // window discards it and the sender waits out its whole completion timeout.
+        if (receiveCloseGraceMs > 0) { try { await delay(receiveCloseGraceMs); } catch { /* ignore */ } }
         try { await close(); } catch { /* ignore close errors */ }
       }
     },

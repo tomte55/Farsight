@@ -21,6 +21,11 @@ export function rejectFrame({ jobId, reason = '' }) { return JSON.stringify({ t:
 export function fileBeginFrame({ jobId, fileId, offset }) { return JSON.stringify({ t: 'file_begin', jobId, fileId, offset }); }
 export function fileEndFrame({ jobId, fileId, hash }) { return JSON.stringify({ t: 'file_end', jobId, fileId, hash }); }
 export function jobDoneFrame({ jobId }) { return JSON.stringify({ t: 'job_done', jobId }); }
+// Receiver -> sender once EVERY file is received, verified and finalized on disk.
+// This is the delivery acknowledgment: the sender must not resolve/close the
+// connection until it arrives, otherwise it tears the channel down while the
+// receiver is still draining buffered data and the tail is lost.
+export function completeFrame({ jobId, ok }) { return JSON.stringify({ t: 'complete', jobId, ok: ok === true }); }
 export function pauseFrame(jobId) { return JSON.stringify({ t: 'pause', jobId }); }
 export function resumeFrame(jobId) { return JSON.stringify({ t: 'resume', jobId }); }
 export function cancelFrame(jobId) { return JSON.stringify({ t: 'cancel', jobId }); }
@@ -53,6 +58,9 @@ export function parseCtrlFrame(str) {
     case 'job_done':
       if (!isStr(o.jobId)) return null;
       return { t: 'job_done', jobId: o.jobId };
+    case 'complete':
+      if (!isStr(o.jobId)) return null;
+      return { t: 'complete', jobId: o.jobId, ok: o.ok === true };
     case 'prompting': case 'pause': case 'resume': case 'cancel':
       if (!isStr(o.jobId)) return null;
       return { t: o.t, jobId: o.jobId };

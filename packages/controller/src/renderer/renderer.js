@@ -734,6 +734,7 @@ function stateLabel(j) {
   switch (j.state) {
     case 'awaiting-approval': return 'Waiting for approval…';
     case 'active': return hasCount ? `Transferring · ${sent} / ${total} files` : 'Transferring…';
+    case 'finishing': return 'Finishing — verifying on host…';
     case 'done': return hasCount ? `Completed · ${total} file${total === 1 ? '' : 's'}` : 'Completed';
     case 'declined': return 'Declined by host';
     case 'canceled': return 'Canceled';
@@ -840,15 +841,24 @@ window.farsightIpc.onTransferEvent((ev) => {
   if (ev.type === 'accepted') {
     // The host approved — ONLY now is the transfer genuinely active.
     existing.state = 'active';
+  } else if (ev.type === 'all-sent') {
+    // All bytes are on the wire, but NOT yet confirmed received+verified. Hold at
+    // "Finishing" until the host's delivery ack ('completed') — do not claim done.
+    if (ev.progress) existing.progress = ev.progress;
+    existing.state = 'finishing';
+  } else if (ev.type === 'completed') {
+    existing.state = 'done'; // both sides agree: all files received and hashes verified
   } else if (ev.type === 'declined') {
     existing.state = 'declined';
   } else if (ev.type === 'error') {
     existing.state = 'error';
     if (ev.reason) existing.error = ev.reason;
   } else if (ev.progress) {
-    // Progress implies the peer accepted (bytes are flowing).
+    // Progress implies the peer accepted (bytes are flowing). Completion is
+    // signaled by 'completed', NOT by fraction hitting 1 (that's "all sent", not
+    // "received") — so never flip to done here.
     existing.progress = ev.progress;
-    existing.state = ev.progress.fraction >= 1 ? 'done' : 'active';
+    if (existing.state !== 'finishing') existing.state = 'active';
   }
   transferJobs.set(ev.jobId, existing);
   if (!transfersPanelEl.hidden) renderTransfers();

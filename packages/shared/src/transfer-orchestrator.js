@@ -4,7 +4,7 @@
 // ft-ctrl and ft-bulk are INDEPENDENTLY ordered — the receiver routes bulk by
 // counting against manifest sizes, and all handlers are serialized. See spec §5/§6.
 import {
-  offerFrame, fileBeginFrame, fileEndFrame, jobDoneFrame, acceptFrame, rejectFrame, promptingFrame,
+  offerFrame, fileBeginFrame, fileEndFrame, jobDoneFrame, acceptFrame, rejectFrame, promptingFrame, completeFrame,
   parseCtrlFrame, TRANSFER_PROTOCOL_VERSION,
 } from './transfer-protocol.js';
 import { buildManifest, skipExisting } from './transfer-manifest.js';
@@ -20,14 +20,24 @@ function serializer(onErr) {
   return (fn) => { chain = chain.then(fn).catch(onErr); return chain; };
 }
 
-export function createSender({ channel, jobId, manifest, sources, chunkSize = 131072, onEvent = () => {} }) {
+export function createSender({
+  channel, jobId, manifest, sources, chunkSize = 131072, onEvent = () => {},
+  // After all bytes + JOB_DONE are on the wire, the sender WAITS for the
+  // receiver's `complete` ack before resolving — so the caller doesn't close the
+  // channel while the receiver is still draining (which loses the tail). This
+  // backstops a lost ack / dead connection so the send can't hang forever.
+  // Generous: the ack normally arrives seconds after the last byte.
+  completionTimeoutMs = 120000, setTimer = setTimeout, clearTimer = clearTimeout,
+}) {
   let job = null;
   let canceled = false;
   let settled = false;
   let resolve, reject;
   const finished = new Promise((res, rej) => { resolve = res; reject = rej; });
-  const resolveOnce = (v) => { if (!settled) { settled = true; resolve(v); } };
-  const fail = (e) => { if (!settled) { settled = true; reject(e); } };
+  let completionTimer = null;
+  const clearCompletion = () => { if (completionTimer) { clearTimer(completionTimer); completionTimer = null; } };
+  const resolveOnce = (v) => { if (!settled) { settled = true; clearCompletion(); resolve(v); } };
+  const fail = (e) => { if (!settled) { settled = true; clearCompletion(); reject(e); } };
   const run = serializer(fail);
 
   async function pump() {
@@ -45,7 +55,14 @@ export function createSender({ channel, jobId, manifest, sources, chunkSize = 13
       onEvent({ type: 'file-sent', fileId: nf.fileId, progress: job.progress() });
     }
     channel.sendCtrl(jobDoneFrame({ jobId }));
-    resolveOnce();
+    // Everything is SENT — but not yet confirmed RECEIVED. Surface 'all-sent' so
+    // the UI can show "Finishing…", and wait for the receiver's `complete` ack
+    // (or the completion timeout) before resolving. Do NOT resolve here.
+    onEvent({ type: 'all-sent', progress: job.progress() });
+    if (!settled && completionTimeoutMs > 0) {
+      completionTimer = setTimer(() => fail(new Error('no_confirmation')), completionTimeoutMs);
+      if (completionTimer && completionTimer.unref) completionTimer.unref();
+    }
   }
 
   channel.onCtrl((str) => run(async () => {
@@ -55,6 +72,13 @@ export function createSender({ channel, jobId, manifest, sources, chunkSize = 13
     // decision. Surface it so the app can cancel the approval timeout (a person
     // deciding must NOT read as "host didn't respond").
     if (f.t === 'prompting') { onEvent({ type: 'prompting' }); return; }
+    // Delivery ack: the receiver has every file on disk, verified. NOW it's safe
+    // to resolve/close. ok=false means a file failed verification on the receiver.
+    if (f.t === 'complete') {
+      if (f.ok) { onEvent({ type: 'completed' }); resolveOnce({ jobId, ok: true }); }
+      else { onEvent({ type: 'error', reason: 'receiver_incomplete' }); fail(new Error('receiver_incomplete')); }
+      return;
+    }
     if (f.t === 'reject') { onEvent({ type: 'declined', reason: f.reason }); fail(new Error(`rejected: ${f.reason}`)); return; }
     if (f.t === 'cancel') { canceled = true; fail(new Error('canceled')); return; }
     // pump() is intentionally NOT awaited here: it must run outside the
@@ -146,6 +170,10 @@ export function createReceiver({
     if (settled) return;
     if (jobDoneSeen && queue.length === 0 && pending.size === 0) {
       await saveRecord('done');
+      // Acknowledge delivery so the SENDER can resolve/close (it waits for this —
+      // without it the sender would tear the channel down mid-drain). Best effort:
+      // if the ack is lost the sender falls back to its completion timeout.
+      try { channel.sendCtrl(completeFrame({ jobId, ok })); } catch { /* best effort */ }
       resolveOnce({ jobId, ok });
     }
   }

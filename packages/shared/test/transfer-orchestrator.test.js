@@ -5,7 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createSender } from '../src/transfer-orchestrator.js';
-import { parseCtrlFrame, acceptFrame, rejectFrame } from '@farsight/shared/transfer-protocol';
+import { parseCtrlFrame, acceptFrame, rejectFrame, completeFrame } from '@farsight/shared/transfer-protocol';
+
+// Poll until a predicate holds (the sender's pump runs async after accept).
+async function until(pred, ms = 2000) {
+  const t0 = Date.now();
+  while (!pred()) { if (Date.now() - t0 > ms) throw new Error('until: timed out'); await new Promise((r) => setTimeout(r, 1)); }
+}
 
 const dirs = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), 'ftorc-')); dirs.push(d); return d; }
@@ -40,6 +46,8 @@ test('createSender offers, then streams a file and finishes on accept', async ()
   expect(ch.ctrlOut[0].jobId).toBe('j1');
   // Accept everything from 0.
   await ch.feedCtrl(acceptFrame({ jobId: 'j1', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await until(() => ch.ctrlOut.some((f) => f.t === 'job_done')); // pump finished sending
+  await ch.feedCtrl(completeFrame({ jobId: 'j1', ok: true }));    // receiver acks delivery
   await finished;
 
   // It emitted FILE_BEGIN, bulk bytes, FILE_END(hash), JOB_DONE.
@@ -65,6 +73,8 @@ test('createSender emits an "accepted" lifecycle event on accept, before any byt
   expect(events.some((e) => e.type === 'accepted')).toBe(false);
 
   await ch.feedCtrl(acceptFrame({ jobId: 'j1', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await until(() => ch.ctrlOut.some((f) => f.t === 'job_done'));
+  await ch.feedCtrl(completeFrame({ jobId: 'j1', ok: true }));
   await finished;
 
   const iAcc = events.findIndex((e) => e.type === 'accepted');
@@ -99,9 +109,65 @@ test('createSender skips a file the receiver already has fully', async () => {
   const sender = createSender({ channel: ch, jobId: 'j2', manifest, sources: new Map([[0, f]]), chunkSize: 128 });
   const finished = sender.start();
   await ch.feedCtrl(acceptFrame({ jobId: 'j2', resume: [{ fileId: 0, haveBytes: 500 }] })); // already complete
+  await until(() => ch.ctrlOut.some((f) => f.t === 'job_done'));
+  await ch.feedCtrl(completeFrame({ jobId: 'j2', ok: true }));
   await finished;
   expect(ch.bulkOut.length).toBe(0); // nothing streamed
   expect(ch.ctrlOut.map((f) => f.t)).toEqual(['offer', 'job_done']);
+});
+
+test('createSender waits for the receiver\'s complete ack before resolving (delivery, not just send)', async () => {
+  const root = tmp();
+  const f = join(root, 'a.bin');
+  writeFileSync(f, Buffer.from('data'.repeat(50)));
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 200, mtime: 5 }], totalBytes: 200, totalFiles: 1 };
+  const events = [];
+  const ch = fakeChannel();
+  const sender = createSender({ channel: ch, jobId: 'w1', manifest, sources: new Map([[0, f]]), chunkSize: 64, onEvent: (ev) => events.push(ev) });
+  let resolved = false;
+  const finished = sender.start().then(() => { resolved = true; });
+  await ch.feedCtrl(acceptFrame({ jobId: 'w1', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await until(() => ch.ctrlOut.some((f) => f.t === 'job_done'));
+  await new Promise((r) => setTimeout(r, 20));
+  // All bytes are SENT (all-sent emitted) but NOT yet acked — must NOT resolve.
+  expect(events.some((e) => e.type === 'all-sent')).toBe(true);
+  expect(resolved).toBe(false);
+  // The receiver confirms every file received + hash-verified -> resolve.
+  await ch.feedCtrl(completeFrame({ jobId: 'w1', ok: true }));
+  await finished;
+  expect(resolved).toBe(true);
+  expect(events.some((e) => e.type === 'completed')).toBe(true);
+});
+
+test('createSender fails when the receiver reports incomplete (complete ok:false)', async () => {
+  const root = tmp();
+  const f = join(root, 'a.bin');
+  writeFileSync(f, Buffer.from('x'.repeat(80)));
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 80, mtime: 5 }], totalBytes: 80, totalFiles: 1 };
+  const ch = fakeChannel();
+  const sender = createSender({ channel: ch, jobId: 'w2', manifest, sources: new Map([[0, f]]), chunkSize: 64 });
+  const finished = sender.start();
+  await ch.feedCtrl(acceptFrame({ jobId: 'w2', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await until(() => ch.ctrlOut.some((f) => f.t === 'job_done'));
+  await ch.feedCtrl(completeFrame({ jobId: 'w2', ok: false }));
+  await expect(finished).rejects.toThrow(/receiver_incomplete/);
+});
+
+test('createSender fails with no_confirmation if the complete ack never arrives (completion timeout backstop)', async () => {
+  const root = tmp();
+  const f = join(root, 'a.bin');
+  writeFileSync(f, Buffer.from('y'.repeat(60)));
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 60, mtime: 5 }], totalBytes: 60, totalFiles: 1 };
+  let fire = null;
+  const setTimer = (fn) => { fire = fn; return { unref() {} }; };
+  const ch = fakeChannel();
+  const sender = createSender({ channel: ch, jobId: 'w3', manifest, sources: new Map([[0, f]]), chunkSize: 64, completionTimeoutMs: 100, setTimer, clearTimer: () => {} });
+  const finished = sender.start();
+  await ch.feedCtrl(acceptFrame({ jobId: 'w3', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await until(() => ch.ctrlOut.some((f) => f.t === 'job_done'));
+  await until(() => typeof fire === 'function'); // completion backstop timer armed
+  fire(); // the ack never came
+  await expect(finished).rejects.toThrow(/no_confirmation/);
 });
 
 import { createReceiver } from '../src/transfer-orchestrator.js';
