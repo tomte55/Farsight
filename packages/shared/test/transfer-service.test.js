@@ -117,6 +117,39 @@ test('SP3 P4: an own-fleet (linked) send passes target.linked to openChannel and
   expect(sendRec.tier).toBe('fleet');
 });
 
+test('SP3 P4: an own-fleet (linked) receive auto-accepts — no consent prompt (consent callback bypassed)', async () => {
+  const srcDir = tmp();
+  writeFileSync(join(srcDir, 'a.txt'), Buffer.from('own-fleet payload '.repeat(40)));
+  const { entries, sources } = await walkSource([{ path: srcDir }]);
+  const manifest = buildManifestReal(entries);
+  const dest = tmp();
+  const { sideA, sideB } = loopback();
+  let consentCalled = false;
+
+  const receiverSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: dest,
+    // If linked auto-accept works, this decliner must NEVER be consulted.
+    consent: async () => { consentCalled = true; return false; },
+    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    receiveCloseGraceMs: 0,
+  });
+  const senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+  });
+
+  const recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 'own', linked: true } });
+  const sendResult = await senderSvc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'dev', linked: true } });
+  const recvResult = await recvPromise;
+
+  expect(sendResult.ok).toBe(true);
+  expect(recvResult.ok).toBe(true);
+  expect(consentCalled).toBe(false); // linked → no prompt
+  for (const e of manifest.entries) {
+    expect(readFileSync(join(dest, ...e.path.split('/')))).toEqual(readFileSync(sources.get(e.fileId)));
+  }
+});
+
 test('SP3 P4: startReceive threads the own-fleet linked flag into openChannel', async () => {
   let recvOpenArgs = null;
   const svc = createTransferService({

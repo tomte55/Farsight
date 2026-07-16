@@ -222,8 +222,14 @@ export function createTransferService({ store, transferDir, consent, openChannel
       const { channel, close } = await openChannel({ role: 'attach', sessionId, linked });
       let currentJobId = null;
       const tapped = tapJobId(channel, (id) => { currentJobId = id; });
+      // SP3 Phase 4: an own-fleet (linked) transfer is auto-accepted — logging into
+      // your account on this machine is the standing consent, exactly as for
+      // own-fleet unattended control (2026-07-15 decision). The device-keypair
+      // handshake already proved the peer is your own device before any OFFER; a
+      // per-transfer prompt would defeat the point. Ad-hoc still prompts.
+      const receiveConsent = linked ? async () => true : consent;
       const receiver = createReceiver({
-        channel: tapped, destRoot: transferDir, store, consent,
+        channel: tapped, destRoot: transferDir, store, consent: receiveConsent,
         onEvent: (ev) => emit(currentJobId, 'recv', ev),
       });
       try {
