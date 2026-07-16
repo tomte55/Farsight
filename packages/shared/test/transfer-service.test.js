@@ -196,9 +196,12 @@ test('SP3 P4: an own-fleet (linked) receive auto-accepts — no consent prompt (
 
   const receiverSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: dest,
-    // If linked auto-accept works, this decliner must NEVER be consulted.
+    // If fleet auto-accept works, this decliner must NEVER be consulted.
     consent: async () => { consentCalled = true; return false; },
-    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    // SP3 Task 6: auto-accept is driven by peerAuth's resolved tier, not the
+    // blanket `linked` flag — model the handshake having verified this peer
+    // as an own-fleet device.
+    openChannel: async () => ({ channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'fleet' }) }),
     receiveCloseGraceMs: 0,
   });
   const senderSvc = createTransferService({
@@ -216,6 +219,46 @@ test('SP3 P4: an own-fleet (linked) receive auto-accepts — no consent prompt (
   for (const e of manifest.entries) {
     expect(readFileSync(join(dest, ...e.path.split('/')))).toEqual(readFileSync(sources.get(e.fileId)));
   }
+});
+
+test('SP3 P5 Task 6: consent branches on the verified peer tier — fleet auto-accepts, contact and ad-hoc prompt', async () => {
+  // Task 6: openChannel's peerAuth resolves the device-keypair-verified peer's
+  // tier ('fleet' | 'contact' | null). startReceive must consult it directly —
+  // not the blanket `linked` flag — so a contact (or an unverified ad-hoc peer)
+  // is always prompted, and only my own device is auto-accepted.
+  async function runWithTier(tier) {
+    const { manifest, sources } = await oneFileSource();
+    const dest = tmp();
+    const { sideA, sideB } = loopback();
+    let consentCalled = false;
+
+    const receiverSvc = createTransferService({
+      store: createJobsStore({ dir: tmp() }), transferDir: dest,
+      consent: async () => { consentCalled = true; return true; },
+      openChannel: async () => ({ channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier }) }),
+      receiveCloseGraceMs: 0,
+    });
+    const senderSvc = createTransferService({
+      store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+      openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    });
+
+    // linked:true for every case (a contact can still ride the own-fleet-only
+    // linked rendezvous transport) — the OLD blanket `linked ? true : consent`
+    // would wrongly auto-accept the contact/null cases too; only the peerAuth
+    // tier must gate consent.
+    const recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's', linked: true } });
+    const sendResult = await senderSvc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'dev', linked: true } });
+    const recvResult = await recvPromise;
+
+    expect(sendResult.ok).toBe(true);
+    expect(recvResult.ok).toBe(true);
+    return consentCalled;
+  }
+
+  expect(await runWithTier('fleet')).toBe(false); // own-fleet → auto-accepted, no prompt
+  expect(await runWithTier('contact')).toBe(true); // contact → prompted
+  expect(await runWithTier(null)).toBe(true); // ad-hoc / unverified → prompted
 });
 
 test('SP3 P4: the resume watcher re-walks sourceRoots and re-sends an interrupted own-fleet job to completion', async () => {

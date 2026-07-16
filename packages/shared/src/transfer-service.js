@@ -246,15 +246,22 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // run the host-role device-keypair handshake and fail closed if it doesn't
       // pass — the signaling server relays `linked` in TRANSFER_REQUEST.
       const linked = (rendezvous && typeof rendezvous === 'object') ? !!rendezvous.linked : false;
-      const { channel, close } = await openChannel({ role: 'attach', sessionId, linked });
+      const { channel, close, peerAuth } = await openChannel({ role: 'attach', sessionId, linked });
       let currentJobId = null;
       const tapped = tapJobId(channel, (id) => { currentJobId = id; });
-      // SP3 Phase 4: an own-fleet (linked) transfer is auto-accepted — logging into
+      // SP3 Phase 5 Task 6: an own-fleet transfer is auto-accepted — logging into
       // your account on this machine is the standing consent, exactly as for
-      // own-fleet unattended control (2026-07-15 decision). The device-keypair
-      // handshake already proved the peer is your own device before any OFFER; a
-      // per-transfer prompt would defeat the point. Ad-hoc still prompts.
-      const receiveConsent = linked ? async () => true : consent;
+      // own-fleet unattended control (2026-07-15 decision). A contact — and any
+      // ad-hoc/unverified peer — always PROMPTs. Classification comes from the
+      // device-keypair handshake's verified peer key (openChannel's `peerAuth`,
+      // resolved by main via classifyPublicKey), NOT the blanket `linked` flag —
+      // `linked` only says the rendezvous ran the handshake, not who it verified.
+      const receiveConsent = async ({ jobId, manifest }) => {
+        let tier = null;
+        try { tier = peerAuth ? (await peerAuth).tier : null; } catch { tier = null; }
+        if (tier === 'fleet') return true;
+        return consent({ jobId, manifest });
+      };
       const receiver = createReceiver({
         channel: tapped, destRoot: transferDir, store, consent: receiveConsent,
         onEvent: (ev) => emit(currentJobId, 'recv', ev),

@@ -123,6 +123,11 @@ function receivedFilesDir() {
 // correlation id for the renderer's accept/reject round-trip, so the prompt,
 // the IPC round-trip, and the persisted jobs-store record all agree on one id.
 const pendingConsent = new Map(); // jobId -> resolve(boolean)
+// SP3 Phase 5 Task 6: the most recently classified transfer peer ({tier,
+// publicKey}), set by openChannel's onPeerAuth callback just before a consent
+// prompt would be shown. Not yet threaded into the consent-request payload
+// (optional sender-identity enrichment, deferred) — reserved for that.
+let lastConsentSender = null;
 function requestReceiveConsent({ jobId, manifest }) {
   log?.child('transfer').info(`consent prompt shown job=${jobId} files=${manifest?.totalFiles} bytes=${manifest?.totalBytes}`);
   return new Promise((resolve) => {
@@ -160,6 +165,20 @@ function getTransferService() {
       // calls this as { role, target, sessionId }.
       openChannel: async ({ role, target, sessionId, linked }) => {
         const worker = createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)) });
+        // SP3 Phase 5 Task 6: resolve the device-keypair-VERIFIED peer's tier
+        // (fleet|contact|null) from the handshake, for startReceive's consent
+        // decision. A non-linked receive never runs the handshake — resolve
+        // null (prompt) immediately rather than waiting on a callback that'll
+        // never fire.
+        let resolvePeerAuth;
+        const peerAuth = new Promise((res) => { resolvePeerAuth = res; });
+        if (!linked) resolvePeerAuth({ tier: null });
+        worker.onPeerAuth(async ({ publicKey }) => {
+          let tier = null;
+          try { tier = await getAccountService().classifyPublicKey(publicKey); } catch { tier = null; }
+          lastConsentSender = { tier, publicKey };
+          resolvePeerAuth({ tier });
+        });
         const stored = readStoredConfig();
         const signalingUrl = resolveSignalingUrl({
           envUrl: process.env.FARSIGHT_SIGNALING_URL,
@@ -179,7 +198,7 @@ function getTransferService() {
           // host-role device-keypair handshake and fail closed if it doesn't pass.
           worker.startRendezvous({ role: 'attach', signalingUrl, sessionId, linked: !!linked, version: app.getVersion() });
         }
-        return { channel: worker.channel, close: async () => worker.close() };
+        return { channel: worker.channel, close: async () => worker.close(), peerAuth };
       },
       onEvent: (ev) => {
         const prog = ev.progress ? ` files=${ev.progress.filesDone ?? ev.progress.filesSent}/${ev.progress.filesTotal}` : '';
