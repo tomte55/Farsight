@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createSender } from '../src/transfer-orchestrator.js';
-import { parseCtrlFrame, acceptFrame } from '@farsight/shared/transfer-protocol';
+import { parseCtrlFrame, acceptFrame, rejectFrame } from '@farsight/shared/transfer-protocol';
 
 const dirs = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), 'ftorc-')); dirs.push(d); return d; }
@@ -48,6 +48,45 @@ test('createSender offers, then streams a file and finishes on accept', async ()
   expect(Buffer.concat(ch.bulkOut)).toEqual(data);
   const end = ch.ctrlOut.find((f) => f.t === 'file_end');
   expect(end.hash).toBe(createHash('sha256').update(data).digest('hex'));
+});
+
+test('createSender emits an "accepted" lifecycle event on accept, before any bytes — so the UI leaves "waiting for approval" only when the peer really accepts', async () => {
+  const root = tmp();
+  const f = join(root, 'a.bin');
+  const data = Buffer.from('payload'.repeat(30));
+  writeFileSync(f, data);
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: data.length, mtime: 5 }], totalBytes: data.length, totalFiles: 1 };
+  const events = [];
+  const ch = fakeChannel();
+  const sender = createSender({ channel: ch, jobId: 'j1', manifest, sources: new Map([[0, f]]), chunkSize: 64, onEvent: (ev) => events.push(ev) });
+  const finished = sender.start();
+
+  // The OFFER is out but the peer hasn't accepted: NO 'accepted' event yet.
+  expect(events.some((e) => e.type === 'accepted')).toBe(false);
+
+  await ch.feedCtrl(acceptFrame({ jobId: 'j1', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await finished;
+
+  const iAcc = events.findIndex((e) => e.type === 'accepted');
+  const iSent = events.findIndex((e) => e.type === 'file-sent');
+  expect(iAcc).toBeGreaterThanOrEqual(0);           // accepted was emitted
+  expect(iAcc).toBeLessThan(iSent);                 // and strictly before the first file-sent
+});
+
+test('createSender emits a "declined" event (and rejects) when the receiver rejects the offer', async () => {
+  const root = tmp();
+  const f = join(root, 'a.bin');
+  writeFileSync(f, Buffer.from('x'));
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 1, mtime: 5 }], totalBytes: 1, totalFiles: 1 };
+  const events = [];
+  const ch = fakeChannel();
+  const sender = createSender({ channel: ch, jobId: 'j1', manifest, sources: new Map([[0, f]]), onEvent: (ev) => events.push(ev) });
+  const finished = sender.start();
+  await ch.feedCtrl(rejectFrame({ jobId: 'j1', reason: 'declined' }));
+  await expect(finished).rejects.toThrow(/rejected/);
+  const declined = events.find((e) => e.type === 'declined');
+  expect(declined).toBeTruthy();
+  expect(declined.reason).toBe('declined');
 });
 
 test('createSender skips a file the receiver already has fully', async () => {

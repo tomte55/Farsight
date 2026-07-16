@@ -51,12 +51,15 @@ export function createSender({ channel, jobId, manifest, sources, chunkSize = 13
   channel.onCtrl((str) => run(async () => {
     const f = parseCtrlFrame(str);
     if (!f || f.jobId !== jobId) return;
-    if (f.t === 'reject') { fail(new Error(`rejected: ${f.reason}`)); return; }
+    if (f.t === 'reject') { onEvent({ type: 'declined', reason: f.reason }); fail(new Error(`rejected: ${f.reason}`)); return; }
     if (f.t === 'cancel') { canceled = true; fail(new Error('canceled')); return; }
     // pump() is intentionally NOT awaited here: it must run outside the
     // serializer chain, otherwise a later `cancel` frame would queue behind
     // the entire (possibly long-running) pump and could never abort it.
-    if (f.t === 'accept' && !job) { job = createSendJob({ manifest, resume: f.resume }); pump().catch(fail); }
+    // 'accepted' is emitted the instant the peer approves — BEFORE any bytes —
+    // so the sender UI leaves "waiting for approval" only on a real accept, not
+    // when the job is merely queued.
+    if (f.t === 'accept' && !job) { onEvent({ type: 'accepted' }); job = createSendJob({ manifest, resume: f.resume }); pump().catch(fail); }
   }));
 
   return {

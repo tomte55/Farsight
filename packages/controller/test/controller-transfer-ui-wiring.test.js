@@ -123,4 +123,16 @@ describe('renderer: Send… entry point + Transfers panel', () => {
   test('renderer.js wires a per-job cancel button to transferCancel', () => {
     expect(renderer).toMatch(/window\.farsightIpc\.transferCancel\(/);
   });
+
+  test("a send shows 'awaiting-approval' until the peer's 'accepted' event — never a fake 'active' at 0", () => {
+    // Fresh send starts awaiting approval, not active.
+    expect(renderer).toMatch(/state:\s*'awaiting-approval'/);
+    // Only the 'accepted' lifecycle event flips it to active.
+    expect(renderer).toMatch(/ev\.type === 'accepted'/);
+    // The waiting state has a human label.
+    expect(renderer).toMatch(/'awaiting-approval':\s*return 'Waiting for approval/);
+    // Declined/error are handled as terminal outcomes.
+    expect(renderer).toMatch(/ev\.type === 'declined'/);
+    expect(renderer).toMatch(/case 'declined'/);
+  });
 });

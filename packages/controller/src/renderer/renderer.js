@@ -707,6 +707,22 @@ function fmtCount(manifest) {
   return `${n} file${n === 1 ? '' : 's'}`;
 }
 
+// Human-readable status. 'awaiting-approval' is the crucial one: a send sits
+// here — NOT "active" — until the host actually accepts (the sender's 'accepted'
+// lifecycle event). Terminal states carry any error/decline reason.
+function stateLabel(j) {
+  switch (j.state) {
+    case 'awaiting-approval': return 'Waiting for approval…';
+    case 'active': return 'Transferring…';
+    case 'done': return 'Completed';
+    case 'declined': return 'Declined by host';
+    case 'canceled': return 'Canceled';
+    case 'error': return j.error ? `Failed — ${j.error}` : 'Failed';
+    default: return j.state || 'Transferring…';
+  }
+}
+const TERMINAL_STATES = ['done', 'canceled', 'error', 'declined'];
+
 function jobRow(j) {
   const row = document.createElement('div');
   row.className = 'host-row xfer-row';
@@ -729,13 +745,13 @@ function jobRow(j) {
 
   const meta = document.createElement('div');
   meta.className = 'host-meta';
-  meta.textContent = j.state || 'active';
+  meta.textContent = stateLabel(j);
 
   main.append(title, barWrap, meta);
 
   const right = document.createElement('div');
   right.className = 'host-right';
-  const active = !['done', 'canceled', 'error'].includes(j.state);
+  const active = !TERMINAL_STATES.includes(j.state);
   if (active) {
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'btn btn-ghost';
@@ -770,9 +786,11 @@ async function refreshTransfersList() {
       jobId: r.jobId,
       direction: r.dir === 'recv' ? 'recv' : 'send',
       manifest: existing.manifest || r.manifest,
-      // Prefer this session's live-tracked state over the persisted one while
-      // a send is actively running; otherwise trust the store's jobState.
-      state: existing.state === 'active' ? existing.state : (r.jobState || existing.state),
+      // Prefer this session's live-tracked state while a send is still in
+      // flight (waiting for approval or actively transferring); otherwise trust
+      // the store's jobState. (The store has no 'awaiting-approval'/'declined'
+      // — those are live-only; a declined send persists as 'error'.)
+      state: ['active', 'awaiting-approval'].includes(existing.state) ? existing.state : (r.jobState || existing.state),
       createdAt: r.createdAt || existing.createdAt,
     });
   }
@@ -787,10 +805,22 @@ async function refreshTransfersList() {
 // jobState read is the fallback source of truth for terminal states.
 window.farsightIpc.onTransferEvent((ev) => {
   if (!ev || typeof ev.jobId !== 'string') return;
-  const existing = transferJobs.get(ev.jobId) || { jobId: ev.jobId, direction: ev.direction, createdAt: Date.now() };
+  const existing = transferJobs.get(ev.jobId) || { jobId: ev.jobId, direction: ev.direction, state: 'awaiting-approval', createdAt: Date.now() };
   existing.direction = ev.direction || existing.direction;
-  if (ev.progress) existing.progress = ev.progress;
-  existing.state = (existing.progress && existing.progress.fraction >= 1) ? 'done' : 'active';
+  if (TERMINAL_STATES.includes(existing.state)) { transferJobs.set(ev.jobId, existing); return; } // don't resurrect a finished job
+  if (ev.type === 'accepted') {
+    // The host approved — ONLY now is the transfer genuinely active.
+    existing.state = 'active';
+  } else if (ev.type === 'declined') {
+    existing.state = 'declined';
+  } else if (ev.type === 'error') {
+    existing.state = 'error';
+    if (ev.reason) existing.error = ev.reason;
+  } else if (ev.progress) {
+    // Progress implies the peer accepted (bytes are flowing).
+    existing.progress = ev.progress;
+    existing.state = ev.progress.fraction >= 1 ? 'done' : 'active';
+  }
   transferJobs.set(ev.jobId, existing);
   if (!transfersPanelEl.hidden) renderTransfers();
 });
