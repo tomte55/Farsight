@@ -652,6 +652,15 @@ function hostRow(d) {
     btn.textContent = 'Connect';
     btn.onclick = () => { closeFleet(); connectTo({ targetId: d.signalingId, candidates: [], linked: true }); };
     right.appendChild(btn);
+
+    // SP3 Phase 4: password-free "Send…" to an own-fleet device. Same
+    // device-keypair handshake as Connect authenticates the transfer end-to-end
+    // (no session password); files are pushed with the recipient's consent.
+    const sendBtn = document.createElement('button');
+    sendBtn.className = 'btn btn-ghost host-send';
+    sendBtn.textContent = 'Send…';
+    sendBtn.onclick = () => sendToFleetDevice(d, sendBtn);
+    right.appendChild(sendBtn);
   }
 
   row.append(dot, main, right);
@@ -933,6 +942,37 @@ async function doSend(mode) {
 }
 sendFilesBtn.addEventListener('click', () => doSend('files'));
 sendFolderBtn.addEventListener('click', () => doSend('folder'));
+
+// SP3 Phase 4: initiate a password-free own-fleet ("linked") transfer to a
+// console device. Picks files (multi-select), starts a linked send (the worker
+// authenticates via the device keypair — no session password), and drops the
+// user into the Transfers panel to watch progress. `d.signalingId` is where the
+// device is reachable; `d.id` is its stable deviceId (threaded for future
+// presence-driven auto-resume record matching).
+async function sendToFleetDevice(d, btn) {
+  const paths = await window.farsightIpc.transferPickPaths('files');
+  if (!paths || paths.length === 0) return; // dialog cancelled
+  if (btn) btn.disabled = true;
+  try {
+    const res = await window.farsightIpc.transferSend({
+      target: { id: d.signalingId, deviceId: d.id, linked: true }, paths,
+    });
+    closeFleet();
+    if (res && res.jobId) {
+      transferJobs.set(res.jobId, {
+        jobId: res.jobId, direction: 'send', target: { id: d.name || d.signalingId },
+        manifest: res.manifest, state: 'awaiting-approval', createdAt: Date.now(),
+      });
+      openTransfersPanel();
+    } else {
+      setMsg(fleetError, (res && res.error) || 'Could not start the transfer.');
+    }
+  } catch {
+    setMsg(fleetError, 'Could not start the transfer.');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 
 document.getElementById('menu-send').addEventListener('click', () => { settingsMenu.classList.remove('open'); openSendPanel(); });
 document.getElementById('menu-transfers').addEventListener('click', () => { settingsMenu.classList.remove('open'); openTransfersPanel(); });

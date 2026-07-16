@@ -387,7 +387,7 @@ function startSignaling(signalingUrl) {
     // alongside (or without) an active remote-control session. main attaches a
     // dedicated transfer worker by sessionId and round-trips consent itself
     // (see onTransferConsent below); nothing here blocks on that.
-    [MSG.TRANSFER_REQUEST]: (m) => { window.farsightIpc.transferIncoming({ sessionId: m.sessionId }); },
+    [MSG.TRANSFER_REQUEST]: (m) => { window.farsightIpc.transferIncoming({ sessionId: m.sessionId, linked: !!m.linked }); },
   }, { password: sessionPassword, version: appVersion, acceptsLinked: true, log: clog.child('signaling') });
 }
 

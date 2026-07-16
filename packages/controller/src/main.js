@@ -86,7 +86,7 @@ function getTransferService() {
       // the host's openChannel: transfer-service always calls this as
       // { role, target, sessionId } — 'initiate' carries target (sessionId
       // undefined), 'attach' carries sessionId (target undefined).
-      openChannel: async ({ role, target, sessionId }) => {
+      openChannel: async ({ role, target, sessionId, linked }) => {
         const worker = createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)) });
         const stored = readStoredConfig();
         const signalingUrl = resolveSignalingUrl({
@@ -109,10 +109,13 @@ function getTransferService() {
             signalingUrl,
             targetId: target?.id,
             password: target?.password,
+            // SP3 Phase 4: own-fleet send — pair password-free and authenticate
+            // end-to-end via the device keypair (no session password).
+            linked: !!target?.linked,
             version: app.getVersion(),
           });
         } else {
-          worker.startRendezvous({ role: 'attach', signalingUrl, sessionId, version: app.getVersion() });
+          worker.startRendezvous({ role: 'attach', signalingUrl, sessionId, linked: !!linked, version: app.getVersion() });
         }
         return {
           channel: worker.channel,

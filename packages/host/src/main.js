@@ -153,7 +153,7 @@ function getTransferService() {
       // 'attach' role. Canonical rendezvous shape (SP3 coherence contract #1),
       // identical to the controller's openChannel: transfer-service always
       // calls this as { role, target, sessionId }.
-      openChannel: async ({ role, target, sessionId }) => {
+      openChannel: async ({ role, target, sessionId, linked }) => {
         const worker = createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)) });
         const stored = readStoredConfig();
         const signalingUrl = resolveSignalingUrl({
@@ -166,10 +166,13 @@ function getTransferService() {
             signalingUrl,
             targetId: target?.id,
             password: target?.password,
+            linked: !!target?.linked,
             version: app.getVersion(),
           });
         } else {
-          worker.startRendezvous({ role: 'attach', signalingUrl, sessionId, version: app.getVersion() });
+          // SP3 Phase 4: an own-fleet (linked) transfer request → run the
+          // host-role device-keypair handshake and fail closed if it doesn't pass.
+          worker.startRendezvous({ role: 'attach', signalingUrl, sessionId, linked: !!linked, version: app.getVersion() });
         }
         return { channel: worker.channel, close: async () => worker.close() };
       },
@@ -191,8 +194,11 @@ function getTransferService() {
 ipcMain.handle('transfer:incoming', async (_e, input) => {
   const sessionId = input && input.sessionId;
   if (typeof sessionId !== 'string' || sessionId.length === 0) return { error: 'invalid_request' };
-  log?.child('transfer').info(`incoming transfer_request session=${sessionId}`);
-  getTransferService().startReceive({ rendezvous: { sessionId } })
+  // SP3 Phase 4: the signaling server relays `linked` in TRANSFER_REQUEST for an
+  // own-fleet transfer; carry it through so the attacher enforces the handshake.
+  const linked = !!(input && input.linked);
+  log?.child('transfer').info(`incoming transfer_request session=${sessionId}${linked ? ' linked' : ''}`);
+  getTransferService().startReceive({ rendezvous: { sessionId, linked } })
     .catch((err) => log?.child('transfer').warn(`receive failed: ${err?.message || err}`));
   return { ok: true };
 });

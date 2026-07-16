@@ -41,10 +41,11 @@ describe('main.js: transfer service construction (receive path)', () => {
 
   test('openChannel attaches a transfer worker by sessionId, not by initiating', () => {
     // Canonical rendezvous shape (SP3 coherence contract #1), identical to the
-    // controller: openChannel is always called as { role, target, sessionId }.
-    expect(main).toMatch(/openChannel:\s*async\s*\(\{\s*role,\s*target,\s*sessionId\s*\}\)/);
+    // controller: openChannel is { role, target, sessionId, linked } — `linked`
+    // added in SP3 Phase 4 so the attacher enforces the own-fleet handshake.
+    expect(main).toMatch(/openChannel:\s*async\s*\(\{\s*role,\s*target,\s*sessionId,\s*linked\s*\}\)/);
     expect(main).toMatch(/role:\s*'attach'/);
-    expect(main).toMatch(/role:\s*'attach',\s*signalingUrl,\s*sessionId,\s*version/);
+    expect(main).toMatch(/role:\s*'attach',\s*signalingUrl,\s*sessionId,\s*linked:[^,]*,\s*version/);
   });
 
   test('progress is forwarded to the renderer via transfer:event', () => {
@@ -55,7 +56,8 @@ describe('main.js: transfer service construction (receive path)', () => {
 describe('main.js: transfer:incoming / transfer:list IPC', () => {
   test('registers transfer:incoming, validating sessionId before starting a receive', () => {
     expect(main).toContain(`'transfer:incoming'`);
-    expect(main).toMatch(/startReceive\(\{\s*rendezvous:\s*\{\s*sessionId\s*\}\s*\}\)/);
+    // SP3 Phase 4: carries the own-fleet `linked` flag from TRANSFER_REQUEST.
+    expect(main).toMatch(/startReceive\(\{\s*rendezvous:\s*\{\s*sessionId,\s*linked\s*\}\s*\}\)/);
   });
 
   test('registers transfer:list', () => {
@@ -101,8 +103,8 @@ describe('renderer.js: signaling handler forwards TRANSFER_REQUEST to main', () 
     expect(renderer).toMatch(/\[MSG\.TRANSFER_REQUEST\]:/);
   });
 
-  test('the handler calls transferIncoming with the relayed sessionId', () => {
-    expect(renderer).toMatch(/transferIncoming\(\{\s*sessionId:\s*m\.sessionId\s*\}\)/);
+  test('the handler calls transferIncoming with the relayed sessionId and linked flag', () => {
+    expect(renderer).toMatch(/transferIncoming\(\{\s*sessionId:\s*m\.sessionId,\s*linked:[^}]*\}\)/);
   });
 });
 

@@ -86,6 +86,51 @@ test('loopback send -> receive through the service layer lands files byte-identi
   expect(sendRec.peer).toEqual({ id: 'device-t1' });
 });
 
+test('SP3 P4: an own-fleet (linked) send passes target.linked to openChannel and records tier:fleet', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const dest = tmp();
+  const recvStore = createJobsStore({ dir: tmp() });
+  const sendStore = createJobsStore({ dir: tmp() });
+  const { sideA, sideB } = loopback();
+  let sendOpenArgs = null;
+
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: dest, consent: async () => true,
+    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    receiveCloseGraceMs: 0,
+  });
+  const senderSvc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true,
+    openChannel: async (args) => { sendOpenArgs = args; return { channel: sideA, close: async () => {} }; },
+  });
+
+  const jobId = newJobId();
+  const recvPromise = receiverSvc.startReceive({ rendezvous: 'rlink' });
+  const sendResult = await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev-sig', deviceId: 'dev-abc', linked: true } });
+  await recvPromise;
+
+  expect(sendResult.ok).toBe(true);
+  // openChannel receives the whole target (incl. linked) so main can pair
+  // password-free and run the device-keypair handshake.
+  expect(sendOpenArgs.target).toMatchObject({ id: 'dev-sig', linked: true });
+  const sendRec = (await sendStore.list()).find((j) => j.jobId === jobId);
+  expect(sendRec.tier).toBe('fleet');
+});
+
+test('SP3 P4: startReceive threads the own-fleet linked flag into openChannel', async () => {
+  let recvOpenArgs = null;
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async (args) => { recvOpenArgs = args; return { channel: deadChannel(), close: async () => {} }; },
+    rendezvousTimeoutMs: 0,
+  });
+  // startReceive never resolves here (deadChannel), so don't await it; just let
+  // openChannel run and capture its args.
+  svc.startReceive({ rendezvous: { sessionId: 's-link', linked: true } });
+  await new Promise((r) => setTimeout(r, 20));
+  expect(recvOpenArgs).toMatchObject({ role: 'attach', sessionId: 's-link', linked: true });
+});
+
 // A channel that never feeds anything back — models a peer that never attaches/
 // accepts (offline host, dropped rendezvous).
 function deadChannel() {

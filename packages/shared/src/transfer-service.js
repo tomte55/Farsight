@@ -57,11 +57,18 @@ export function createTransferService({ store, transferDir, consent, openChannel
     return (target && typeof target === 'object' && typeof target.id === 'string') ? { id: target.id } : {};
   }
 
-  function saveSendRecord({ jobId, manifest, createdAt, jobState, peer }) {
+  // SP3 Phase 4: own-fleet (linked) sends are recorded tier:'fleet' — they
+  // authenticated via the device keypair, not a session password, and are the
+  // only tier eligible for presence-driven auto-resume (see transfer-resume.js).
+  function tierFor(target) {
+    return (target && target.linked) ? 'fleet' : 'adhoc';
+  }
+
+  function saveSendRecord({ jobId, manifest, createdAt, jobState, peer, tier = 'adhoc' }) {
     return store.save({
       jobId,
       dir: 'send',
-      tier: 'adhoc',
+      tier,
       peer: peer || {},
       destRoot: null,
       manifest,
@@ -75,6 +82,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     const entry = pendingSends.get(jobId);
     const { manifest, sources, target, createdAt } = entry;
     const peer = peerFor(target);
+    const tier = tierFor(target);
     let channel = null;
     let close = null;
     let onRendezvousError = null;
@@ -126,13 +134,13 @@ export function createTransferService({ store, transferDir, consent, openChannel
         }
         await sender.start(); // resolves with no value on success, rejects/throws on failure
         result = { jobId, ok: true };
-        await saveSendRecord({ jobId, manifest, createdAt, jobState: 'done', peer });
+        await saveSendRecord({ jobId, manifest, createdAt, jobState: 'done', peer, tier });
       } else {
         result = { jobId, ok: false, canceled: true };
       }
     } catch (err) {
       result = { jobId, ok: false, error: errMessage(err) };
-      try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'error', peer }); } catch { /* best effort */ }
+      try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'error', peer, tier }); } catch { /* best effort */ }
     } finally {
       disarmApprovalTimer();
       if (activeClose === close) activeClose = null; // don't clobber a NEWER job's handle
@@ -183,7 +191,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     }
 
     try {
-      await saveSendRecord({ jobId, manifest: entry.manifest, createdAt: entry.createdAt, jobState: 'canceled', peer: peerFor(entry.target) });
+      await saveSendRecord({ jobId, manifest: entry.manifest, createdAt: entry.createdAt, jobState: 'canceled', peer: peerFor(entry.target), tier: tierFor(entry.target) });
     } catch { /* best effort */ }
     entry.resolve({ jobId, ok: false, canceled: true });
     if (isActive) advanceSendQueue();
@@ -207,7 +215,11 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // either as a plain string or as { sessionId } (host main.js's
       // transfer:incoming passes the latter) — normalize to a plain string.
       const sessionId = typeof rendezvous === 'string' ? rendezvous : rendezvous?.sessionId;
-      const { channel, close } = await openChannel({ role: 'attach', sessionId });
+      // SP3 Phase 4: an own-fleet (linked) transfer request tells the attacher to
+      // run the host-role device-keypair handshake and fail closed if it doesn't
+      // pass — the signaling server relays `linked` in TRANSFER_REQUEST.
+      const linked = (rendezvous && typeof rendezvous === 'object') ? !!rendezvous.linked : false;
+      const { channel, close } = await openChannel({ role: 'attach', sessionId, linked });
       let currentJobId = null;
       const tapped = tapJobId(channel, (id) => { currentJobId = id; });
       const receiver = createReceiver({
