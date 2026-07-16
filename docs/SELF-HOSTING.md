@@ -123,6 +123,20 @@ takes precedence over the stored value.
   TURN-domain certificate is a point-in-time export — plan to re-run `infra/coturn/deploy.sh`
   (or export + restart coturn) after Caddy renews it.
 
+## Diagnostics uploads (account server)
+
+Signed-in users can send a redaction-safe log bundle to `POST /diagnostics` on the account
+server (see the "Diagnostics upload" section of `docs/SECURITY.md` for what it does and does
+not contain). Uploads are written to a `diagnostics/` directory next to the account server's
+SQLite database file — i.e. on the same data volume as `DATABASE_URL`, so no extra volume mount
+is needed — and pruned by a startup sweep plus a daily timer.
+
+Configure the retention window with an env var on the account server:
+
+```
+ACCOUNT_DIAGNOSTICS_TTL_DAYS=30   # optional; default 30 if unset or invalid
+```
+
 ## Code signing (optional)
 
 Farsight's installers ship unsigned by default (see `docs/SECURITY.md`). The release workflow

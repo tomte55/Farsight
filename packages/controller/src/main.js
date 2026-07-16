@@ -5,6 +5,7 @@ import { app, BrowserWindow, ipcMain, clipboard, dialog, shell, safeStorage } fr
 import electronUpdater from 'electron-updater';
 const { autoUpdater } = electronUpdater;
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync } from 'node:fs';
 import * as nodeFs from 'node:fs';
@@ -12,6 +13,9 @@ import { createAppLogger } from '@farsight/shared/app-log';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
 import { createUpdater } from '@farsight/shared/updater';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from './account.js';
+// Verbose diagnostic logging: consent-gated upload of a redaction-safe log
+// bundle for support triage (see docs/SECURITY.md).
+import { buildDiagnosticsBundle } from '@farsight/shared/diagnostics-bundle';
 // SP3 file transfer (send path): the orchestrator/queue/jobs-store pipeline
 // (createTransferService) plus the manifest-building I/O it's fed with.
 import { createTransferWorker } from './transfer-worker.js';
@@ -203,6 +207,40 @@ ipcMain.on('clipboard-write', (_e, text) => { if (typeof text === 'string' && te
 let mainWindow = null;
 let ctrlUpdater = null;
 let log = null;   // root logger; assigned on app ready, referenced as log?.*
+let logMinLevel = null; // createAppLogger's resolved level; used in diagnostics meta
+
+// Verbose diagnostic logging (§ SECURITY.md): consent-gated, account-authenticated
+// upload of a redaction-safe log bundle for support triage.
+async function sendDiagnostics() {
+  const scope = log?.child('diagnostics');
+  const svc = getAccountService();
+  const status = await svc.status();
+  if (!status.signedIn) return { ok: false, error: 'not_logged_in' };
+  const { response } = await dialog.showMessageBox(mainWindow || undefined, {
+    type: 'question',
+    buttons: ['Send', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+    title: 'Send diagnostics to support',
+    message: 'Upload your Farsight logs to support?',
+    detail: 'Logs never contain your password, screen contents, or file contents.',
+  });
+  if (response !== 0) return { ok: false, error: 'cancelled' };
+  const logsDir = path.join(app.getPath('userData'), 'logs');
+  const meta = {
+    app: 'controller',
+    version: app.getVersion(),
+    os: `${process.platform} ${os.release()}`,
+    arch: process.arch,
+    packaged: app.isPackaged,
+    level: logMinLevel,
+  };
+  const { files } = buildDiagnosticsBundle({ logsDir, fs: nodeFs, meta });
+  const res = await svc.uploadDiagnostics({ meta, files });
+  scope?.info(`upload ${res.ok ? `ok id=${res.data?.id}` : `failed ${res.error || 'unknown'}`}`);
+  return res.ok ? { ok: true, id: res.data?.id } : { ok: false, error: res.error };
+}
+ipcMain.handle('diagnostics:send', () => sendDiagnostics());
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -221,7 +259,7 @@ function createWindow() {
   return win;
 }
 app.whenReady().then(() => {
-  ({ log } = createAppLogger({
+  ({ log, minLevel: logMinLevel } = createAppLogger({
     filePath: path.join(app.getPath('userData'), 'logs', 'main.log'),
     fs: nodeFs,
     dirname: path.dirname,

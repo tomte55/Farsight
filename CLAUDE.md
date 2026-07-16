@@ -56,6 +56,11 @@ apps — **host** (the controlled machine) and **controller** (where you drive f
   app log (`[ft-worker]` heartbeat + `[transfer]` lifecycle) for field debugging.
 - **Two GATED, outward-facing actions** require explicit user approval per homelab ops rules: the
   signaling deploy (public subdomain) and opening coturn firewall ports.
+- **Logging: connection modules run in the RENDERER**, not main — they log via the `log:renderer`
+  IPC bridge (`createRendererLogger`), never by importing a file-sink logger directly (that only
+  works in main). Verbose connection detail is logged at `debug`; set `FARSIGHT_LOG_LEVEL=debug`
+  and reproduce to see it. See "Diagnostics upload" in `docs/SECURITY.md` for the consent-gated
+  account upload of the resulting log files.
 
 ## Deployment
 Farsight is self-hosted: a `ws` signaling server (`packages/signaling-server`, Docker) behind a

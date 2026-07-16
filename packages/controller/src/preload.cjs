@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   reportError: (entry) => ipcRenderer.send('log:renderer', entry),
   log: (entry) => ipcRenderer.send('log:renderer', entry),
   openLogs: () => ipcRenderer.invoke('open-logs'),
+  // Verbose diagnostic logging: consent-gated, account-only upload of a
+  // redaction-safe log bundle (main shows the consent dialog + does the work).
+  sendDiagnostics: () => ipcRenderer.invoke('diagnostics:send'),
   // Account / saved-hosts console (SP2)
   accountStatus: () => ipcRenderer.invoke('account:status'),
   accountLogin: (input) => ipcRenderer.invoke('account:login', input),

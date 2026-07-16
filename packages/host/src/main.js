@@ -1,5 +1,5 @@
 // packages/host/src/main.js
-import { app, BrowserWindow, desktopCapturer, screen, ipcMain, globalShortcut, Tray, Menu, nativeImage, clipboard, shell, safeStorage } from 'electron';
+import { app, BrowserWindow, desktopCapturer, screen, ipcMain, globalShortcut, Tray, Menu, nativeImage, clipboard, shell, safeStorage, dialog } from 'electron';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +23,9 @@ const { autoUpdater } = electronUpdater;
 import { createUpdater } from '@farsight/shared/updater';
 import { shouldConverge } from '@farsight/shared/update-policy';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from '@farsight/shared/account-service';
+// Verbose diagnostic logging: consent-gated upload of a redaction-safe log
+// bundle for support triage (see docs/SECURITY.md).
+import { buildDiagnosticsBundle } from '@farsight/shared/diagnostics-bundle';
 // SP3 file transfer (receive path): the orchestrator/queue/jobs-store pipeline
 // (createTransferService), fed by a dedicated transfer-worker BrowserWindow —
 // mirrors the controller's send-side wiring in packages/controller/src/main.js.
@@ -62,9 +65,28 @@ ipcMain.handle('conn-auth:device-id', () => getAccountService().getDeviceId());
 ipcMain.handle('conn-auth:sign', (_e, message) => getAccountService().signTranscript(message));
 ipcMain.handle('conn-auth:verify', (_e, publicKey, message, signature) => getAccountService().verifyTranscript(publicKey, message, signature));
 ipcMain.handle('conn-auth:is-account-key', (_e, publicKey) => getAccountService().isAccountPublicKey(publicKey));
-ipcMain.handle('account:status', () => getAccountService().status());
-ipcMain.handle('account:login', (_e, input) => getAccountService().login({ deviceName: os.hostname(), ...input }));
-ipcMain.handle('account:logout', () => getAccountService().logout());
+// Cached sign-in flag so the (synchronously-built) tray menu can gate the
+// diagnostics item without awaiting the account service on every rebuild.
+// Kept in sync from the three places sign-in state can change.
+let accountLoggedIn = false;
+ipcMain.handle('account:status', async () => {
+  const res = await getAccountService().status();
+  accountLoggedIn = !!res.signedIn;
+  refreshTrayMenu();
+  return res;
+});
+ipcMain.handle('account:login', async (_e, input) => {
+  const res = await getAccountService().login({ deviceName: os.hostname(), ...input });
+  accountLoggedIn = !!res.ok;
+  refreshTrayMenu();
+  return res;
+});
+ipcMain.handle('account:logout', async () => {
+  const res = await getAccountService().logout();
+  accountLoggedIn = false;
+  refreshTrayMenu();
+  return res;
+});
 ipcMain.handle('account:register', (_e, input) => getAccountService().register(input));
 ipcMain.handle('account:resend-verification', (_e, input) => getAccountService().resendVerification(input));
 ipcMain.handle('account:request-password-reset', (_e, input) => getAccountService().requestPasswordReset(input));
@@ -187,6 +209,7 @@ let hostUpdater = null;
 let lastHandledTarget = null; // S2.7: the last remote-update target we acted on
 let latestUpdateUi = { showRestartPrompt: false, checking: false, message: '', version: null };
 let log = null;   // root logger; assigned on app ready, referenced as log?.*
+let logMinLevel = null; // createAppLogger's resolved level; used in diagnostics meta
 // 16×16 Aurora gradient PNG (violet→blue, rounded). Inline data URL so the tray
 // needs no external icon asset (packaging-safe).
 const TRAY_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAmUlEQVR4nKXT4QrBYBiG4ef4RCKRLKyxsLCwsEitpKSkpKSkpJzlLXIE33sA189LKw+lLbT0Yd6BJIRZHyYRxCMYxzCcQpTAYAG9FMI1dDcoyJArJsjA3yILpr0DWXBzD7Jg7wCy4MYRZMH1E8iCa2eQBVcvIAuuXEEWXL6BLLh0B1lw8QGy4MIT9F/lhPMv9Cv5XeWCc2/0AR9g1yt6gn/UAAAAAElFTkSuQmCC';
@@ -243,6 +266,40 @@ function createWindow() {
   return win;
 }
 
+// Verbose diagnostic logging (§ SECURITY.md): consent-gated, account-authenticated
+// upload of a redaction-safe log bundle for support triage. Shared by the tray
+// item and the 'diagnostics:send' IPC handler so both paths behave identically.
+async function sendDiagnostics() {
+  const scope = log?.child('diagnostics');
+  const svc = getAccountService();
+  const status = await svc.status();
+  if (!status.signedIn) return { ok: false, error: 'not_logged_in' };
+  const { response } = await dialog.showMessageBox(mainWindow || undefined, {
+    type: 'question',
+    buttons: ['Send', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+    title: 'Send diagnostics to support',
+    message: 'Upload your Farsight logs to support?',
+    detail: 'Logs never contain your password, screen contents, or file contents.',
+  });
+  if (response !== 0) return { ok: false, error: 'cancelled' };
+  const logsDir = path.join(app.getPath('userData'), 'logs');
+  const meta = {
+    app: 'host',
+    version: app.getVersion(),
+    os: `${process.platform} ${os.release()}`,
+    arch: process.arch,
+    packaged: app.isPackaged,
+    level: logMinLevel,
+  };
+  const { files } = buildDiagnosticsBundle({ logsDir, fs: nodeFs, meta });
+  const res = await svc.uploadDiagnostics({ meta, files });
+  scope?.info(`upload ${res.ok ? `ok id=${res.data?.id}` : `failed ${res.error || 'unknown'}`}`);
+  return res.ok ? { ok: true, id: res.data?.id } : { ok: false, error: res.error };
+}
+ipcMain.handle('diagnostics:send', () => sendDiagnostics());
+
 function refreshTrayMenu() {
   if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate(buildTrayMenuTemplate({
@@ -255,6 +312,8 @@ function refreshTrayMenu() {
     onRestartUpdate: () => hostUpdater && hostUpdater.installNow(),
     onCheckUpdates: () => hostUpdater && hostUpdater.checkNow(),
     onOpenLogs: () => shell.openPath(path.join(app.getPath('userData'), 'logs')),
+    loggedIn: accountLoggedIn,
+    onSendDiagnostics: () => { sendDiagnostics(); },
   })));
 }
 
@@ -405,7 +464,7 @@ app.on('before-quit', () => lifecycle.beginQuit());
 
 app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return;   // losing instance: never create a window/tray
-  ({ log } = createAppLogger({
+  ({ log, minLevel: logMinLevel } = createAppLogger({
     filePath: path.join(app.getPath('userData'), 'logs', 'main.log'),
     fs: nodeFs,
     dirname: path.dirname,

@@ -143,3 +143,21 @@ text, and file-transfer contents are never logged — clipboard/file operations
 log byte counts only, and every line is truncated to 2000 chars as a backstop.
 The default level is `info` (packaged) / `debug` (dev); override with
 `FARSIGHT_LOG_LEVEL` (`debug`|`info`|`warn`|`error`).
+
+## Diagnostics upload
+Both apps offer a "Send diagnostics to support" action (host tray menu; controller
+Settings menu) that uploads the current log bundle to the account server's
+`POST /diagnostics`. It is:
+- **Account-authenticated** — shown only when signed in, and sent with the
+  account's short-lived access token; there is no anonymous upload endpoint.
+- **User-consented** — a native dialog states the scope ("never your password,
+  screen contents, or file contents") and requires an explicit Send click; a
+  Cancel (or dismissed dialog) uploads nothing.
+- **Redaction-safe by construction** — the bundle is built from `*.log`/`*.log.N`
+  files under the app's own log directory only (`buildDiagnosticsBundle`); it
+  never includes `config.json`, the encrypted token/device-key files, or any
+  other userData contents, so it inherits the same never-log-secrets guarantee
+  as the logs themselves.
+- **Server-side TTL-pruned** — uploads land under the account server's data
+  volume (`diagnostics/`) and are deleted after `ACCOUNT_DIAGNOSTICS_TTL_DAYS`
+  (default 30; see `docs/SELF-HOSTING.md`), swept on startup and daily.

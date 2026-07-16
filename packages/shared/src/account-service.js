@@ -164,5 +164,17 @@ export function createAccountService({
       const devices = (res.data && res.data.devices) || [];
       return devices.some((d) => d.publicKey && d.publicKey === publicKey);
     },
+
+    // ── verbose diagnostic logging: consent-gated upload ──────────────────────
+    // Uploads a redaction-safe log bundle (built by buildDiagnosticsBundle) for
+    // support triage. Mirrors fleet()'s not_signed_in shape — the caller never
+    // sees or handles the raw access token, same as every other authenticated
+    // op here. The main process still owns showing the consent dialog and
+    // assembling `meta`/`files` before calling this.
+    async uploadDiagnostics({ meta, files }) {
+      const token = await session.getAccessToken();
+      if (!token) return { ok: false, error: 'not_signed_in' };
+      return client.uploadDiagnostics({ accessToken: token, meta, files });
+    },
   };
 }

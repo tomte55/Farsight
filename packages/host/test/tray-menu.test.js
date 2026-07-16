@@ -52,3 +52,15 @@ test('always offers a Check-for-updates item', () => {
   const t = buildTrayMenuTemplate({ id: '1', password: 'p', onShow(){}, onQuit(){}, updateReady: false, onRestartUpdate(){}, onCheckUpdates(){} });
   expect(t.some(i => i.label === 'Check for updates')).toBe(true);
 });
+
+test('adds a Send-diagnostics item only when logged in', () => {
+  const onSendDiagnostics = vi.fn();
+  const loggedOut = buildTrayMenuTemplate({ id: '1', password: 'p', onShow(){}, onQuit(){}, onCheckUpdates(){}, onOpenLogs(){}, loggedIn: false, onSendDiagnostics });
+  expect(loggedOut.some(i => i.label === 'Send diagnostics to support…')).toBe(false);
+
+  const loggedIn = buildTrayMenuTemplate({ id: '1', password: 'p', onShow(){}, onQuit(){}, onCheckUpdates(){}, onOpenLogs(){}, loggedIn: true, onSendDiagnostics });
+  const item = loggedIn.find(i => i.label === 'Send diagnostics to support…');
+  expect(item).toBeTruthy();
+  item.click();
+  expect(onSendDiagnostics).toHaveBeenCalledOnce();
+});

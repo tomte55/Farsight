@@ -258,6 +258,31 @@ describe('connect-from-console: device keypair lifecycle', () => {
   });
 });
 
+describe('verbose diagnostic logging: uploadDiagnostics', () => {
+  test('uploads with the session access token once signed in', async () => {
+    const ff = fakeFetch({
+      '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } },
+      '/diagnostics': { status: 200, body: { id: 'diag-1' } },
+    });
+    const service = createAccountService({
+      baseUrl: 'https://auth.example', safeStorage: fakeSafeStorage, fs: fakeFs(),
+      filePath: '/cfg/token.enc', fetch: ff.impl, now: () => 1_700_000_000_000,
+    });
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+
+    const res = await service.uploadDiagnostics({ meta: { app: 'host' }, files: { 'main.log': 'x' } });
+    expect(res).toEqual({ ok: true, status: 200, data: { id: 'diag-1' } });
+    const call = ff.calls.find((c) => c.url.endsWith('/diagnostics'));
+    expect(call.init.headers.authorization).toMatch(/^Bearer /);
+    expect(JSON.parse(call.init.body)).toEqual({ meta: { app: 'host' }, files: { 'main.log': 'x' } });
+  });
+
+  test('is not_signed_in when signed out (never calls the server)', async () => {
+    const service = svc({});
+    expect(await service.uploadDiagnostics({ meta: {}, files: {} })).toEqual({ ok: false, error: 'not_signed_in' });
+  });
+});
+
 describe('remote update (S2.7)', () => {
   test('requestDeviceUpdate posts the target version once signed in', async () => {
     const ff = fakeFetch({

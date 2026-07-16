@@ -116,6 +116,17 @@ document.addEventListener('click', (e) => { if (!settingsMenu.contains(e.target)
 document.getElementById('menu-check-updates').addEventListener('click', () => window.farsightIpc.checkForUpdates());
 document.getElementById('menu-open-logs').addEventListener('click', () => { settingsMenu.classList.remove('open'); window.farsightIpc.openLogs(); });
 
+// Verbose diagnostic logging: only shown once signed in (see refreshAccountView
+// and the resume-session call near the bottom of this file, which both keep
+// this in sync with the real signed-in state).
+const menuSendDiagnostics = document.getElementById('menu-send-diagnostics');
+menuSendDiagnostics.addEventListener('click', async () => {
+  settingsMenu.classList.remove('open');
+  const res = await window.farsightIpc.sendDiagnostics();
+  if (res.ok) menuStatus.textContent = `Diagnostics sent (id ${res.id}).`;
+  else if (res.error !== 'cancelled') menuStatus.textContent = `Diagnostics upload failed: ${res.error}`;
+});
+
 async function refreshSignalingUrl() {
   signalingUrl = await window.farsightIpc.getSignalingUrl();
   const configured = !!signalingUrl;
@@ -496,6 +507,7 @@ async function refreshAccountView() {
   const { signedIn } = await window.farsightIpc.accountStatus();
   acctSignin.hidden = signedIn;
   acctFleet.hidden = !signedIn;
+  menuSendDiagnostics.hidden = !signedIn;
   if (signedIn) loadFleet();
 }
 
@@ -671,7 +683,9 @@ for (const el of [acctPassword, acctCode, acctEmail]) {
 // Resume a persisted account session on launch so a signed-in controller starts
 // reporting presence immediately (heartbeat), without waiting for the fleet panel
 // to be opened. No stored token → no network call; status() just returns signed-out.
-window.farsightIpc.accountStatus();
+// Also paints the diagnostics-menu item's initial visibility (it otherwise only
+// refreshes when the fleet panel opens, via refreshAccountView above).
+window.farsightIpc.accountStatus().then(({ signedIn }) => { menuSendDiagnostics.hidden = !signedIn; });
 
 // ── SP3 file transfer (send path) ───────────────────────────────────────────
 // A "Send…" entry point (dial a peer by ID+password, pick files/folders, send)

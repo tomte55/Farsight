@@ -24,3 +24,10 @@ test('exposes a scoped renderer log bridge', () => {
   expect(preload).toMatch(/log:\s*\(entry\)\s*=>\s*ipcRenderer\.send\('log:renderer'/);
   expect(main).toMatch(/renderer:\$\{|`renderer:/); // handler prefixes scope
 });
+
+test('wires a consent-gated diagnostics upload', () => {
+  expect(main).toMatch(/diagnostics:send/);
+  expect(main).toMatch(/buildDiagnosticsBundle/);
+  expect(main).toMatch(/uploadDiagnostics/);
+  expect(main).toMatch(/showMessageBox|dialog\./); // consent prompt before upload
+});
