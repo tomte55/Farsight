@@ -111,19 +111,39 @@ the attended-control trust model (the controller already has full input/screen
 access), but be aware sensitive clipboard contents are shared while a session
 is active.
 
-## File transfer
-During an active session, either side can send an arbitrary file to the other
-over a dedicated reliable, ordered data channel (separate from input/control,
-so a transfer never blocks the cursor or session control). Transfers are
-bounded to 100 MB; the receiving side additionally caps total bytes received
-at that limit regardless of the declared size, in case a peer sends more than
-it announced. Received filenames are always sanitized to a basename (path
-separators and `..` stripped, falling back to `"download"`) before the save
-path is chosen, preventing path traversal. Saving always goes through a
-user-driven OS Save dialog — nothing is written to disk without the receiving
-user picking a location. This is within the attended-control trust model (the
-controller already has full input/screen access, and the host user has
-already granted consent).
+## File transfer (SP3)
+File transfer runs over its **own dedicated RTCPeerConnection** (a hidden
+transfer-worker window with its own signaling session, `CONNECT kind:'transfer'`),
+independent of any control session — so it never blocks the cursor and a host can
+serve a transfer while being controlled. It is a **consented push with a manifest**:
+the sender offers a specific file/folder set; the receiver sees a file-tree preview
+(paths + sizes) and must accept before any bytes flow. There is **no filesystem
+access to the peer** — only the declared set moves. Received paths are re-validated
+against a traversal guard (`sanitizeRelativePath` / `buildManifest`) and confined to
+the chosen destination root; each file is streamed to a `.part` file and
+**hash-verified on completion** before finalize; wire-declared totals are advisory
+(recomputed from the re-validated manifest). No fixed size cap — streamed to disk.
+
+**Two trust tiers gate how a transfer is authenticated:**
+
+- **Ad-hoc (id + session password).** A stranger/one-off (e.g. "send a folder to
+  dad"): the signaling server gates the pairing on the session password, and the
+  receiver consents per transfer. This is the shipped flagship.
+- **Own fleet (account-linked, device-keypair).** For your own account-linked
+  devices the console offers a **password-free "Send…"**. As with connect-from-console
+  (§ "Connect-from-console"), signaling stays account-oblivious — a `linked` transfer
+  pairs without the password gate (relay only) — and the real authentication is
+  **end-to-end**: after DTLS forms, both transfer workers run the **same mutual
+  device-keypair handshake over a dedicated `auth` data channel**, each proving an
+  account-enrolled device key, with the signed transcript **bound to the DTLS
+  fingerprints** (defeats the R-8 SDP-swap MITM for the linked path). It **fails
+  closed**: the sender withholds the manifest OFFER and all bytes, and the receiver
+  refuses to process an OFFER, until the handshake passes; an unverifiable peer is
+  torn down and no `.part` is ever opened. This is the gate the future own-fleet
+  remote-FS server will sit behind (own-fleet only). The receiver still shows a
+  per-transfer consent prompt today (own-fleet consent-free push is a later choice).
+  **Residual:** as elsewhere, the account is the fleet key — protect it (argon2id,
+  optional TOTP).
 
 ## Logs
 Each app writes a rotating, human-readable log to its per-user data directory:
