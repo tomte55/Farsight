@@ -57,4 +57,16 @@ describe('addContact', () => {
     expect((reverse as any).contactId).toBe((first as any).contactId);
     expect(await db.prisma.contact.count()).toBe(1);
   });
+
+  test('pairKey unique constraint backstops the dedup (DB rejects a duplicate pair)', async () => {
+    const me = await mkUser('me@example.com');
+    const them = await mkUser('dad@example.com');
+    await addContact(deps(), { requesterId: me, email: 'dad@example.com' });
+    const pairKey = [me, them].sort().join(':');
+    await expect(
+      db.prisma.contact.create({
+        data: { requesterId: me, addresseeId: them, inviteCode: 'other', pairKey },
+      }),
+    ).rejects.toThrow();
+  });
 });

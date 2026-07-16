@@ -121,6 +121,7 @@ model Contact {
   addresseeId String?
   addressee   User?     @relation("ContactAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
   inviteCode  String    @unique
+  pairKey     String?   @unique   // canonical unordered {requester,addressee} pair — dedup backstop
   status      String    @default("pending")
   createdAt   DateTime  @default(now())
   respondedAt DateTime?

@@ -21,24 +21,34 @@ export async function addContact(
   if (addressee.id === input.requesterId) return { ok: false, reason: 'self' };
 
   // Dedup on the unordered pair {requesterId, addresseeId} so re-adding (in either
-  // direction) is idempotent and never creates a second edge.
-  const existing = await deps.prisma.contact.findFirst({
-    where: {
-      OR: [
-        { requesterId: input.requesterId, addresseeId: addressee.id },
-        { requesterId: addressee.id, addresseeId: input.requesterId },
-      ],
-    },
-  });
+  // direction) is idempotent and never creates a second edge. `pairKey` sorts the
+  // two ids so both directions collide to the same canonical string, and is backed
+  // by a DB-level unique constraint (schema.prisma) so a concurrent double-submit
+  // can't race past this pre-check and create a duplicate row.
+  const pairKey = [input.requesterId, addressee.id].sort().join(':');
+  const existing = await deps.prisma.contact.findUnique({ where: { pairKey } });
   if (existing) return { ok: true, contactId: existing.id };
 
-  const contact = await deps.prisma.contact.create({
-    data: {
-      requesterId: input.requesterId,
-      addresseeId: addressee.id,
-      inviteCode: randomBytes(16).toString('hex'),
-      status: 'pending',
-    },
-  });
-  return { ok: true, contactId: contact.id };
+  try {
+    const contact = await deps.prisma.contact.create({
+      data: {
+        requesterId: input.requesterId,
+        addresseeId: addressee.id,
+        inviteCode: randomBytes(16).toString('hex'),
+        pairKey,
+        status: 'pending',
+        createdAt: new Date(deps.now),
+      },
+    });
+    return { ok: true, contactId: contact.id };
+  } catch (err: any) {
+    // Race backstop: another concurrent add for the same pair won the unique
+    // constraint on pairKey between our pre-check and this create. Return the
+    // winner's edge instead of failing the request.
+    if (err?.code === 'P2002') {
+      const winner = await deps.prisma.contact.findUnique({ where: { pairKey } });
+      if (winner) return { ok: true, contactId: winner.id };
+    }
+    throw err;
+  }
 }
