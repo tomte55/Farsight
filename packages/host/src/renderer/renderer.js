@@ -9,6 +9,20 @@ import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
 import { formatHostId } from '@farsight/shared/credentials-format';
 import { createIdleRotator } from '@farsight/shared/idle-rotator';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
+import { createRendererLogger } from './rlog.js';
+
+// Root renderer logger (forwards to the main-process file log over IPC — see
+// rlog.js). newConnId() stamps a short, unique-enough-for-log-correlation id
+// per connect attempt (renderer context: Math.random is fine here, this is
+// NOT security-sensitive — just a log-grep key).
+const rlog = createRendererLogger();
+const newConnId = (() => { let n = 0; return () => (++n).toString(36) + Math.random().toString(36).slice(2, 6); })();
+// clog is reassigned to a fresh conn:<id> scope at the start of each connect
+// attempt (see the MSG.CONNECT handler below); starts scoped to a boot id so
+// constructors created before the first controller connects (signaling client,
+// the session state machine) still log under a stable, greppable scope.
+let connId = newConnId();
+let clog = rlog.child(`conn:${connId}`);
 
 // A fresh base64 nonce for the connect-from-console handshake (Web Crypto in the
 // renderer). 16 bytes → ample against replay within a single handshake.
@@ -75,12 +89,17 @@ async function getStreamForDisplay(display) {
   // desktopCapturer runs in main; renderer asks for the source id for the given
   // monitor, then uses getUserMedia to capture it.
   const sourceId = await window.farsightIpc.getScreenSourceFor(display.id);
-  return navigator.mediaDevices.getUserMedia({
+  const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
     video: { mandatory: {
       chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId, maxFrameRate: 30,
     } },
   });
+  // Breadcrumb only — resolution/monitor index, NEVER pixel/frame data.
+  const track = stream.getVideoTracks()[0];
+  const s = track && track.getSettings ? track.getSettings() : {};
+  clog.child('capture').info(`capture stream monitor=${display.index} ${s.width || '?'}x${s.height || '?'}`);
+  return stream;
 }
 
 // The controller sends CONNECT then immediately its OFFER (and ICE candidates),
@@ -125,6 +144,7 @@ async function runHostAuth(channel) {
       verify: (pk, m, s) => window.farsightIpc.connAuthVerify(pk, m, s),
       isAccountKey: (pk) => window.farsightIpc.connAuthIsAccountKey(pk),
       nonce: authNonce, timeoutMs: 20000,
+      log: clog.child('auth'),
     });
     for (const e of early) channel.onmessage(e); // replay into the pump's handler
     await p;
@@ -174,6 +194,7 @@ function flushCandidates() {
 // the peer, and clear buffered signaling. Used by deny/cut/panic/peer-disconnect
 // and controller-initiated SESSION_END.
 function teardown() {
+  clog.info('session teardown');
   if (currentStream) { currentStream.getTracks().forEach((t) => t.stop()); currentStream = null; }
   if (peer) { peer.close(); peer = null; }
   if (timers) { timers.stop(); timers = null; }
@@ -200,6 +221,7 @@ function endSessionByHost(reason, statusText, { immediate = false } = {}) {
 
 // Consent gate: nothing is captured or streamed until the user clicks Allow.
 const session = createSession({
+  log: clog.child('session'),
   onStateChange: (st) => {
     window.farsightIpc.setSessionActive(st === 'active');
     consentEl.style.display = st === 'pending_consent' ? 'block' : 'none';
@@ -223,7 +245,7 @@ async function onControl(raw) {
     return;
   }
   if (evt.type === CONTROL.LIST_MONITORS) {
-    peer && peer.sendControl({ type: CONTROL.MONITORS, monitors: monitorsForControl(displays) });
+    peer && peer.sendControl({ type: CONTROL.MONITORS, monitors: monitorsForControl(displays, clog.child('capture')) });
   } else if (evt.type === CONTROL.SELECT_MONITOR) {
     const d = displays[evt.index];
     if (!d || !peer) return;
@@ -259,6 +281,7 @@ async function startSession() {
     // Only authenticate on the linked path; on the password path the auth channel
     // is unused (the controller never starts a handshake) and is ignored.
     onAuthChannel: (channel) => { if (linkedConnect) runHostAuth(channel); },
+    log: clog.child('peer'),
   });
   // Auto-end the session on inactivity (idle) or after a hard cap (absolute).
   timers = createSessionTimers({
@@ -313,13 +336,19 @@ const appVersion = await window.farsightIpc.getAppVersion();
 
 function startSignaling(signalingUrl) {
   signal = createSignalingClient(signalingUrl, {
-    [MSG.REGISTERED]: (m) => { idEl.textContent = formatHostId(m.id); idEl.dataset.copyValue = m.id; window.farsightIpc.setHostId(m.id); statusEl.textContent = 'Ready. Waiting for a controller.'; signal.send(MSG.UPDATE_PASSWORD, { password: pwEl.textContent }); },
+    [MSG.REGISTERED]: (m) => { idEl.textContent = formatHostId(m.id); idEl.dataset.copyValue = m.id; window.farsightIpc.setHostId(m.id); statusEl.textContent = 'Ready. Waiting for a controller.'; signal.send(MSG.UPDATE_PASSWORD, { password: pwEl.textContent }); clog.info('registered id=' + m.id); },
     // R-1: the server sends ICE servers right before CONNECT, only after the
     // controller authenticated. Store them for the peer built on consent.
     [MSG.ICE_SERVERS]: (m) => { iceServers = m.iceServers || []; },
     // SP1: the server relays the controller's app version on CONNECT — surface
     // it so the consent prompt shows who (and which version) is asking.
     [MSG.CONNECT]: (m) => {
+      // A new incoming connect attempt: stamp a fresh correlation id so every
+      // log line from this point (peer/session/auth/capture) can be grepped
+      // together for this one attempt.
+      connId = newConnId();
+      clog = rlog.child(`conn:${connId}`);
+      clog.info('connect start');
       linkedConnect = !!(m && m.linked);
       peerAuthed = false;
       window.farsightIpc.requestAttention();
@@ -329,12 +358,14 @@ function startSignaling(signalingUrl) {
         // Auto-accept; the E2E keypair handshake still gates input, so a peer that
         // isn't verifiably your device can never drive the machine.
         statusEl.textContent = m && typeof m.peerVersion === 'string' ? `Linked device (v${m.peerVersion}) connecting…` : 'A linked device is connecting…';
+        clog.info('consent auto-accepted (linked)');
         session.requestConsent();
         session.allow(); // synchronous idle→pending_consent→active: no visible prompt
         startSession();
       } else {
         // Ad-hoc / password connect: still requires explicit per-session consent.
         session.requestConsent();
+        clog.info('consent shown');
         statusEl.textContent = m && typeof m.peerVersion === 'string' ? `A controller (v${m.peerVersion}) wants to connect.` : 'A controller wants to connect.';
       }
     },
@@ -357,7 +388,7 @@ function startSignaling(signalingUrl) {
     // dedicated transfer worker by sessionId and round-trips consent itself
     // (see onTransferConsent below); nothing here blocks on that.
     [MSG.TRANSFER_REQUEST]: (m) => { window.farsightIpc.transferIncoming({ sessionId: m.sessionId }); },
-  }, { password: sessionPassword, version: appVersion, acceptsLinked: true });
+  }, { password: sessionPassword, version: appVersion, acceptsLinked: true, log: clog.child('signaling') });
 }
 
 // First-run setup / settings: the signaling URL is configured via IPC, never

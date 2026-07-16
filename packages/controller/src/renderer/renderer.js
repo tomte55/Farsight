@@ -10,6 +10,17 @@ import { isOlder } from '@farsight/shared/version';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
 import { sessionOverlayFor } from '../session-overlay.js';
 import { extractStats, throughputKbps, formatQuality } from '../stats.js';
+import { createRendererLogger } from './rlog.js';
+
+// Root renderer logger (forwards to the main-process file log over IPC — see
+// rlog.js). newConnId() stamps a short, unique-enough-for-log-correlation id
+// per connect attempt (renderer context: Math.random is fine here, this is
+// NOT security-sensitive — just a log-grep key). clog is reassigned to a
+// fresh conn:<id> scope at the start of each connectTo() attempt.
+const rlog = createRendererLogger();
+const newConnId = (() => { let n = 0; return () => (++n).toString(36) + Math.random().toString(36).slice(2, 6); })();
+let connId = newConnId();
+let clog = rlog.child(`conn:${connId}`);
 
 const idInput = document.getElementById('host-id');
 const statusEl = document.getElementById('status');
@@ -49,7 +60,7 @@ function startStatsPoll() {
       const cur = extractStats(report);
       const kbps = lastStatsSample ? throughputKbps(lastStatsSample, cur) : null;
       lastStatsSample = cur;
-      if (qualityEl) qualityEl.textContent = formatQuality({ rttMs: cur.rttMs, kbps, width: cur.width, height: cur.height, transport: cur.transport });
+      if (qualityEl) qualityEl.textContent = formatQuality({ rttMs: cur.rttMs, kbps, width: cur.width, height: cur.height, transport: cur.transport }, clog.child('stats'));
     } catch { /* never throw into the poller */ }
   }, 2000);
 }
@@ -186,6 +197,7 @@ function showOverlay(connState, reason) {
 }
 
 function doClose() {
+  clog.info('session teardown');
   stopStatsPoll();
   stopClipboardSync();
   if (peer) { peer.close(); peer = null; }
@@ -198,6 +210,7 @@ function doClose() {
 }
 
 function doReconnect() {
+  clog.info('reconnect');
   stopStatsPoll();
   stopClipboardSync();
   if (peer) { peer.close(); peer = null; }
@@ -247,7 +260,7 @@ function revealSession(stream) {
       if (!pendingMove || !peer) { pendingMove = null; return; }
       const e = pendingMove; pendingMove = null;
       const rect = videoContentRect(video.getBoundingClientRect(), video.videoWidth, video.videoHeight);
-      const evt = domEventToInput(e, rect);
+      const evt = domEventToInput(e, rect, clog.child('input'));
       if (evt && peer) peer.sendInput(evt);
     };
     const forward = (e) => {
@@ -256,7 +269,7 @@ function revealSession(stream) {
       if (pendingMove) { if (rafId) cancelAnimationFrame(rafId); flushMove(); } // preserve order: last move before this event
       if (['mousedown', 'mouseup', 'wheel'].includes(e.type)) e.preventDefault();
       const rect = videoContentRect(video.getBoundingClientRect(), video.videoWidth, video.videoHeight);
-      const evt = domEventToInput(e, rect);
+      const evt = domEventToInput(e, rect, clog.child('input'));
       if (evt) peer.sendInput(evt);
     };
     for (const t of ['mousemove', 'mousedown', 'mouseup', 'wheel']) video.addEventListener(t, forward, { passive: false });
@@ -291,6 +304,7 @@ async function runControllerAuth(p) {
       verify: (pk, m, s) => window.farsightIpc.connAuthVerify(pk, m, s),
       isAccountKey: (pk) => window.farsightIpc.connAuthIsAccountKey(pk),
       nonce: authNonce, timeoutMs: 20000,
+      log: clog.child('auth'),
     });
     if (peer !== p) return; // superseded/closed
     linkedAuthOk = true;
@@ -309,6 +323,11 @@ async function runControllerAuth(p) {
 // password-free "linked" Connect. Only the CONNECT payload (password vs linked)
 // and the post-connection auth/reveal gating differ.
 async function connectTo({ targetId, candidates, linked }) {
+  // A new connect attempt: stamp a fresh correlation id so every log line from
+  // this point (signaling/peer/auth/stats/input) can be grepped together.
+  connId = newConnId();
+  clog = rlog.child(`conn:${connId}`);
+  clog.info('connect start');
   let pwIndex = 0;
   linkedMode = !!linked;
   linkedAuthOk = false;
@@ -330,6 +349,7 @@ async function connectTo({ targetId, candidates, linked }) {
       onConnectionState: (s) => {
         if (peer !== thisPeer) return; // ignore callbacks from a replaced/closed peer
         if (sessionClosing) return; // host ended it — keep the terminal overlay
+        clog.info('connection state ' + s);
         statusEl.textContent = describeConnectionState(s);
         // Only drive the overlay once the session view is up (video showing).
         if (screenEl.style.display === 'block') showOverlay(s);
@@ -370,6 +390,7 @@ async function connectTo({ targetId, candidates, linked }) {
         if (linkedMode && !linkedAuthOk) { pendingStream = stream; statusEl.textContent = 'Verifying your device…'; return; }
         revealSession(stream);
       },
+      log: clog.child('peer'),
     });
     peer = thisPeer;
     peer.start();
@@ -382,6 +403,7 @@ async function connectTo({ targetId, candidates, linked }) {
       // Reaching ICE_SERVERS means the server paired us. On the password path,
       // lock in the winning candidate (so Reconnect uses it directly).
       if (!linked) lastCreds.password = candidates[pwIndex];
+      clog.info('paired target=' + targetId);
       showHostVersion(m.peerVersion);
       startPeer(m.iceServers || []);
     },
@@ -406,6 +428,7 @@ async function connectTo({ targetId, candidates, linked }) {
       statusEl.textContent = ERROR_TEXT[m.reason] || `Error: ${m.reason}`;
     },
     [MSG.PEER_DISCONNECTED]: () => {
+      clog.info('peer disconnected');
       setActive(false);
       stopStatsPoll();
       stopClipboardSync();
@@ -413,7 +436,7 @@ async function connectTo({ targetId, candidates, linked }) {
       if (screenEl.style.display === 'block') showOverlay(null, 'peer_disconnected');
       else { statusEl.textContent = 'Host disconnected.'; connectEl.style.display = ''; }
     },
-  });
+  }, { log: clog.child('signaling') });
 
   await signal.ready;
   // Host reacts to CONNECT (prepares its stream). On success the server sends
