@@ -4,9 +4,25 @@
 // ft-ctrl and ft-bulk are INDEPENDENTLY ordered — the receiver routes bulk by
 // counting against manifest sizes, and all handlers are serialized. See spec §5/§6.
 import {
-  offerFrame, fileBeginFrame, fileEndFrame, jobDoneFrame, acceptFrame, rejectFrame, promptingFrame, completeFrame,
+  offerFrame, offerBeginFrame, offerEntriesFrame, offerEndFrame,
+  fileBeginFrame, fileEndFrame, jobDoneFrame, acceptFrame, rejectFrame, promptingFrame, completeFrame,
   parseCtrlFrame, TRANSFER_PROTOCOL_VERSION,
 } from './transfer-protocol.js';
+
+// Split manifest entries into batches whose serialized size stays under maxBytes,
+// so no single offer_entries frame exceeds the data-channel message limit. Always
+// at least one entry per batch (a lone entry can't realistically exceed the limit).
+function batchEntriesBySize(entries, maxBytes) {
+  const batches = [];
+  let cur = [], curLen = 2; // '[]'
+  for (const e of entries) {
+    const s = JSON.stringify(e).length + 1; // +1 for the joining comma
+    if (cur.length && curLen + s > maxBytes) { batches.push(cur); cur = []; curLen = 2; }
+    cur.push(e); curLen += s;
+  }
+  if (cur.length) batches.push(cur);
+  return batches;
+}
 import { buildManifest, skipExisting } from './transfer-manifest.js';
 import { createSendJob, createReceiveJob } from './transfer-engine.js';
 import { sendFile, createPartFile, finalizeReceivedFile, hasFreeSpace, confineDestPath, publishFullyReceivedFile } from './transfer-io.js';
@@ -22,6 +38,10 @@ function serializer(onErr) {
 
 export function createSender({
   channel, jobId, manifest, sources, chunkSize = 131072, onEvent = () => {},
+  // Max serialized size of one offer_entries batch. Well under the ~256KB WebRTC
+  // data-channel message limit; a manifest that fits in ONE batch uses the legacy
+  // single `offer` frame (backward-compatible), larger ones are chunked.
+  offerBatchBytes = 49152,
   // After all bytes + JOB_DONE are on the wire, the sender WAITS for the
   // receiver's `complete` ack before resolving — so the caller doesn't close the
   // channel while the receiver is still draining (which loses the tail). This
@@ -92,7 +112,17 @@ export function createSender({
 
   return {
     start() {
-      channel.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+      const batches = batchEntriesBySize(manifest.entries, offerBatchBytes);
+      if (batches.length <= 1) {
+        // Small manifest → single legacy frame (an older receiver understands it).
+        channel.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+      } else {
+        // Large manifest → chunk so no single ft-ctrl message exceeds the channel
+        // limit (a one-shot OFFER for a big folder throws + kills ft-ctrl).
+        channel.sendCtrl(offerBeginFrame({ jobId, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+        for (const b of batches) channel.sendCtrl(offerEntriesFrame({ jobId, entries: b }));
+        channel.sendCtrl(offerEndFrame({ jobId }));
+      }
       return finished;
     },
     // Externally abort a send that can never make progress — e.g. the rendezvous
@@ -239,73 +269,100 @@ export function createReceiver({
     // for a well-formed stream — discarded silently, not an error.
   }));
 
+  // Process a COMPLETE offer (legacy single `offer` frame, or the reassembled
+  // chunked offer_begin→offer_entries*→offer_end). Validates, checks space, prompts
+  // for consent, then accepts + seeds the byte-routing sequence.
+  async function beginReceive({ offJobId, protoVer, entries }) {
+    if (typeof protoVer === 'number' && protoVer > TRANSFER_PROTOCOL_VERSION) {
+      channel.sendCtrl(rejectFrame({ jobId: offJobId, reason: 'proto' }));
+      resolveOnce({ jobId: offJobId, ok: false, rejected: 'proto' });
+      return;
+    }
+    let m;
+    try { m = buildManifest(entries); } catch {
+      channel.sendCtrl(rejectFrame({ jobId: offJobId, reason: 'bad_manifest' }));
+      resolveOnce({ jobId: offJobId, ok: false, rejected: 'bad_manifest' });
+      return;
+    }
+    jobId = offJobId; manifest = m;
+    if (!(await hasFreeSpace(destRoot, m.totalBytes))) {
+      channel.sendCtrl(rejectFrame({ jobId, reason: 'nospace' }));
+      resolveOnce({ jobId, ok: false, rejected: 'nospace' });
+      return;
+    }
+    // Thread the REAL transfer jobId (assigned by the sender) into consent — not a
+    // locally-minted correlation id — so the renderer's accept/reject round-trip and
+    // the persisted jobs-store record agree on one id end to end (coherence #2).
+    // Tell the sender we're now prompting a human, so it stops its approval timeout
+    // (deciding is not "no response"). Sent BEFORE the await so it goes out at once.
+    channel.sendCtrl(promptingFrame({ jobId }));
+    if (!(await consent({ jobId, manifest: m }))) {
+      channel.sendCtrl(rejectFrame({ jobId, reason: 'declined' }));
+      resolveOnce({ jobId, ok: false, rejected: 'declined' });
+      return;
+    }
+    const have = {};
+    for (const e of m.entries) have[e.fileId] = await resumeOffsetFor(destRoot, e);
+    job = createReceiveJob({ manifest: m, have });
+    // Build the byte-routing sequence from the MANIFEST (the order the sender
+    // streams files) so routing never depends on FILE_BEGIN timing. Part files
+    // open lazily as the cursor reaches each file — except fully-resumed files
+    // (no bytes to receive), whose .part we open now so FILE_END can finalize.
+    for (const e of m.entries) {
+      const offset = have[e.fileId] || 0;
+      const item = { entry: e, offset, expected: e.size - offset, received: 0, partFile: null, hash: null, finalizing: false };
+      if (item.expected <= 0) {
+        // Already fully present (skip-existing final, or a complete .part from a
+        // prior run). The sender sends NOTHING for such a file — no FILE_BEGIN/
+        // END/bytes (createSendJob marks it `sent` up front) — so we must finalize
+        // it NOW. Parking it in `pending` to await a FILE_END that never arrives
+        // hangs the whole receive (field bug: "stuck at verifying" + orphan .part).
+        // Keep it in `seq` (onBulk's cursor skips expected<=0 items) but not in
+        // `pending`; publish any full .part and mark it done.
+        await publishFullyReceivedFile({ destRoot, relPath: e.path, mtime: e.mtime });
+        doneIds.add(e.fileId);
+        job.markVerified(e.fileId);
+        onEvent({ type: 'file-done', fileId: e.fileId, progress: job.progress() });
+        seq.push(item);
+        continue;
+      }
+      pending.set(e.fileId, item);
+      seq.push(item);
+    }
+    await saveRecord('active');
+    // Only send NON-ZERO resume offsets — the sender defaults any file missing from
+    // `resume` to 0. This keeps the accept frame tiny for a fresh transfer (all
+    // zeros) so it can't itself overrun the data-channel message limit on a huge
+    // folder (the OFFER's sibling failure mode).
+    channel.sendCtrl(acceptFrame({ jobId, resume: job.resumePlan().filter((r) => r.haveBytes > 0) }));
+    watching = true; pokeWatchdog(); // now expecting a steady stream of bytes
+  }
+
+  // Reassembly buffer for a chunked OFFER (offer_begin → offer_entries* → offer_end).
+  let offerAccum = null;
+
   channel.onCtrl((str) => run(async () => {
     pokeWatchdog(); // fresh ctrl frame — the transfer is alive
     const f = parseCtrlFrame(str);
     if (!f) return;
     if (f.t === 'offer') {
-      if (job) return;
-      if (typeof f.protoVer === 'number' && f.protoVer > TRANSFER_PROTOCOL_VERSION) {
-        channel.sendCtrl(rejectFrame({ jobId: f.jobId, reason: 'proto' }));
-        resolveOnce({ jobId: f.jobId, ok: false, rejected: 'proto' });
-        return;
-      }
-      let m;
-      try { m = buildManifest(f.entries); } catch {
-        channel.sendCtrl(rejectFrame({ jobId: f.jobId, reason: 'bad_manifest' }));
-        resolveOnce({ jobId: f.jobId, ok: false, rejected: 'bad_manifest' });
-        return;
-      }
-      jobId = f.jobId; manifest = m;
-      if (!(await hasFreeSpace(destRoot, m.totalBytes))) {
-        channel.sendCtrl(rejectFrame({ jobId, reason: 'nospace' }));
-        resolveOnce({ jobId, ok: false, rejected: 'nospace' });
-        return;
-      }
-      // Thread the REAL transfer jobId (assigned by the sender via the OFFER
-      // frame) into consent — not a locally-minted correlation id — so the
-      // renderer's accept/reject round-trip and the persisted jobs-store
-      // record agree on one id end to end (SP3 coherence contract #2).
-      // Tell the sender we're now prompting a human, so it stops its approval
-      // timeout (deciding is not "no response"). Sent BEFORE the await so it goes
-      // out immediately, however long the user then takes.
-      channel.sendCtrl(promptingFrame({ jobId }));
-      if (!(await consent({ jobId, manifest: m }))) {
-        channel.sendCtrl(rejectFrame({ jobId, reason: 'declined' }));
-        resolveOnce({ jobId, ok: false, rejected: 'declined' });
-        return;
-      }
-      const have = {};
-      for (const e of m.entries) have[e.fileId] = await resumeOffsetFor(destRoot, e);
-      job = createReceiveJob({ manifest: m, have });
-      // Build the byte-routing sequence from the MANIFEST (the order the sender
-      // streams files) so routing never depends on FILE_BEGIN timing. Part files
-      // open lazily as the cursor reaches each file — except fully-resumed files
-      // (no bytes to receive), whose .part we open now so FILE_END can finalize.
-      for (const e of m.entries) {
-        const offset = have[e.fileId] || 0;
-        const item = { entry: e, offset, expected: e.size - offset, received: 0, partFile: null, hash: null, finalizing: false };
-        if (item.expected <= 0) {
-          // Already fully present (skip-existing final, or a complete .part from a
-          // prior run). The sender sends NOTHING for such a file — no FILE_BEGIN/
-          // END/bytes (createSendJob marks it `sent` up front) — so we must finalize
-          // it NOW. Parking it in `pending` to await a FILE_END that never arrives
-          // hangs the whole receive (field bug: "stuck at verifying" + orphan .part).
-          // Keep it in `seq` (onBulk's cursor skips expected<=0 items) but not in
-          // `pending`; publish any full .part and mark it done.
-          await publishFullyReceivedFile({ destRoot, relPath: e.path, mtime: e.mtime });
-          doneIds.add(e.fileId);
-          job.markVerified(e.fileId);
-          onEvent({ type: 'file-done', fileId: e.fileId, progress: job.progress() });
-          seq.push(item);
-          continue;
-        }
-        pending.set(e.fileId, item);
-        seq.push(item);
-      }
-      await saveRecord('active');
-      channel.sendCtrl(acceptFrame({ jobId, resume: job.resumePlan() }));
-      watching = true; pokeWatchdog(); // now expecting a steady stream of bytes
+      if (job || offerAccum) return;
+      await beginReceive({ offJobId: f.jobId, protoVer: f.protoVer, entries: f.entries });
+      return;
+    }
+    if (f.t === 'offer_begin') {
+      if (job || offerAccum) return;
+      offerAccum = { jobId: f.jobId, protoVer: f.protoVer, entries: [] };
+      return;
+    }
+    if (f.t === 'offer_entries') {
+      if (offerAccum && f.jobId === offerAccum.jobId) { for (const e of f.entries) offerAccum.entries.push(e); }
+      return;
+    }
+    if (f.t === 'offer_end') {
+      if (!offerAccum || f.jobId !== offerAccum.jobId) return;
+      const acc = offerAccum; offerAccum = null;
+      await beginReceive({ offJobId: acc.jobId, protoVer: acc.protoVer, entries: acc.entries });
       return;
     }
     if (!jobId || f.jobId !== jobId) return;

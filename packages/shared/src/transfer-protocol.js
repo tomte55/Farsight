@@ -10,6 +10,16 @@ function nn(x) { return Number.isInteger(x) && x >= 0; }
 export function offerFrame({ jobId, entries, totalBytes, totalFiles, protoVer = TRANSFER_PROTOCOL_VERSION }) {
   return JSON.stringify({ t: 'offer', jobId, protoVer, entries, totalBytes, totalFiles });
 }
+// A manifest with many files serializes larger than the WebRTC data-channel max
+// message size (~256KB), and sending it in ONE frame throws + kills ft-ctrl (field
+// bug: a 2974-file folder died on the OFFER send). So a large OFFER is split into
+// offer_begin → offer_entries* → offer_end, each entries batch kept well under the
+// limit. Small manifests still use the single legacy `offer` (old-receiver-compatible).
+export function offerBeginFrame({ jobId, totalBytes, totalFiles, protoVer = TRANSFER_PROTOCOL_VERSION }) {
+  return JSON.stringify({ t: 'offer_begin', jobId, protoVer, totalBytes, totalFiles });
+}
+export function offerEntriesFrame({ jobId, entries }) { return JSON.stringify({ t: 'offer_entries', jobId, entries }); }
+export function offerEndFrame({ jobId }) { return JSON.stringify({ t: 'offer_end', jobId }); }
 // Receiver -> sender the moment the consent prompt is shown: tells the sender the
 // host is alive and now waiting on a HUMAN decision, so the sender can stop its
 // rendezvous/approval timeout (which must not fire while a person is deciding —
@@ -42,6 +52,15 @@ export function parseCtrlFrame(str) {
     case 'offer':
       if (!isStr(o.jobId) || !Array.isArray(o.entries) || !nn(o.totalBytes) || !nn(o.totalFiles)) return null;
       return { t: 'offer', jobId: o.jobId, protoVer: o.protoVer, entries: o.entries, totalBytes: o.totalBytes, totalFiles: o.totalFiles };
+    case 'offer_begin':
+      if (!isStr(o.jobId) || !nn(o.totalBytes) || !nn(o.totalFiles)) return null;
+      return { t: 'offer_begin', jobId: o.jobId, protoVer: o.protoVer, totalBytes: o.totalBytes, totalFiles: o.totalFiles };
+    case 'offer_entries':
+      if (!isStr(o.jobId) || !Array.isArray(o.entries)) return null;
+      return { t: 'offer_entries', jobId: o.jobId, entries: o.entries };
+    case 'offer_end':
+      if (!isStr(o.jobId)) return null;
+      return { t: 'offer_end', jobId: o.jobId };
     case 'accept':
       if (!isStr(o.jobId) || !Array.isArray(o.resume)) return null;
       for (const r of o.resume) { if (!r || !nn(r.fileId) || !nn(r.haveBytes)) return null; }

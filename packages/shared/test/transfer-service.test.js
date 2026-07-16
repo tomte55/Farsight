@@ -36,6 +36,55 @@ function loopback() {
 
 const memStore = () => ({ saved: [], async save(j) { this.saved.push(JSON.parse(JSON.stringify(j))); }, async load() { return null; }, async list() { return this.saved; } });
 
+// A loopback that mimics a real WebRTC data channel's max message size: a ctrl
+// frame larger than maxBytes is DROPPED (as the real send() throws + kills the
+// channel), and the largest frame seen is recorded.
+function sizedLoopback(maxBytes) {
+  const A = makeSide(), B = makeSide(); A.peer = B; B.peer = A;
+  const stats = { maxCtrl: 0, dropped: 0 };
+  return { sideA: A, sideB: B, stats };
+  function makeSide() {
+    const side = {
+      ctrlCb: null, bulkCb: null, peer: null,
+      sendCtrl(s) {
+        stats.maxCtrl = Math.max(stats.maxCtrl, s.length);
+        if (s.length > maxBytes) { stats.dropped += 1; return; } // oversized → lost
+        queueMicrotask(() => side.peer.ctrlCb && side.peer.ctrlCb(s));
+      },
+      sendBulk(b) { const buf = Buffer.from(b); return new Promise((r) => queueMicrotask(() => { side.peer.bulkCb && side.peer.bulkCb(buf); r(); })); },
+      onCtrl(cb) { side.ctrlCb = cb; }, onBulk(cb) { side.bulkCb = cb; },
+    };
+    return side;
+  }
+}
+
+test('SP3 bugfix: a large-manifest OFFER is chunked so it fits the data-channel message limit (a big folder no longer kills ft-ctrl)', async () => {
+  // Repro of the field bug: a 2974-file folder packed the whole manifest into ONE
+  // ft-ctrl OFFER (~300KB), overran the ~256KB channel limit, and the send killed
+  // ft-ctrl before delivery → receiver never saw the OFFER → controller stuck.
+  const srcDir = tmp();
+  const N = 60;
+  for (let i = 0; i < N; i++) {
+    writeFileSync(join(srcDir, `file-with-a-moderately-long-name-${String(i).padStart(4, '0')}.dat`), Buffer.from('x'.repeat(24)));
+  }
+  const { entries, sources } = await walkSource([{ path: srcDir }]);
+  const manifest = buildManifestReal(entries);
+  const dest = tmp();
+  const MAX = 4096; // pretend data-channel message limit (legacy single OFFER > this)
+  const { sideA, sideB, stats } = sizedLoopback(MAX);
+  const rx = createReceiver({ channel: sideB, destRoot: dest, store: memStore(), consent: async () => true, inactivityMs: 1500 });
+  const sender = createSender({ channel: sideA, jobId: 'jbig', manifest, sources, chunkSize: 512, offerBatchBytes: 1024, completionTimeoutMs: 5000 });
+  const rxP = rx.start();
+  const sndP = sender.start();
+
+  const rxRes = await rxP;              // legacy single OFFER would be dropped → this would stall
+  await sndP;
+  expect(rxRes.ok).toBe(true);
+  expect(stats.dropped).toBe(0);        // no frame exceeded the channel limit
+  expect(stats.maxCtrl).toBeLessThanOrEqual(MAX);
+  for (const e of manifest.entries) expect(existsSync(join(dest, ...e.path.split('/')))).toBe(true);
+});
+
 test('loopback send -> receive through the service layer lands files byte-identical and records done', async () => {
   const srcRoot = tmp();
   const src = join(srcRoot, 'payload');

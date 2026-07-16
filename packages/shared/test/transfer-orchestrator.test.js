@@ -196,7 +196,9 @@ test('createReceiver validates the offer, accepts, writes bytes, verifies and fi
   await recvCtrl(offerFrame({ jobId: 'r1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   const accept = sentToSender.find((f) => f.t === 'accept');
   expect(accept).toBeTruthy();
-  expect(accept.resume).toEqual([{ fileId: 0, haveBytes: 0 }]);
+  // Fresh transfer → no non-zero resume offsets, so the accept omits them (keeps
+  // the frame tiny; the sender defaults any missing file to offset 0).
+  expect(accept.resume).toEqual([]);
 
   await recvCtrl(fileBeginFrame({ jobId: 'r1', fileId: 0, offset: 0 }));
   await recvBulk(payload);
