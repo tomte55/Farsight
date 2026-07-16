@@ -35,6 +35,8 @@
     "./transfer-orchestrator": "./src/transfer-orchestrator.js",
     "./transfer-service": "./src/transfer-service.js",
     "./transfer-queue": "./src/transfer-queue.js",
+    "./transfer-auth-gate": "./src/transfer-auth-gate.js",
+    "./transfer-resume": "./src/transfer-resume.js",
     "./update-policy": "./src/update-policy.js",
     "./updater": "./src/updater.js",
     "./log": "./src/log.js",
