@@ -7,6 +7,10 @@
 // Fails closed: any unexpected message or check failure ends the handshake.
 import { buildTranscript } from './connect-transcript.js';
 
+// Default logger: a no-op of the same shape as packages/shared/src/log.js's
+// logger, so callers that don't inject one pay nothing and behavior is unchanged.
+function noopLog() { const n = { debug() {}, info() {}, warn() {}, error() {}, child: () => n }; return n; }
+
 export function createConnectionAuth({
   role, deviceId, publicKey, localFingerprint, remoteFingerprint,
   sign, verify, isAccountKey, nonce,
@@ -117,10 +121,19 @@ export function pumpConnectionAuth(machine, channel, { timeoutMs = 15_000, setTi
 // Used by the renderers (crypto ops are IPC-backed; nonce is Web Crypto).
 export function runConnectionAuth({
   role, channel, deviceId, publicKey, localFingerprint, remoteFingerprint,
-  sign, verify, isAccountKey, nonce, timeoutMs,
+  sign, verify, isAccountKey, nonce, timeoutMs, log = noopLog(),
 }) {
   const machine = createConnectionAuth({
     role, deviceId, publicKey, localFingerprint, remoteFingerprint, sign, verify, isAccountKey, nonce,
   });
-  return pumpConnectionAuth(machine, channel, { timeoutMs });
+  // Lifecycle logging (redaction-safe): the role + DTLS fingerprints are
+  // non-secret and highly diagnostic; a fingerprint mismatch surfaces as a
+  // `bad_signature` failure (this module binds fingerprints into the signed
+  // transcript rather than comparing them). Never logs keys, signatures,
+  // nonces, or the transcript.
+  log.info(`handshake begin role=${role} localFp=${localFingerprint} remoteFp=${remoteFingerprint}`);
+  return pumpConnectionAuth(machine, channel, { timeoutMs }).then(
+    (result) => { log.info('handshake ok'); return result; },
+    (err) => { log.warn(`handshake failed reason=${err?.message || 'error'}`); throw err; },
+  );
 }
