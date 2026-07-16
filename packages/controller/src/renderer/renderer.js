@@ -653,14 +653,19 @@ function hostRow(d) {
     btn.onclick = () => { closeFleet(); connectTo({ targetId: d.signalingId, candidates: [], linked: true }); };
     right.appendChild(btn);
 
-    // SP3 Phase 4: password-free "Send…" to an own-fleet device. Same
-    // device-keypair handshake as Connect authenticates the transfer end-to-end
-    // (no session password); files are pushed with the recipient's consent.
-    const sendBtn = document.createElement('button');
-    sendBtn.className = 'btn btn-ghost host-send';
-    sendBtn.textContent = 'Send…';
-    sendBtn.onclick = () => sendToFleetDevice(d, sendBtn);
-    right.appendChild(sendBtn);
+    // SP3 Phase 4: password-free send to an own-fleet device. The same
+    // device-keypair handshake as Connect authenticates the transfer end to end
+    // (no session password), and own-fleet receives are auto-accepted on the host.
+    // Two buttons because Windows/Linux can't pick files AND a folder in one OS
+    // dialog (same reason the ad-hoc Send panel has two). Folder = the flagship
+    // "send a game folder to your fleet" case.
+    for (const [label, mode] of [['Files…', 'files'], ['Folder…', 'folder']]) {
+      const b = document.createElement('button');
+      b.className = 'btn btn-ghost host-send';
+      b.textContent = label;
+      b.onclick = () => sendToFleetDevice(d, b, mode);
+      right.appendChild(b);
+    }
   }
 
   row.append(dot, main, right);
@@ -949,8 +954,8 @@ sendFolderBtn.addEventListener('click', () => doSend('folder'));
 // user into the Transfers panel to watch progress. `d.signalingId` is where the
 // device is reachable; `d.id` is its stable deviceId (threaded for future
 // presence-driven auto-resume record matching).
-async function sendToFleetDevice(d, btn) {
-  const paths = await window.farsightIpc.transferPickPaths('files');
+async function sendToFleetDevice(d, btn, mode = 'files') {
+  const paths = await window.farsightIpc.transferPickPaths(mode);
   if (!paths || paths.length === 0) return; // dialog cancelled
   if (btn) btn.disabled = true;
   try {
