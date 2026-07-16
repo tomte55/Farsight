@@ -27,18 +27,46 @@ let authChannel = null;
 // receiver never sees the offer, never consents, never accepts).
 const pendingCtrlOut = [];
 
+// ── Diagnostics ──────────────────────────────────────────────────────────────
+// Counters + a 1s heartbeat, surfaced in the app log. If a transfer stalls the
+// log shows exactly where: `tick` stopping = the hidden window was throttled/
+// frozen; bulkIn/ctrlIn frozen = nothing arriving over the wire; bufAmt pinned
+// high = backpressure not draining; bulkOut climbing but bulkIn flat = the
+// send side is fine and the receive side is stuck.
+let ftRole = '?';
+let bulkIn = 0, bulkOut = 0, ctrlIn = 0, ctrlOut = 0;
+function logStatus(extra) {
+  try {
+    window.farsightTransfer.logStatus({
+      role: ftRole,
+      conn: pc ? pc.connectionState : 'no-pc',
+      ice: pc ? pc.iceConnectionState : '-',
+      ctrlDC: ctrlChannel ? ctrlChannel.readyState : '-',
+      bulkDC: bulkChannel ? bulkChannel.readyState : '-',
+      bufAmt: bulkChannel ? bulkChannel.bufferedAmount : 0,
+      bulkIn, bulkOut, ctrlIn, ctrlOut, pendCtrl: pendingCtrlOut.length,
+      ...(extra || {}),
+    });
+  } catch { /* guarded */ }
+}
+setInterval(() => logStatus({ tick: true }), 1000);
+
 function reportState(state) {
+  logStatus({ event: `conn:${state}` });
   try { window.farsightTransfer.reportSessionState(state); } catch { /* guarded */ }
 }
 
 function wireDataChannel(ch) {
+  ch.addEventListener('open', () => logStatus({ event: `dc-open:${ch.label}` }));
+  ch.addEventListener('close', () => logStatus({ event: `dc-close:${ch.label}` }));
+  ch.addEventListener('error', () => logStatus({ event: `dc-error:${ch.label}` }));
   if (ch.label === 'ft-ctrl') {
     ctrlChannel = ch;
     // Flush anything queued before the channel opened (e.g. the OFFER frame).
     const flush = () => { while (pendingCtrlOut.length) { try { ch.send(pendingCtrlOut.shift()); } catch { /* guarded */ } } };
     if (ch.readyState === 'open') flush(); else ch.addEventListener('open', flush);
     ch.addEventListener('message', (m) => {
-      if (typeof m.data === 'string') { try { window.farsightTransfer.emitCtrl(m.data); } catch { /* guarded */ } }
+      if (typeof m.data === 'string') { ctrlIn += 1; try { window.farsightTransfer.emitCtrl(m.data); } catch { /* guarded */ } }
     });
     return;
   }
@@ -48,7 +76,7 @@ function wireDataChannel(ch) {
     try { ch.bufferedAmountLowThreshold = 262144; } catch { /* guarded */ }
     bulkChannel = ch;
     ch.addEventListener('message', (m) => {
-      if (m.data instanceof ArrayBuffer) { try { window.farsightTransfer.emitBulk(m.data); } catch { /* guarded */ } }
+      if (m.data instanceof ArrayBuffer) { bulkIn += 1; try { window.farsightTransfer.emitBulk(m.data); } catch { /* guarded */ } }
     });
     ch.addEventListener('bufferedamountlow', () => { try { window.farsightTransfer.emitCredit(); } catch { /* guarded */ } });
     return;
@@ -90,6 +118,8 @@ function wireConnectionState(isInitiator) {
 window.farsightTransfer.onStartRendezvous(async (params) => {
   const { signalingUrl, role, targetId, password, linked, sessionId, version } = params || {};
   const isInitiator = role === 'initiator';
+  ftRole = role || '?';
+  logStatus({ event: 'rendezvous-start' });
 
   signal = createSignalingClient(signalingUrl, {
     [MSG.ICE_SERVERS]: async (m) => {
@@ -136,14 +166,14 @@ window.farsightTransfer.onSendCtrl((str) => {
   // Buffer until the ft-ctrl channel is actually open, then flush in order (see
   // pendingCtrlOut) — dropping pre-open frames deadlocked the transfer.
   try {
-    if (ctrlChannel && ctrlChannel.readyState === 'open') ctrlChannel.send(str);
+    if (ctrlChannel && ctrlChannel.readyState === 'open') { ctrlChannel.send(str); ctrlOut += 1; }
     else pendingCtrlOut.push(str);
   } catch { /* guarded */ }
 });
 window.farsightTransfer.onSendBulk((buf) => {
   try {
     if (!(bulkChannel && bulkChannel.readyState === 'open')) return;
-    bulkChannel.send(buf);
+    bulkChannel.send(buf); bulkOut += 1;
     // Credit-based backpressure grants exactly one credit per chunk. Grant it NOW
     // if the channel still has room (buffered <= threshold); otherwise the
     // 'bufferedamountlow' handler grants it once the buffer drains. Granting ONLY

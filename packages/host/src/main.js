@@ -96,6 +96,7 @@ function receivedFilesDir() {
 // the IPC round-trip, and the persisted jobs-store record all agree on one id.
 const pendingConsent = new Map(); // jobId -> resolve(boolean)
 function requestReceiveConsent({ jobId, manifest }) {
+  log?.child('transfer').info(`consent prompt shown job=${jobId} files=${manifest?.totalFiles} bytes=${manifest?.totalBytes}`);
   return new Promise((resolve) => {
     if (!mainWindow || mainWindow.isDestroyed()) { resolve(false); return; }
     pendingConsent.set(jobId, resolve);
@@ -108,6 +109,7 @@ function requestReceiveConsent({ jobId, manifest }) {
 }
 ipcMain.on('transfer:respond-consent', (_e, input) => {
   const { jobId, accept } = input || {};
+  log?.child('transfer').info(`consent responded job=${jobId} accept=${!!accept}`);
   const resolve = pendingConsent.get(jobId);
   if (!resolve) return;
   pendingConsent.delete(jobId);
@@ -129,7 +131,7 @@ function getTransferService() {
       // identical to the controller's openChannel: transfer-service always
       // calls this as { role, target, sessionId }.
       openChannel: async ({ role, target, sessionId }) => {
-        const worker = createTransferWorker();
+        const worker = createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)) });
         const stored = readStoredConfig();
         const signalingUrl = resolveSignalingUrl({
           envUrl: process.env.FARSIGHT_SIGNALING_URL,
@@ -149,6 +151,8 @@ function getTransferService() {
         return { channel: worker.channel, close: async () => worker.close() };
       },
       onEvent: (ev) => {
+        const prog = ev.progress ? ` files=${ev.progress.filesDone ?? ev.progress.filesSent}/${ev.progress.filesTotal}` : '';
+        log?.child('transfer').info(`recv ev=${ev.type || 'progress'} job=${ev.jobId}${prog}${ev.reason ? ` reason=${ev.reason}` : ''}`);
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('transfer:event', ev);
       },
     });
@@ -164,6 +168,7 @@ function getTransferService() {
 ipcMain.handle('transfer:incoming', async (_e, input) => {
   const sessionId = input && input.sessionId;
   if (typeof sessionId !== 'string' || sessionId.length === 0) return { error: 'invalid_request' };
+  log?.child('transfer').info(`incoming transfer_request session=${sessionId}`);
   getTransferService().startReceive({ rendezvous: { sessionId } })
     .catch((err) => log?.child('transfer').warn(`receive failed: ${err?.message || err}`));
   return { ok: true };

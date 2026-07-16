@@ -21,6 +21,7 @@ const topics = {
   sessionState: `ft-session-state:${workerId}`,
   statsRequest: `ft-stats-request:${workerId}`,
   statsResponse: `ft-stats-response:${workerId}`,
+  statusLog: `ft-status-log:${workerId}`,
 };
 
 contextBridge.exposeInMainWorld('farsightTransfer', {
@@ -41,4 +42,7 @@ contextBridge.exposeInMainWorld('farsightTransfer', {
   // the RTCPeerConnection lives in this renderer, not in main.
   onStatsRequest: (cb) => ipcRenderer.on(topics.statsRequest, () => cb()),
   reportStats: (stats) => ipcRenderer.send(topics.statsResponse, stats),
+  // Periodic diagnostic status (connection/data-channel state, backpressure,
+  // message counters) — surfaced in the app log to diagnose stalled transfers.
+  logStatus: (obj) => ipcRenderer.send(topics.statusLog, obj),
 });

@@ -37,10 +37,11 @@ function topicsFor(workerId) {
     sessionState: `ft-session-state:${workerId}`, // worker renderer -> main: RTCPeerConnection state
     statsRequest: `ft-stats-request:${workerId}`, // main -> worker renderer: please report getStats()
     statsResponse: `ft-stats-response:${workerId}`, // worker renderer -> main: getStats() result
+    statusLog: `ft-status-log:${workerId}`, // worker renderer -> main: periodic diagnostic status
   };
 }
 
-export function createTransferWorker() {
+export function createTransferWorker({ onLog } = {}) {
   workerCounter += 1;
   const workerId = `w${workerCounter}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const topics = topicsFor(workerId);
@@ -52,6 +53,12 @@ export function createTransferWorker() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true, // R-7: defense in depth
+      // This window is ALWAYS hidden (show:false) but must pump the WebRTC data
+      // channel + IPC continuously. Chromium background-throttles and lowers the
+      // priority of hidden renderers, so under CPU contention (e.g. the visible
+      // window rendering the Transfers panel) the transfer starves and stalls
+      // mid-flight. Keep it running at full speed.
+      backgroundThrottling: false,
       additionalArguments: [`--ft-worker-id=${workerId}`],
     },
   });
@@ -102,6 +109,11 @@ export function createTransferWorker() {
 
   let sessionStateCb = null;
   onIpc(topics.sessionState, (_e, state) => { if (sessionStateCb) sessionStateCb(state); });
+
+  // Diagnostic: the worker renderer periodically reports its transport status
+  // (connection/data-channel state, bufferedAmount, message counters). Routed to
+  // the app log so a stalled transfer can be diagnosed from a user's logs.
+  if (typeof onLog === 'function') onIpc(topics.statusLog, (_e, obj) => { try { onLog({ workerId, ...obj }); } catch { /* ignore */ } });
 
   let closed = false;
 

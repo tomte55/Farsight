@@ -82,7 +82,7 @@ function getTransferService() {
       // { role, target, sessionId } — 'initiate' carries target (sessionId
       // undefined), 'attach' carries sessionId (target undefined).
       openChannel: async ({ role, target, sessionId }) => {
-        const worker = createTransferWorker();
+        const worker = createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)) });
         const stored = readStoredConfig();
         const signalingUrl = resolveSignalingUrl({
           envUrl: process.env.FARSIGHT_SIGNALING_URL,
@@ -116,6 +116,8 @@ function getTransferService() {
         };
       },
       onEvent: (ev) => {
+        const prog = ev.progress ? ` files=${ev.progress.filesSent ?? ev.progress.filesDone}/${ev.progress.filesTotal}` : '';
+        log?.child('transfer').info(`send ev=${ev.type || 'progress'} job=${ev.jobId}${prog}${ev.reason ? ` reason=${ev.reason}` : ''}`);
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('transfer:event', ev);
       },
     });
@@ -142,6 +144,7 @@ ipcMain.handle('transfer:send', async (_e, input) => {
     const { entries, sources } = await walkSource(paths.map((p) => ({ path: p })));
     const manifest = buildManifest(entries);
     const jobId = newJobId();
+    log?.child('transfer').info(`send start job=${jobId} target=${target.id} files=${manifest.totalFiles} bytes=${manifest.totalBytes}`);
     // Fire-and-forget: startSend()'s promise only resolves once the WHOLE
     // transfer finishes, so awaiting it here would block the renderer's
     // transferSend() call for the entire transfer. Progress is instead
