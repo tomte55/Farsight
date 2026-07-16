@@ -430,6 +430,8 @@ function openAccount() {
   appEl.style.display = 'none';
   setupEl.hidden = true;
   accountEl.hidden = false;
+  transfersPanelEl.hidden = true;
+  contactsPanelEl.hidden = true;
   refreshAccountView();
 }
 function closeAccount() {
@@ -690,6 +692,7 @@ function openTransfersPanel() {
   appEl.style.display = 'none';
   setupEl.hidden = true;
   accountEl.hidden = true;
+  contactsPanelEl.hidden = true;
   transfersPanelEl.hidden = false;
   refreshTransfersList();
 }
@@ -700,6 +703,112 @@ function closeTransfersPanel() {
 document.getElementById('menu-transfers').addEventListener('click', () => { settingsMenu.classList.remove('open'); openTransfersPanel(); });
 document.getElementById('transfers-close').addEventListener('click', closeTransfersPanel);
 document.getElementById('transfers-refresh').addEventListener('click', refreshTransfersList);
+
+// ── Contacts (friends list) ─────────────────────────────────────────────────
+// Mirrors the controller's contacts panel (add-by-email, incoming
+// accept/decline, outgoing pending), backed by the same
+// window.farsightIpc.accountContacts* IPC surface. The host NEVER initiates a
+// transfer, so accepted-contact rows show only name + online/offline — no
+// Files…/Folder… send buttons.
+const contactsPanelEl = document.getElementById('contacts-panel');
+function openContactsPanel() {
+  appEl.style.display = 'none';
+  setupEl.hidden = true;
+  accountEl.hidden = true;
+  transfersPanelEl.hidden = true;
+  contactsPanelEl.hidden = false;
+  loadContacts();
+}
+function closeContactsPanel() {
+  contactsPanelEl.hidden = true;
+  appEl.style.display = 'block';
+}
+
+async function loadContacts() {
+  setMsg(document.getElementById('contacts-error'), '');
+  const res = await window.farsightIpc.accountContacts();
+  if (!res.ok) {
+    if (res.error === 'not_signed_in') { closeContactsPanel(); openAccount(); return; }
+    setMsg(document.getElementById('contacts-error'), 'Couldn’t load contacts. Check your connection.');
+    return;
+  }
+  renderContacts(res.data || { accepted: [], incoming: [], outgoing: [] });
+}
+
+function renderContacts(view) {
+  const accepted = view.accepted || [], incoming = view.incoming || [], outgoing = view.outgoing || [];
+  document.getElementById('contacts-sub').textContent =
+    `${accepted.length} contact${accepted.length === 1 ? '' : 's'}`;
+
+  // Incoming requests → Accept / Decline
+  const inc = document.getElementById('contacts-incoming');
+  inc.replaceChildren();
+  for (const r of incoming) {
+    const row = document.createElement('div'); row.className = 'host-row';
+    const main = document.createElement('div'); main.className = 'host-main';
+    const name = document.createElement('div'); name.className = 'host-name'; name.textContent = r.email;
+    const meta = document.createElement('div'); meta.className = 'host-meta'; meta.textContent = 'wants to connect';
+    main.append(name, meta);
+    const right = document.createElement('div'); right.className = 'host-right';
+    const acc = document.createElement('button'); acc.className = 'btn btn-primary'; acc.textContent = 'Accept';
+    acc.onclick = async () => { await window.farsightIpc.accountContactAccept(r.contactId); loadContacts(); };
+    const dec = document.createElement('button'); dec.className = 'btn btn-ghost'; dec.textContent = 'Decline';
+    dec.onclick = async () => { await window.farsightIpc.accountContactDecline(r.contactId); loadContacts(); };
+    right.append(acc, dec);
+    row.append(main, right);
+    inc.appendChild(row);
+  }
+
+  // Accepted contacts → name + online/offline only. The host never sends, so
+  // there are no Files…/Folder… buttons here (unlike the controller's version).
+  const list = document.getElementById('contacts-list');
+  list.replaceChildren();
+  if (!accepted.length && !incoming.length && !outgoing.length) {
+    const empty = document.createElement('div'); empty.className = 'fleet-empty';
+    empty.textContent = 'No contacts yet. Add someone by their Farsight account email.';
+    list.appendChild(empty);
+  }
+  for (const c of accepted) {
+    const row = document.createElement('div'); row.className = 'host-row';
+    const dot = document.createElement('div'); dot.className = `host-dot ${c.online ? 'on' : ''}`;
+    const main = document.createElement('div'); main.className = 'host-main';
+    const name = document.createElement('div'); name.className = 'host-name'; name.textContent = c.email;
+    const meta = document.createElement('div'); meta.className = 'host-meta'; meta.textContent = c.online ? 'online' : 'offline';
+    main.append(name, meta);
+    row.append(dot, main);
+    list.appendChild(row);
+  }
+
+  // Outgoing pending
+  const out = document.getElementById('contacts-outgoing');
+  out.replaceChildren();
+  for (const r of outgoing) {
+    const row = document.createElement('div'); row.className = 'host-row';
+    const main = document.createElement('div'); main.className = 'host-main';
+    const name = document.createElement('div'); name.className = 'host-name'; name.textContent = r.email;
+    const meta = document.createElement('div'); meta.className = 'host-meta'; meta.textContent = 'invite sent — waiting to accept';
+    main.append(name, meta);
+    row.appendChild(main);
+    out.appendChild(row);
+  }
+}
+
+document.getElementById('menu-contacts').addEventListener('click', () => { settingsMenu.classList.remove('open'); openContactsPanel(); });
+document.getElementById('contacts-close').addEventListener('click', closeContactsPanel);
+document.getElementById('contacts-refresh').addEventListener('click', loadContacts);
+document.getElementById('contact-add-btn').addEventListener('click', async () => {
+  const email = document.getElementById('contact-add-email').value.trim();
+  if (!email) return;
+  const res = await window.farsightIpc.accountContactAdd(email);
+  if (!res.ok) {
+    setMsg(document.getElementById('contacts-error'), res.error === 'no_such_user'
+      ? 'No Farsight account with that email — ask them to sign up first.'
+      : 'Could not add that contact.');
+    return;
+  }
+  document.getElementById('contact-add-email').value = '';
+  loadContacts();
+});
 
 // Paint the subtle build-version label in the bottom-left corner.
 window.farsightIpc.getAppVersion().then((v) => {

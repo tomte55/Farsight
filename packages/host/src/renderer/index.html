@@ -63,6 +63,13 @@
   .host-main { flex: 1; min-width: 0; }
   .host-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .host-meta { font-size: 11.5px; color: var(--sub); margin-top: 3px; font-family: var(--mono); }
+  .host-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: #39395400; box-shadow: inset 0 0 0 2px #3a3a52; }
+  .host-row.online .host-dot { background: var(--acc2); box-shadow: 0 0 9px rgba(74,168,255,.65); }
+  .host-right { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
+  /* Contacts panel (SP3): mirrors the controller's contacts card sizing. */
+  #contacts-panel { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  #contacts-panel[hidden] { display: none; }
+  #contacts-panel .acct-wrap { width: 480px; max-width: 100%; min-width: 0; }
   .xfer-row { flex-direction: column; align-items: stretch; gap: 6px; }
   .xfer-row .host-main { display: flex; flex-direction: column; gap: 5px; }
   .xfer-bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
@@ -92,6 +99,7 @@
 <button id="settings-cog" class="cog" title="Settings" aria-label="Settings">⚙</button>
 <div id="settings-menu" class="menu">
   <button id="menu-account">Link to account…</button>
+  <button id="menu-contacts">Contacts…</button>
   <button id="menu-transfers">Transfers</button>
   <button id="menu-change-server">Change signaling server…</button>
   <button id="menu-check-updates">Check for updates</button>
@@ -158,6 +166,31 @@
       <p id="transfers-empty" class="fleet-empty" hidden>No transfers yet. Files pushed to you by a peer will show up here.</p>
     </div>
     <button id="transfers-close" class="linkbtn acct-back">← Back</button>
+  </div>
+</div>
+
+<!-- Contacts panel (SP3): the host's friends list. Reached from the settings
+     menu. The host receives files, so accepted-contact rows show only
+     name + online/offline — no Files…/Folder… send buttons. -->
+<div id="contacts-panel" hidden>
+  <div class="acct-wrap">
+    <div class="card">
+      <div class="fleet-head">
+        <div><div class="acct-title">Contacts</div><div id="contacts-sub" class="statusline" style="margin-top:2px"></div></div>
+        <div class="fleet-head-actions">
+          <button id="contacts-refresh" class="btn btn-ghost" style="padding:7px 12px">Refresh</button>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin:10px 0">
+        <input id="contact-add-email" class="input" type="email" placeholder="Add a contact by email" style="flex:1" />
+        <button id="contact-add-btn" class="btn btn-primary">Add</button>
+      </div>
+      <p id="contacts-error" class="statusline" style="color:var(--danger-ink)"></p>
+      <div id="contacts-incoming"></div>
+      <div id="contacts-list"></div>
+      <div id="contacts-outgoing"></div>
+    </div>
+    <button id="contacts-close" class="linkbtn acct-back">← Back</button>
   </div>
 </div>
 
