@@ -46,7 +46,7 @@ function isTerminalReason(reason) {
   return /rejected:|receiver_incomplete|canceled|aborted|bad_manifest|nospace|proto|declined/.test(String(reason || ''));
 }
 
-export function createTransferService({ store, transferDir, consent, openChannel, onEvent = () => {}, rendezvousTimeoutMs = 30000, receiveCloseGraceMs = 2000, delay = (ms) => new Promise((r) => setTimeout(r, ms)),
+export function createTransferService({ store, transferDir, consent, openChannel, onEvent = () => {}, rendezvousTimeoutMs = 30000, receiveCloseGraceMs = 2000, consentClassifyTimeoutMs = 8000, delay = (ms) => new Promise((r) => setTimeout(r, ms)),
   // SP3 Phase 4 auto-resume: when provided, an own-fleet interrupted send is
   // re-established via the resume watcher (getFleet resolves the peer's current
   // signalingId by deviceId). resumeOpts injects the watcher's timers for tests.
@@ -256,10 +256,19 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // device-keypair handshake's verified peer key (openChannel's `peerAuth`,
       // resolved by main via classifyPublicKey), NOT the blanket `linked` flag —
       // `linked` only says the rendezvous ran the handshake, not who it verified.
+      // `peerAuth` only resolves after an UNBOUNDED network call (classifyPublicKey
+      // against auth.sovexa.org) — race it against a timeout so a stalled/offline
+      // auth server can't hang the receive forever. Fail-closed means falling
+      // through to the human `consent` prompt, never auto-accepting.
       const receiveConsent = async ({ jobId, manifest }) => {
         let tier = null;
-        try { tier = peerAuth ? (await peerAuth).tier : null; } catch { tier = null; }
-        if (tier === 'fleet') return true;
+        try {
+          if (peerAuth) {
+            const timed = new Promise((res) => setTimeout(() => res({ tier: null }), consentClassifyTimeoutMs));
+            tier = (await Promise.race([peerAuth, timed])).tier;
+          }
+        } catch { tier = null; }
+        if (tier === 'fleet') return true;   // own-fleet auto-accepts; contact/adhoc/timeout → prompt
         return consent({ jobId, manifest });
       };
       const receiver = createReceiver({

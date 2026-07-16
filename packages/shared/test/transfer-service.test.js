@@ -261,6 +261,39 @@ test('SP3 P5 Task 6: consent branches on the verified peer tier — fleet auto-a
   expect(await runWithTier(null)).toBe(true); // ad-hoc / unverified → prompted
 });
 
+test('review fix: a peerAuth that never resolves (classifyPublicKey stuck) times out and falls through to the consent prompt, never auto-accepts', async () => {
+  // peerAuth only resolves after openChannel's main-process classifyPublicKey
+  // network call. If that call hangs (auth server slow/down), awaiting it
+  // directly would hang the receive forever. consentClassifyTimeoutMs bounds
+  // it — the race must resolve to tier:null (prompt), not hang and not
+  // auto-accept.
+  const { manifest, sources } = await oneFileSource();
+  const dest = tmp();
+  const { sideA, sideB } = loopback();
+  let consentCalled = false;
+
+  const receiverSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: dest,
+    consent: async () => { consentCalled = true; return true; },
+    // Never resolves — models a stuck/offline classifyPublicKey call.
+    openChannel: async () => ({ channel: sideB, close: async () => {}, peerAuth: new Promise(() => {}) }),
+    receiveCloseGraceMs: 0,
+    consentClassifyTimeoutMs: 20,
+  });
+  const senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+  });
+
+  const recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's', linked: true } });
+  const sendResult = await senderSvc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'dev', linked: true } });
+  const recvResult = await recvPromise;
+
+  expect(sendResult.ok).toBe(true);
+  expect(recvResult.ok).toBe(true);
+  expect(consentCalled).toBe(true); // timed out → fell through to prompt, did not hang, did not auto-accept
+});
+
 test('SP3 P4: the resume watcher re-walks sourceRoots and re-sends an interrupted own-fleet job to completion', async () => {
   const srcDir = tmp();
   const srcFile = join(srcDir, 'resume-me.txt');
