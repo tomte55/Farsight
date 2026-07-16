@@ -86,8 +86,8 @@
   /* SP3 file transfer: Send panel + Transfers panel (send path only for now —
      see main.js). Mirror #account's full-height centered panel, hidden by
      default via the [hidden] attribute out-specifying the display rule. */
-  #send-panel, #transfers-panel { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
-  #send-panel[hidden], #transfers-panel[hidden] { display: none; }
+  #send-panel, #transfers-panel, #contacts-panel { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+  #send-panel[hidden], #transfers-panel[hidden], #contacts-panel[hidden] { display: none; }
   #transfers-panel .acct-wrap { width: 480px; }
   .xfer-row { flex-direction: column; align-items: stretch; gap: 6px; }
   .xfer-row .host-main { display: flex; flex-direction: column; gap: 5px; }

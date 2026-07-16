@@ -769,7 +769,7 @@ function renderContacts(view) {
     list.appendChild(empty);
   }
   for (const c of accepted) {
-    const row = document.createElement('div'); row.className = 'host-row';
+    const row = document.createElement('div'); row.className = 'host-row' + (c.online ? ' online' : '');
     const dot = document.createElement('div'); dot.className = `host-dot ${c.online ? 'on' : ''}`;
     const main = document.createElement('div'); main.className = 'host-main';
     const name = document.createElement('div'); name.className = 'host-name'; name.textContent = c.email;

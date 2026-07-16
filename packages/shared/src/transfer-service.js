@@ -264,8 +264,13 @@ export function createTransferService({ store, transferDir, consent, openChannel
         let tier = null;
         try {
           if (peerAuth) {
-            const timed = new Promise((res) => setTimeout(() => res({ tier: null }), consentClassifyTimeoutMs));
-            tier = (await Promise.race([peerAuth, timed])).tier;
+            let timerId = null;
+            const timed = new Promise((res) => { timerId = setTimeout(() => res({ tier: null }), consentClassifyTimeoutMs); });
+            try {
+              tier = (await Promise.race([peerAuth, timed])).tier;
+            } finally {
+              clearTimeout(timerId);
+            }
           }
         } catch { tier = null; }
         if (tier === 'fleet') return true;   // own-fleet auto-accepts; contact/adhoc/timeout → prompt
