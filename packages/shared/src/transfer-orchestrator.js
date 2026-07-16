@@ -4,7 +4,7 @@
 // ft-ctrl and ft-bulk are INDEPENDENTLY ordered — the receiver routes bulk by
 // counting against manifest sizes, and all handlers are serialized. See spec §5/§6.
 import {
-  offerFrame, fileBeginFrame, fileEndFrame, jobDoneFrame, acceptFrame, rejectFrame,
+  offerFrame, fileBeginFrame, fileEndFrame, jobDoneFrame, acceptFrame, rejectFrame, promptingFrame,
   parseCtrlFrame, TRANSFER_PROTOCOL_VERSION,
 } from './transfer-protocol.js';
 import { buildManifest, skipExisting } from './transfer-manifest.js';
@@ -51,6 +51,10 @@ export function createSender({ channel, jobId, manifest, sources, chunkSize = 13
   channel.onCtrl((str) => run(async () => {
     const f = parseCtrlFrame(str);
     if (!f || f.jobId !== jobId) return;
+    // The receiver is prompting the user — it's alive and awaiting a human
+    // decision. Surface it so the app can cancel the approval timeout (a person
+    // deciding must NOT read as "host didn't respond").
+    if (f.t === 'prompting') { onEvent({ type: 'prompting' }); return; }
     if (f.t === 'reject') { onEvent({ type: 'declined', reason: f.reason }); fail(new Error(`rejected: ${f.reason}`)); return; }
     if (f.t === 'cancel') { canceled = true; fail(new Error('canceled')); return; }
     // pump() is intentionally NOT awaited here: it must run outside the
@@ -87,7 +91,15 @@ async function resumeOffsetFor(destRoot, entry) {
   return 0;
 }
 
-export function createReceiver({ channel, destRoot, store, consent, peer = {}, onEvent = () => {} }) {
+export function createReceiver({
+  channel, destRoot, store, consent, peer = {}, onEvent = () => {},
+  // A consented, active receive that stops getting data (the sender vanished /
+  // the connection dropped) must NOT hang "Receiving" forever — after this long
+  // with no ctrl/bulk frame, fail it and persist the terminal state so the UI
+  // clears it (and a Refresh reflects it). Armed only AFTER accept, so a human
+  // deliberating over the consent prompt never trips it. Timer injectable for tests.
+  inactivityMs = 60000, setTimer = setTimeout, clearTimer = clearTimeout,
+}) {
   let job = null, manifest = null, jobId = null, ok = true;
   let jobDoneSeen = false;
   const doneIds = new Set(), failedIds = new Set();
@@ -104,8 +116,26 @@ export function createReceiver({ channel, destRoot, store, consent, peer = {}, o
   let settled = false;
   let resolve, reject;
   const finished = new Promise((res, rej) => { resolve = res; reject = rej; });
-  const resolveOnce = (v) => { if (!settled) { settled = true; resolve(v); } };
-  const fail = (e) => { if (!settled) { settled = true; reject(e); } };
+
+  // Inactivity watchdog for an active transfer (see the inactivityMs doc above).
+  let inactive = null;     // active timer handle, or null
+  let watching = false;    // armed only between accept and settle
+  function stopWatchdog() { if (inactive) { clearTimer(inactive); inactive = null; } }
+  function pokeWatchdog() {
+    if (!watching || settled || !(inactivityMs > 0)) return;
+    if (inactive) clearTimer(inactive);
+    inactive = setTimer(() => run(async () => {
+      if (settled) return;
+      ok = false;
+      try { await saveRecord('error'); } catch { /* best effort */ }
+      onEvent({ type: 'interrupted' });
+      fail(new Error('stalled'));
+    }), inactivityMs);
+    if (inactive && inactive.unref) inactive.unref();
+  }
+
+  const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopWatchdog(); resolve(v); } };
+  const fail = (e) => { if (!settled) { settled = true; watching = false; stopWatchdog(); reject(e); } };
   const run = serializer(fail);
 
   // Resolves the receiver's promise only once JOB_DONE has actually been seen
@@ -154,6 +184,7 @@ export function createReceiver({ channel, destRoot, store, consent, peer = {}, o
   }
 
   channel.onBulk((buf) => run(async () => {
+    pokeWatchdog(); // fresh bytes — the transfer is alive
     let chunk = Buffer.from(buf);
     while (chunk.length > 0 && queue.length > 0) {
       const item = queue[0];
@@ -173,6 +204,7 @@ export function createReceiver({ channel, destRoot, store, consent, peer = {}, o
   }));
 
   channel.onCtrl((str) => run(async () => {
+    pokeWatchdog(); // fresh ctrl frame — the transfer is alive
     const f = parseCtrlFrame(str);
     if (!f) return;
     if (f.t === 'offer') {
@@ -198,6 +230,10 @@ export function createReceiver({ channel, destRoot, store, consent, peer = {}, o
       // frame) into consent — not a locally-minted correlation id — so the
       // renderer's accept/reject round-trip and the persisted jobs-store
       // record agree on one id end to end (SP3 coherence contract #2).
+      // Tell the sender we're now prompting a human, so it stops its approval
+      // timeout (deciding is not "no response"). Sent BEFORE the await so it goes
+      // out immediately, however long the user then takes.
+      channel.sendCtrl(promptingFrame({ jobId }));
       if (!(await consent({ jobId, manifest: m }))) {
         channel.sendCtrl(rejectFrame({ jobId, reason: 'declined' }));
         resolveOnce({ jobId, ok: false, rejected: 'declined' });
@@ -208,6 +244,7 @@ export function createReceiver({ channel, destRoot, store, consent, peer = {}, o
       job = createReceiveJob({ manifest: m, have });
       await saveRecord('active');
       channel.sendCtrl(acceptFrame({ jobId, resume: job.resumePlan() }));
+      watching = true; pokeWatchdog(); // now expecting a steady stream of bytes
       return;
     }
     if (!jobId || f.jobId !== jobId) return;

@@ -10,6 +10,12 @@ function nn(x) { return Number.isInteger(x) && x >= 0; }
 export function offerFrame({ jobId, entries, totalBytes, totalFiles, protoVer = TRANSFER_PROTOCOL_VERSION }) {
   return JSON.stringify({ t: 'offer', jobId, protoVer, entries, totalBytes, totalFiles });
 }
+// Receiver -> sender the moment the consent prompt is shown: tells the sender the
+// host is alive and now waiting on a HUMAN decision, so the sender can stop its
+// rendezvous/approval timeout (which must not fire while a person is deciding —
+// otherwise the sender falsely reports "host didn't respond" while the prompt is
+// still up, and a later Accept lands on a torn-down channel).
+export function promptingFrame({ jobId }) { return JSON.stringify({ t: 'prompting', jobId }); }
 export function acceptFrame({ jobId, resume }) { return JSON.stringify({ t: 'accept', jobId, resume }); }
 export function rejectFrame({ jobId, reason = '' }) { return JSON.stringify({ t: 'reject', jobId, reason }); }
 export function fileBeginFrame({ jobId, fileId, offset }) { return JSON.stringify({ t: 'file_begin', jobId, fileId, offset }); }
@@ -47,7 +53,7 @@ export function parseCtrlFrame(str) {
     case 'job_done':
       if (!isStr(o.jobId)) return null;
       return { t: 'job_done', jobId: o.jobId };
-    case 'pause': case 'resume': case 'cancel':
+    case 'prompting': case 'pause': case 'resume': case 'cancel':
       if (!isStr(o.jobId)) return null;
       return { t: o.t, jobId: o.jobId };
     case 'error':

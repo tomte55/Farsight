@@ -643,8 +643,15 @@ async function refreshTransfersList() {
 window.farsightIpc.onTransferEvent((ev) => {
   if (!ev || typeof ev.jobId !== 'string') return;
   const existing = transferJobs.get(ev.jobId) || { jobId: ev.jobId, createdAt: Date.now() };
-  if (ev.progress) existing.progress = ev.progress;
-  existing.state = (existing.progress && existing.progress.fraction >= 1) ? 'done' : 'active';
+  if (['done', 'error', 'canceled'].includes(existing.state)) { transferJobs.set(ev.jobId, existing); return; }
+  if (ev.type === 'interrupted' || ev.type === 'error') {
+    // A consented receive that stalled (sender vanished / connection dropped) —
+    // mark it failed so it stops showing "Receiving …" forever.
+    existing.state = 'error';
+  } else if (ev.progress) {
+    existing.progress = ev.progress;
+    existing.state = ev.progress.fraction >= 1 ? 'done' : 'active';
+  }
   transferJobs.set(ev.jobId, existing);
   if (!transfersPanelEl.hidden) renderTransfersList();
 });

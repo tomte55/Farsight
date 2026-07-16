@@ -136,6 +136,34 @@ test('a rendezvous error from the channel (e.g. bad_password) fails the send wit
   expect(events.some((e) => e.type === 'error' && e.reason === 'bad_password')).toBe(true);
 });
 
+test('a prompting frame cancels the approval timeout — a slow human decision is not "no_response"', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const events = [];
+  let ctrlCb = null;
+  // Channel that answers the OFFER with a prompting frame (host is showing the
+  // consent prompt) but never accepts — models a human taking their time.
+  const channel = {
+    sendCtrl(s) {
+      const f = JSON.parse(s);
+      if (f.t === 'offer') queueMicrotask(() => ctrlCb && ctrlCb(JSON.stringify({ t: 'prompting', jobId: f.jobId })));
+    },
+    async sendBulk() {},
+    onCtrl(cb) { ctrlCb = cb; }, onBulk() {},
+  };
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel, close: async () => {} }),
+    onEvent: (ev) => events.push(ev), rendezvousTimeoutMs: 50,
+  });
+  let settled = null;
+  svc.startSend({ jobId: 'jp', manifest, sources, target: { id: 'x' } }).then((r) => { settled = r; });
+  await new Promise((r) => setTimeout(r, 160)); // well past the 50ms approval timeout
+  expect(events.some((e) => e.type === 'prompting')).toBe(true);
+  expect(events.some((e) => e.type === 'error' && e.reason === 'no_response')).toBe(false);
+  expect(settled).toBe(null); // still awaiting the (never-coming) accept — NOT failed
+  await svc.cancel('jp'); // clean up the in-flight send
+});
+
 test('serial queue: two enqueued sends never have more than one active channel at once, both complete', async () => {
   let openCount = 0;
   let activeCount = 0;

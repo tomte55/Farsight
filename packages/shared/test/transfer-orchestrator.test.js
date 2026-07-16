@@ -147,6 +147,69 @@ test('createReceiver validates the offer, accepts, writes bytes, verifies and fi
   expect(store.saved.find((j) => j.jobState === 'done').peer).toEqual({});
 });
 
+test('createReceiver sends a prompting frame BEFORE awaiting consent (lets the sender stop its approval timeout)', async () => {
+  const dest = tmp();
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 10, mtime: 1 }], totalBytes: 10, totalFiles: 1 };
+  let recvCtrl = () => {};
+  const sent = [];
+  let promptingSeenAtConsent = false;
+  const ch = { sendCtrl(s) { sent.push(parseCtrlFrame(s)); }, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk() {} };
+  const rx = createReceiver({
+    channel: ch, destRoot: dest, store: memStore(),
+    consent: async () => { promptingSeenAtConsent = sent.some((f) => f && f.t === 'prompting'); return false; },
+  });
+  const done = rx.start();
+  await recvCtrl(offerFrame({ jobId: 'p1', entries: manifest.entries, totalBytes: 10, totalFiles: 1 }));
+  await done;
+  expect(promptingSeenAtConsent).toBe(true); // prompting was already on the wire when consent ran
+});
+
+test('createReceiver fails an accepted-but-stalled receive after inactivity (persists error + emits interrupted)', async () => {
+  const dest = tmp();
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 1000, mtime: 1 }], totalBytes: 1000, totalFiles: 1 };
+  let recvCtrl = () => {};
+  const sent = [];
+  const events = [];
+  // Controllable watchdog timer: capture the scheduled callback, fire on demand.
+  let fire = null;
+  const setTimer = (fn) => { fire = fn; return { unref() {} }; };
+  const clearTimer = () => { fire = null; };
+  const store = memStore();
+  const ch = { sendCtrl(s) { sent.push(parseCtrlFrame(s)); }, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk() {} };
+  const rx = createReceiver({
+    channel: ch, destRoot: dest, store, consent: async () => true,
+    onEvent: (ev) => events.push(ev), inactivityMs: 50, setTimer, clearTimer,
+  });
+  const done = rx.start();
+  await recvCtrl(offerFrame({ jobId: 's1', entries: manifest.entries, totalBytes: 1000, totalFiles: 1 }));
+  expect(sent.some((f) => f.t === 'accept')).toBe(true); // accepted -> watchdog armed
+  expect(typeof fire).toBe('function');
+  fire(); // no bytes ever arrived -> inactivity fires
+  await expect(done).rejects.toThrow(/stalled/);
+  expect(events.some((e) => e.type === 'interrupted')).toBe(true);
+  expect(store.saved.some((j) => j.jobState === 'error')).toBe(true);
+});
+
+test('createReceiver does NOT arm the inactivity watchdog before accept (a slow human at the consent prompt is not a stall)', async () => {
+  const dest = tmp();
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 10, mtime: 1 }], totalBytes: 10, totalFiles: 1 };
+  let recvCtrl = () => {};
+  let armed = false;
+  const setTimer = (fn) => { armed = true; return { unref() {} }; };
+  const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk() {} };
+  let release;
+  const rx = createReceiver({
+    channel: ch, destRoot: dest, store: memStore(),
+    consent: () => new Promise((r) => { release = r; }), inactivityMs: 50, setTimer, clearTimer: () => {},
+  });
+  rx.start();
+  // Don't await — the offer handler parks on the (never-resolving) consent.
+  recvCtrl(offerFrame({ jobId: 'h1', entries: manifest.entries, totalBytes: 10, totalFiles: 1 }));
+  await new Promise((r) => setTimeout(r, 20)); // let it reach the consent await
+  expect(armed).toBe(false); // still waiting on the human — watchdog not armed yet
+  release(false); // decline to clean up
+});
+
 test('createReceiver rejects a manifest with a traversal path', async () => {
   const dest = tmp();
   let recvCtrl = () => {};

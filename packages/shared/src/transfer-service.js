@@ -95,7 +95,12 @@ export function createTransferService({ store, transferDir, consent, openChannel
         const sender = createSender({
           channel, jobId, manifest, sources,
           onEvent: (ev) => {
+            // 'prompting' = the host is showing the consent prompt (alive, awaiting
+            // a human). 'accepted' = the user said yes. Either one means the peer
+            // responded, so stop the approval timeout — a person deciding must not
+            // read as "host didn't respond".
             if (ev.type === 'accepted') { accepted = true; disarmApprovalTimer(); }
+            else if (ev.type === 'prompting') { disarmApprovalTimer(); }
             emit(jobId, 'send', ev);
           },
         });
