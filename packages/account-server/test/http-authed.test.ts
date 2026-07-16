@@ -30,7 +30,7 @@ afterEach(async () => {
 function ctx(): ApiContext {
   sent = [];
   const email: EmailTransport = { send: async (e) => void sent.push(e) };
-  return { prisma: db.prisma, email, secret: SECRET, baseUrl: 'https://auth.example', now: () => NOW };
+  return { prisma: db.prisma, email, secret: SECRET, baseUrl: 'https://auth.example', now: () => NOW, diagnostics: { save: () => ({ id: 'stub' }) } };
 }
 const post = (path: string, body: unknown, token?: string): ApiRequest => ({
   method: 'POST',

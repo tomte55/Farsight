@@ -26,6 +26,7 @@ export interface ApiContext {
   secret: Uint8Array;
   baseUrl: string;
   now: () => number; // clock — called once per request
+  diagnostics: { save(args: { userId: string; meta: unknown; files: Record<string, string> }): { id: string } };
 }
 
 export interface ApiRequest {
@@ -300,6 +301,22 @@ const handlers: Record<string, Handler> = {
     if ('status' in auth) return auth;
     const devices = await listFleet(presenceDeps(ctx), { userId: auth.userId });
     return ok({ devices });
+  },
+
+  // Verbose diagnostic logging: an authenticated device/console uploads a
+  // diagnostics bundle (logs + metadata). Persistence (disk, gzip, TTL prune)
+  // is delegated to ctx.diagnostics — this handler only authenticates and
+  // validates shape. The 5MB body-size cap for this route lives in the node
+  // adapter (server.ts), not here.
+  'POST /diagnostics': async (ctx, req) => {
+    const auth = await requireAuth(ctx, req);
+    if ('status' in auth) return auth;
+    const body = (typeof req.body === 'object' && req.body) ? (req.body as Record<string, unknown>) : {};
+    const files = body.files;
+    if (typeof files !== 'object' || files === null) return badRequest();
+    const meta = typeof body.meta === 'object' && body.meta ? body.meta : {};
+    const { id } = ctx.diagnostics.save({ userId: auth.userId, meta, files: files as Record<string, string> });
+    return json(201, { id });
   },
 };
 

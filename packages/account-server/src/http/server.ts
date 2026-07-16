@@ -12,6 +12,7 @@ import { createTokenBucket, type TokenBucket } from './token-bucket.js';
 export interface CreateServerOptions {
   ctx: ApiContext;
   maxBodyBytes?: number; // reject bodies larger than this (default 64 KiB)
+  diagnosticsMaxBodyBytes?: number; // larger cap for POST /diagnostics (default 5 MiB)
   rateLimit?: { capacity?: number; refillPerSec?: number };
   trustProxy?: boolean; // trust X-Forwarded-For (only behind our own proxy)
   log?: (event: string, fields: Record<string, unknown>) => void;
@@ -55,6 +56,7 @@ function readBody(req: IncomingMessage, cap: number): Promise<string> {
 
 export function createAccountServer(opts: CreateServerOptions): Server {
   const maxBodyBytes = opts.maxBodyBytes ?? 64 * 1024;
+  const diagnosticsMaxBodyBytes = opts.diagnosticsMaxBodyBytes ?? 5 * 1024 * 1024;
   const trustProxy = opts.trustProxy ?? false;
   const log = opts.log ?? (() => {});
   const buckets = new Map<string, TokenBucket>();
@@ -90,7 +92,17 @@ export function createAccountServer(opts: CreateServerOptions): Server {
         return send(res, 429, { error: 'rate_limited' });
       }
 
-      const rawBody = await readBody(req, maxBodyBytes);
+      // The widened /diagnostics cap is only granted to a request that at least
+      // carries an Authorization header — a purely-anonymous request keeps the
+      // tight default cap, so it can't make us buffer 5 MiB before requireAuth
+      // ever runs. Residual tradeoff: a BOGUS token still gets the wide cap, but
+      // it's bounded by the per-IP rate limiter above and still 401s in the
+      // handler — this deliberately blocks only anonymous amplification.
+      const cap =
+        path === '/diagnostics' && req.headers['authorization']
+          ? diagnosticsMaxBodyBytes
+          : maxBodyBytes;
+      const rawBody = await readBody(req, cap);
       let body: unknown;
       if (rawBody.length > 0) {
         try {
