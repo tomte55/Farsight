@@ -5,6 +5,7 @@
 // reachable from worker.js, and every mapped entry must resolve to a real
 // vendored source file.
 import { readFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from 'vitest';
@@ -68,4 +69,38 @@ test('every @farsight/shared entry in the transfer-worker importmap uses the pac
 test('transfer-worker index.html loads worker.js as a module script', () => {
   const html = readFileSync(resolve(workerDir, 'index.html'), 'utf8');
   expect(html).toMatch(/<script type="module" src="\.\/worker\.js">/);
+});
+
+// Regression guard for the v1.9.0 file-transfer failure: the worker window's
+// strict CSP (script-src 'self') BLOCKS its own inline <script type="importmap">,
+// so worker.js can't resolve @farsight/shared/* — the module never runs, no
+// rendezvous ever starts, and a send hangs at 0 with the host never prompted.
+// The importmap MUST be permitted by CSP. We pin it with a sha256 hash (keeping
+// the worker's strict 'self' posture, tighter than the visible renderer's
+// 'unsafe-inline') and verify here that the hash in the CSP matches the actual
+// importmap bytes — the browser hashes the element's text with HTML newline
+// normalization (CRLF -> LF), so we normalize identically.
+function importMapCspHash(html) {
+  const m = html.match(/<script type="importmap">([\s\S]*?)<\/script>/);
+  if (!m) return null;
+  const normalized = m[1].replace(/\r\n/g, '\n');
+  return `sha256-${createHash('sha256').update(normalized, 'utf8').digest('base64')}`;
+}
+function cspContent(html) {
+  const m = html.match(/http-equiv="Content-Security-Policy"\s+content="([^"]*)"/);
+  return m ? m[1] : '';
+}
+
+test("transfer-worker CSP permits its inline importmap (hash present) so worker.js's module graph loads", () => {
+  const html = readFileSync(resolve(workerDir, 'index.html'), 'utf8');
+  const csp = cspContent(html);
+  const scriptSrc = csp.split(';').map((s) => s.trim()).find((d) => d.startsWith('script-src'));
+  expect(scriptSrc, 'index.html must declare a script-src directive').toBeTruthy();
+
+  const hash = importMapCspHash(html);
+  expect(hash).toBeTruthy();
+  // The importmap must be allowed EITHER by its exact hash or 'unsafe-inline'.
+  // We require the hash form: it keeps the worker strictly self+this-one-script.
+  expect(scriptSrc).toContain(`'${hash}'`);
+  expect(scriptSrc).not.toContain("'unsafe-inline'"); // stay strict — hash only
 });

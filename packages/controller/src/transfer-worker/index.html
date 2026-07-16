@@ -7,7 +7,17 @@
   untrusted-adjacent input (a remote peer's SDP/data-channel frames) even with
   no UI, so it gets the same CSP containment as the visible renderer.
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self'; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+<!--
+  script-src pins the inline importmap below by its sha256 hash (rather than
+  'unsafe-inline' like the visible renderer) so this UI-less window that handles
+  a remote peer's SDP/data-channel frames stays as tight as possible. The hash
+  is the sha256 of the importmap element's text with HTML newline normalization
+  (CRLF -> LF); packages/*/test/transfer-worker-importmap.test.js recomputes it
+  and fails if the importmap changes without updating this hash. Without it,
+  CSP blocks the importmap, worker.js can't resolve @farsight/shared/*, and the
+  transfer rendezvous never starts (the v1.9.0 file-transfer regression).
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'sha256-Qo+p/z1rfM3t6PFfDSI/DoZxp24fz8oIKs4gypfWjI4='; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>Farsight Transfer Worker</title>
 <!--
   Import map: same mechanism as ../renderer/index.html — resolves bare
