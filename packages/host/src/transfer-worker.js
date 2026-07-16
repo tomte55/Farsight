@@ -68,6 +68,22 @@ export function createTransferWorker() {
     if (!win.isDestroyed()) win.webContents.send(topic, payload);
   }
 
+  // The worker renderer only registers its IPC listeners (onStartRendezvous et
+  // al.) once worker.js has loaded and executed. A webContents.send() issued
+  // before that is silently DROPPED by Electron — which is exactly what happened
+  // to the rendezvous kickoff (openChannel calls startRendezvous synchronously
+  // right after loadFile), so no CONNECT/ATTACH was ever sent and every transfer
+  // hung at 0. Buffer the rendezvous params until did-finish-load, then flush.
+  let rendererReady = false;
+  let pendingRendezvous = null;
+  win.webContents.on('did-finish-load', () => {
+    rendererReady = true;
+    if (pendingRendezvous !== null) {
+      sendToWorker(topics.startRendezvous, pendingRendezvous);
+      pendingRendezvous = null;
+    }
+  });
+
   // The orchestrator's generic 'ft-ctrl'/'ft-bulk' topic names, mapped onto
   // this worker's namespaced ones — this is what keeps two workers isolated.
   const channel = createTransferChannel({
@@ -94,7 +110,9 @@ export function createTransferWorker() {
     // role:'attach' (see main.js's openChannel) — 'initiator' support is kept
     // for parity with the shared worker.js so both apps run the identical file.
     startRendezvous(params) {
-      sendToWorker(topics.startRendezvous, params);
+      // Gate on renderer-ready so the kickoff is never dropped (see did-finish-load).
+      if (rendererReady) sendToWorker(topics.startRendezvous, params);
+      else pendingRendezvous = params;
     },
     channel,
     onSessionState(cb) { sessionStateCb = cb; },

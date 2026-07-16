@@ -59,6 +59,18 @@ describe('createTransferWorker() exports the documented factory surface', () => 
   test('is wired into main.js (receive-path orchestration)', () => {
     expect(main).toMatch(/createTransferWorker/);
   });
+
+  // Regression guard: openChannel calls startRendezvous synchronously right
+  // after loadFile, before the worker renderer has registered onStartRendezvous.
+  // Electron drops a webContents.send() to a not-yet-loaded renderer, so the
+  // kickoff must be buffered until did-finish-load — otherwise no CONNECT/ATTACH
+  // is ever sent and the transfer hangs at 0 (verified live in Electron).
+  test('buffers startRendezvous until the worker renderer is ready (did-finish-load)', () => {
+    expect(worker).toMatch(/did-finish-load/);
+    expect(worker).toMatch(/pendingRendezvous/);
+    // startRendezvous must gate on readiness, not send unconditionally.
+    expect(worker).toMatch(/startRendezvous\(params\)\s*\{[\s\S]*?rendererReady/);
+  });
 });
 
 describe('per-worker IPC topics are namespaced by workerId (no cross-worker leakage)', () => {
