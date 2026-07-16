@@ -93,6 +93,17 @@ describe('POST /diagnostics', () => {
     expect(save).not.toHaveBeenCalled();
   });
 
+  test('rejects files with a non-string value → 400', async () => {
+    const save = vi.fn(() => ({ id: 'DIAG1' }));
+    const c = ctx(save);
+    const { accessToken } = await loginToken(c, 'diag4@example.com');
+
+    const res = await handleRequest(c, post('/diagnostics', { meta: {}, files: { a: 123 } }, accessToken));
+
+    expect(res.status).toBe(400);
+    expect(save).not.toHaveBeenCalled();
+  });
+
   test('defaults meta to {} when omitted', async () => {
     const save = vi.fn(() => ({ id: 'DIAG1' }));
     const c = ctx(save);

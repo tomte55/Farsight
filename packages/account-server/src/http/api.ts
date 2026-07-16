@@ -314,6 +314,7 @@ const handlers: Record<string, Handler> = {
     const body = (typeof req.body === 'object' && req.body) ? (req.body as Record<string, unknown>) : {};
     const files = body.files;
     if (typeof files !== 'object' || files === null) return badRequest();
+    if (!Object.values(files as Record<string, unknown>).every((v) => typeof v === 'string')) return badRequest();
     const meta = typeof body.meta === 'object' && body.meta ? body.meta : {};
     const { id } = ctx.diagnostics.save({ userId: auth.userId, meta, files: files as Record<string, string> });
     return json(201, { id });

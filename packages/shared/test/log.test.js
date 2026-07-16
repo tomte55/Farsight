@@ -32,6 +32,14 @@ test('child() prefixes a scope and nests', () => {
   expect(sink).toHaveBeenNthCalledWith(2, '2026-07-13T00:00:00.000Z INFO  [a:b] x');
 });
 
+test('collapses embedded CR/LF so a hostile message cannot forge log lines', () => {
+  const sink = vi.fn();
+  createLogger({ sink, now: fixedNow, minLevel: 'debug' }).info('line1\nline2\rline3');
+  const line = sink.mock.calls[0][0];
+  expect(line).not.toMatch(/[\r\n]/);
+  expect(line).toBe('2026-07-13T00:00:00.000Z INFO  line1 line2 line3');
+});
+
 test('truncates messages to 2000 chars', () => {
   const sink = vi.fn();
   createLogger({ sink, now: fixedNow, minLevel: 'debug' }).info('x'.repeat(5000));

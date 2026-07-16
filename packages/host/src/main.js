@@ -313,7 +313,30 @@ function refreshTrayMenu() {
     onCheckUpdates: () => hostUpdater && hostUpdater.checkNow(),
     onOpenLogs: () => shell.openPath(path.join(app.getPath('userData'), 'logs')),
     loggedIn: accountLoggedIn,
-    onSendDiagnostics: () => { sendDiagnostics(); },
+    onSendDiagnostics: async () => {
+      const res = await sendDiagnostics();
+      if (res.ok) {
+        await dialog.showMessageBox(mainWindow || undefined, {
+          type: 'info',
+          title: 'Send diagnostics to support',
+          message: `Diagnostics sent — reference ${res.id}`,
+        });
+      } else if (res.error === 'cancelled') {
+        // user declined the consent prompt inside sendDiagnostics(); no further dialog
+      } else if (res.error === 'not_logged_in') {
+        await dialog.showMessageBox(mainWindow || undefined, {
+          type: 'error',
+          title: 'Send diagnostics to support',
+          message: 'Sign in to send diagnostics',
+        });
+      } else {
+        await dialog.showMessageBox(mainWindow || undefined, {
+          type: 'error',
+          title: 'Send diagnostics to support',
+          message: `Diagnostics upload failed: ${res.error}`,
+        });
+      }
+    },
   })));
 }
 

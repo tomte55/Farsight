@@ -16,7 +16,7 @@ export function createLogger({
   const threshold = LEVELS[minLevel] ?? LEVELS.info;
   const write = (level, msg) => {
     if (LEVELS[level] < threshold) return;
-    const text = String(msg).slice(0, MAX_MSG);
+    const text = String(msg).slice(0, MAX_MSG).replace(/[\r\n]+/g, ' ');
     const tag = scope ? ` [${scope}]` : '';
     sink(`${now()} ${level.toUpperCase().padEnd(5)}${tag} ${text}`);
   };
