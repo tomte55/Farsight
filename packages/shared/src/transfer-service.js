@@ -272,6 +272,10 @@ export function createTransferService({ store, transferDir, consent, openChannel
       if (!job) return { ok: false };
       if (job.jobState === 'done' || job.jobState === 'canceled') return { ok: true };
       await store.save({ ...job, jobState: 'canceled' });
+      // Emit so the UI (status bar / rail / list) drops the segment — a store
+      // flip alone leaves the renderer's live state stale (it only refreshes on
+      // a transfer:event). A restart-resumed record carries its own direction.
+      emit(jobId, job.dir === 'recv' ? 'recv' : 'send', { type: 'canceled' });
       return { ok: true };
     }
 
@@ -288,6 +292,11 @@ export function createTransferService({ store, transferDir, consent, openChannel
     try {
       await saveSendRecord({ jobId, manifest: entry.manifest, createdAt: entry.createdAt, jobState: 'canceled', peer: peerFor(entry.target), tier: tierFor(entry.target), sourceRoots: entry.sourceRoots });
     } catch { /* best effort */ }
+    // Emit a terminal 'canceled' so the renderer's status bar / rail / list
+    // refresh and drop this transfer. Without it, an early ad-hoc cancel (before
+    // the receiver ever accepted) left the "↑ <name>" status-bar indicator stuck,
+    // because that indicator only repaints on a transfer:event.
+    emit(jobId, 'send', { type: 'canceled' });
     entry.resolve({ jobId, ok: false, canceled: true });
     if (isActive) advanceSendQueue();
     return { ok: true };

@@ -1054,6 +1054,34 @@ test('cancel() on the active send closes its channel and marks the record cancel
   expect(rec.peer).toEqual({ id: 'device-9' });
 });
 
+test('cancel() on an in-flight (not-yet-accepted) send emits a canceled event so the UI can clear it', async () => {
+  // Field bug: cancelling an ad-hoc send BEFORE the receiver accepted left the
+  // bottom status-bar transfer indicator stuck. The status bar only refreshes on
+  // a transfer:event, and this cancel path saved the record + resolved the entry
+  // but emitted NOTHING — so nothing told the renderer to drop the segment.
+  const src = tmp();
+  writeFileSync(join(src, 'x.bin'), Buffer.alloc(5000, 1));
+  const { entries, sources } = await walkSource([{ path: join(src, 'x.bin') }]);
+  const manifest = buildManifestReal(entries);
+  const events = [];
+  let opened = false;
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    // A channel nobody drives further — the send is genuinely stuck "awaiting
+    // approval / active" until we cancel it.
+    openChannel: async () => { opened = true; return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} }; },
+    onEvent: (ev) => events.push(ev),
+  });
+  const jobId = newJobId();
+  const p = svc.startSend({ jobId, manifest, sources, target: { id: 'device-9' } });
+  await until(() => opened);
+
+  await svc.cancel(jobId);
+  await p;
+
+  expect(events.some((e) => e.type === 'canceled' && e.jobId === jobId && e.direction === 'send')).toBe(true);
+});
+
 test('cancel() on a waiting (not-yet-active) send removes it from the queue without opening a channel', async () => {
   const src1 = tmp();
   writeFileSync(join(src1, 'a.bin'), Buffer.alloc(4000, 1));
