@@ -1,9 +1,9 @@
-import { expect, test } from 'vitest';
+import { expect, test, describe, it } from 'vitest';
 import {
   TRANSFER_PROTOCOL_VERSION,
   offerFrame, acceptFrame, rejectFrame, fileBeginFrame, fileEndFrame,
   jobDoneFrame, pauseFrame, resumeFrame, cancelFrame, errorFrame,
-  fsReqFrame, fsResFrame, parseCtrlFrame,
+  fsReqFrame, fsResFrame, parseCtrlFrame, rangeReportFrame,
 } from '../src/transfer-protocol.js';
 
 // A real jobId (as minted by transfer-queue.js's newJobId(): randomUUID with
@@ -83,5 +83,35 @@ test('parseCtrlFrame rejects a traversal or oddly-shaped jobId, but still parses
   // A real newJobId()-shaped id still parses normally.
   expect(parseCtrlFrame(offerFrame({ jobId: JID, ...base }))).toEqual({
     t: 'offer', jobId: JID, protoVer: TRANSFER_PROTOCOL_VERSION, ...base,
+  });
+});
+
+describe('multi-flow protocol additions', () => {
+  const JOB = 'a'.repeat(32);
+
+  it('round-trips a range_report frame', () => {
+    const f = parseCtrlFrame(rangeReportFrame({ jobId: JOB, files: [{ fileId: 3, ivals: [[0, 10], [20, 30]] }] }));
+    expect(f).toEqual({ t: 'range_report', jobId: JOB, files: [{ fileId: 3, ivals: [[0, 10], [20, 30]] }] });
+  });
+
+  it('rejects a range_report with a backwards interval', () => {
+    expect(parseCtrlFrame(rangeReportFrame({ jobId: JOB, files: [{ fileId: 0, ivals: [[10, 5]] }] }))).toBe(null);
+  });
+
+  it('accept carries optional per-file ranges', () => {
+    const f = parseCtrlFrame(acceptFrame({ jobId: JOB, resume: [], ranges: [{ fileId: 1, ivals: [[0, 64]] }] }));
+    expect(f.ranges).toEqual([{ fileId: 1, ivals: [[0, 64]] }]);
+  });
+
+  it('accept without ranges stays backward-compatible (ranges undefined)', () => {
+    const f = parseCtrlFrame(acceptFrame({ jobId: JOB, resume: [{ fileId: 0, haveBytes: 5 }] }));
+    expect(f.t).toBe('accept');
+    expect(f.ranges).toBeUndefined();
+  });
+
+  it('offer echoes flowCount and groupId when present', () => {
+    const f = parseCtrlFrame(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'a', size: 1, mtime: 0 }], totalBytes: 1, totalFiles: 1, flowCount: 8, groupId: 'b'.repeat(32) }));
+    expect(f.flowCount).toBe(8);
+    expect(f.groupId).toBe('b'.repeat(32));
   });
 });

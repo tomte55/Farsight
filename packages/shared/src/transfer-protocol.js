@@ -16,16 +16,32 @@ function nn(x) { return Number.isInteger(x) && x >= 0; }
 const JOB_ID_RE = /^[0-9a-f]{32}$/;
 function isJobId(x) { return typeof x === 'string' && JOB_ID_RE.test(x); }
 
-export function offerFrame({ jobId, entries, totalBytes, totalFiles, protoVer = TRANSFER_PROTOCOL_VERSION }) {
-  return JSON.stringify({ t: 'offer', jobId, protoVer, entries, totalBytes, totalFiles });
+// Validate/echo a [{fileId, ivals:[[start,end], ...]}] list (accept.ranges, range_report.files).
+function parseFileRanges(files) {
+  if (!Array.isArray(files)) return null;
+  const out = [];
+  for (const f of files) {
+    if (!f || !nn(f.fileId) || !Array.isArray(f.ivals)) return null;
+    const ivals = [];
+    for (const p of f.ivals) {
+      if (!Array.isArray(p) || p.length !== 2 || !nn(p[0]) || !nn(p[1]) || !(p[1] > p[0])) return null;
+      ivals.push([p[0], p[1]]);
+    }
+    out.push({ fileId: f.fileId, ivals });
+  }
+  return out;
+}
+
+export function offerFrame({ jobId, entries, totalBytes, totalFiles, protoVer = TRANSFER_PROTOCOL_VERSION, flowCount, groupId }) {
+  return JSON.stringify({ t: 'offer', jobId, protoVer, entries, totalBytes, totalFiles, flowCount, groupId });
 }
 // A manifest with many files serializes larger than the WebRTC data-channel max
 // message size (~256KB), and sending it in ONE frame throws + kills ft-ctrl (field
 // bug: a 2974-file folder died on the OFFER send). So a large OFFER is split into
 // offer_begin → offer_entries* → offer_end, each entries batch kept well under the
 // limit. Small manifests still use the single legacy `offer` (old-receiver-compatible).
-export function offerBeginFrame({ jobId, totalBytes, totalFiles, protoVer = TRANSFER_PROTOCOL_VERSION }) {
-  return JSON.stringify({ t: 'offer_begin', jobId, protoVer, totalBytes, totalFiles });
+export function offerBeginFrame({ jobId, totalBytes, totalFiles, protoVer = TRANSFER_PROTOCOL_VERSION, flowCount, groupId }) {
+  return JSON.stringify({ t: 'offer_begin', jobId, protoVer, totalBytes, totalFiles, flowCount, groupId });
 }
 export function offerEntriesFrame({ jobId, entries }) { return JSON.stringify({ t: 'offer_entries', jobId, entries }); }
 export function offerEndFrame({ jobId }) { return JSON.stringify({ t: 'offer_end', jobId }); }
@@ -35,7 +51,8 @@ export function offerEndFrame({ jobId }) { return JSON.stringify({ t: 'offer_end
 // otherwise the sender falsely reports "host didn't respond" while the prompt is
 // still up, and a later Accept lands on a torn-down channel).
 export function promptingFrame({ jobId }) { return JSON.stringify({ t: 'prompting', jobId }); }
-export function acceptFrame({ jobId, resume }) { return JSON.stringify({ t: 'accept', jobId, resume }); }
+export function acceptFrame({ jobId, resume, ranges }) { return JSON.stringify({ t: 'accept', jobId, resume, ranges }); }
+export function rangeReportFrame({ jobId, files }) { return JSON.stringify({ t: 'range_report', jobId, files }); }
 export function rejectFrame({ jobId, reason = '' }) { return JSON.stringify({ t: 'reject', jobId, reason }); }
 export function fileBeginFrame({ jobId, fileId, offset }) { return JSON.stringify({ t: 'file_begin', jobId, fileId, offset }); }
 export function fileEndFrame({ jobId, fileId, hash }) { return JSON.stringify({ t: 'file_end', jobId, fileId, hash }); }
@@ -58,22 +75,31 @@ export function parseCtrlFrame(str) {
   try { o = JSON.parse(str); } catch { return null; }
   if (!o || typeof o !== 'object') return null;
   switch (o.t) {
-    case 'offer':
+    case 'offer': {
       if (!isJobId(o.jobId) || !Array.isArray(o.entries) || !nn(o.totalBytes) || !nn(o.totalFiles)) return null;
-      return { t: 'offer', jobId: o.jobId, protoVer: o.protoVer, entries: o.entries, totalBytes: o.totalBytes, totalFiles: o.totalFiles };
-    case 'offer_begin':
+      const flowCount = Number.isInteger(o.flowCount) && o.flowCount > 0 ? o.flowCount : undefined;
+      const groupId = isJobId(o.groupId) ? o.groupId : undefined;
+      return { t: 'offer', jobId: o.jobId, protoVer: o.protoVer, entries: o.entries, totalBytes: o.totalBytes, totalFiles: o.totalFiles, flowCount, groupId };
+    }
+    case 'offer_begin': {
       if (!isJobId(o.jobId) || !nn(o.totalBytes) || !nn(o.totalFiles)) return null;
-      return { t: 'offer_begin', jobId: o.jobId, protoVer: o.protoVer, totalBytes: o.totalBytes, totalFiles: o.totalFiles };
+      const flowCount = Number.isInteger(o.flowCount) && o.flowCount > 0 ? o.flowCount : undefined;
+      const groupId = isJobId(o.groupId) ? o.groupId : undefined;
+      return { t: 'offer_begin', jobId: o.jobId, protoVer: o.protoVer, totalBytes: o.totalBytes, totalFiles: o.totalFiles, flowCount, groupId };
+    }
     case 'offer_entries':
       if (!isJobId(o.jobId) || !Array.isArray(o.entries)) return null;
       return { t: 'offer_entries', jobId: o.jobId, entries: o.entries };
     case 'offer_end':
       if (!isJobId(o.jobId)) return null;
       return { t: 'offer_end', jobId: o.jobId };
-    case 'accept':
+    case 'accept': {
       if (!isJobId(o.jobId) || !Array.isArray(o.resume)) return null;
       for (const r of o.resume) { if (!r || !nn(r.fileId) || !nn(r.haveBytes)) return null; }
-      return { t: 'accept', jobId: o.jobId, resume: o.resume };
+      let ranges;
+      if (o.ranges !== undefined) { ranges = parseFileRanges(o.ranges); if (ranges === null) return null; }
+      return { t: 'accept', jobId: o.jobId, resume: o.resume, ranges };
+    }
     case 'reject':
       if (!isJobId(o.jobId)) return null;
       return { t: 'reject', jobId: o.jobId, reason: typeof o.reason === 'string' ? o.reason : '' };
@@ -101,6 +127,12 @@ export function parseCtrlFrame(str) {
     case 'fs_res':
       if (!nn(o.reqId) || typeof o.ok !== 'boolean') return null;
       return { t: 'fs_res', reqId: o.reqId, ok: o.ok, data: o.data, error: o.error };
+    case 'range_report': {
+      if (!isJobId(o.jobId)) return null;
+      const files = parseFileRanges(o.files);
+      if (files === null) return null;
+      return { t: 'range_report', jobId: o.jobId, files };
+    }
     default:
       return null;
   }
