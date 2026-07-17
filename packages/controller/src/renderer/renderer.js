@@ -149,6 +149,15 @@ async function startHostRegistration() {
 }
 
 function stopHostRegistration() {
+  // The WebRTC peer + input datachannel are P2P (TURN-relayed) and survive
+  // loss of signaling — closing hostSignal alone would leave an ACTIVE
+  // session's input injection running after the user flips "Allow this
+  // computer to be controlled" off. End the session FIRST (sends
+  // CONTROL.HOST_ENDED over the control channel so the controller sees a
+  // clean end, not a dead connection) THEN stop registration. Covers both
+  // callers: the live toggle change handler and refreshHostRegistration's
+  // launch-time convergence.
+  if (session.isActive()) endSessionByHost('control_disabled', 'Control disabled — session ended.');
   if (hostSignal) { hostSignal.close(); hostSignal = null; }
   if (hostRotator) { hostRotator.stop(); hostRotator = null; }
   hostIceServers = [];
@@ -356,11 +365,16 @@ function endSessionByHost(reason, statusText, { immediate = false } = {}) {
 // the linked path auto-allows below). Unlike host's own window, the shell has no
 // #idle/#banner views or in-session body class to toggle — hosting has no video
 // on this side, so the only visible state is the consent modal + the status line.
+const hostedSessionBarEl = document.getElementById('hosted-session-bar');
 const session = createSession({
   log: clog.child('session'),
   onStateChange: (st) => {
     window.farsightIpc.setSessionActive(st === 'active');
     consentEl.hidden = st !== 'pending_consent';
+    // Security-posture fix: a reliable manual Disconnect for an active hosted
+    // session (panic may be unavailable; this task also dropped #cut). Shown
+    // IFF a session is actively controlling this machine.
+    if (hostedSessionBarEl) hostedSessionBarEl.hidden = st !== 'active';
     if (st === 'active') startClipboardSync();
     if (hostRotator) {
       if (st === 'pending_consent' || st === 'active') hostRotator.pause();
@@ -440,6 +454,9 @@ document.getElementById('deny').addEventListener('click', () => {
   session.deny();
   teardown();
   hostStatusEl.textContent = 'Request denied. Waiting for a controller.';
+});
+document.getElementById('hosted-session-disconnect')?.addEventListener('click', () => {
+  endSessionByHost('disconnect', 'Session ended.');
 });
 
 // Panic hotkey (Ctrl/Cmd+Alt+F12) fires from the main process — instantly kill

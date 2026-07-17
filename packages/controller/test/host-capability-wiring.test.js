@@ -128,3 +128,74 @@ describe('host capability — reachability is gated on control being allowed (Ta
     }
   });
 });
+
+describe('host capability — SECURITY: toggling control OFF ends an active hosted session', () => {
+  // Confirmed-by-review finding: the WebRTC peer + input datachannel are
+  // P2P/TURN-relayed and survive loss of signaling. stopHostRegistration()
+  // used to only close the registering signaling client — flipping "Allow
+  // this computer to be controlled" OFF while a session was active left input
+  // injection running. Both callers (the live toggle `change` handler AND
+  // refreshHostRegistration's launch-time convergence) route through this one
+  // function, so the guard belongs here to cover both.
+  function stopHostRegistrationBody() {
+    const fnStart = renderer.indexOf('function stopHostRegistration');
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnEnd = renderer.indexOf('\nfunction renderControlUi', fnStart);
+    expect(fnEnd).toBeGreaterThan(fnStart);
+    return renderer.slice(fnStart, fnEnd);
+  }
+
+  test('stopHostRegistration ends an active session, guarded by session.isActive(), BEFORE closing hostSignal', () => {
+    const body = stopHostRegistrationBody();
+    expect(body).toMatch(/if\s*\(\s*session\.isActive\(\)\s*\)\s*endSessionByHost\(/);
+    const guardIdx = body.indexOf('session.isActive()');
+    const closeIdx = body.indexOf('hostSignal.close()');
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(closeIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeLessThan(closeIdx);
+  });
+
+  test('both the live toggle change handler and launch-time refreshHostRegistration route OFF through stopHostRegistration (single choke point)', () => {
+    const toggleBlock = renderer.slice(
+      renderer.indexOf("controlToggleEl.addEventListener('change'"),
+      renderer.indexOf('});', renderer.indexOf("controlToggleEl.addEventListener('change'")),
+    );
+    expect(toggleBlock).toMatch(/else\s+stopHostRegistration\(\);/);
+    const refreshFn = renderer.slice(
+      renderer.indexOf('async function refreshHostRegistration'),
+      renderer.indexOf('\n}\n', renderer.indexOf('async function refreshHostRegistration')),
+    );
+    expect(refreshFn).toMatch(/else\s+stopHostRegistration\(\);/);
+  });
+});
+
+describe('host capability — a reliable manual Disconnect for an active hosted session', () => {
+  // Panic (Ctrl+Alt+F12) may be unavailable (see #panic-warning), and this
+  // task also dropped the host's #cut button — this bar/button is the one
+  // guaranteed way for the person being controlled to end the session.
+  test('the hosted-session bar and its Disconnect button exist in markup, hidden by default', () => {
+    expect(html).toContain('id="hosted-session-bar"');
+    expect(html).toContain('id="hosted-session-disconnect"');
+    const barIdx = html.indexOf('id="hosted-session-bar"');
+    const tagStart = html.lastIndexOf('<div', barIdx);
+    const tagEnd = html.indexOf('>', barIdx);
+    expect(html.slice(tagStart, tagEnd)).toContain('hidden');
+  });
+
+  test('the Disconnect button calls endSessionByHost', () => {
+    expect(renderer).toMatch(
+      /getElementById\('hosted-session-disconnect'\)\?\.addEventListener\('click',\s*\(\)\s*=>\s*\{\s*\n\s*endSessionByHost\('disconnect',/,
+    );
+  });
+
+  test('the bar is shown IFF the session is active, driven off the same onStateChange as the consent modal', () => {
+    const fnStart = renderer.indexOf('onStateChange: (st) => {');
+    const fnEnd = renderer.indexOf('\n  },', fnStart);
+    const body = renderer.slice(fnStart, fnEnd);
+    expect(body).toMatch(/hostedSessionBarEl\.hidden = st !== 'active'/);
+  });
+
+  test('no <video> element was added for the hosted (being-controlled) side — hosting has no local view', () => {
+    expect(html).not.toMatch(/<video/i);
+  });
+});

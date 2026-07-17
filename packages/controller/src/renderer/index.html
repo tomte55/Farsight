@@ -199,6 +199,16 @@
 
     </main>
   </div>
+  <!-- Security-posture fix (post-Task-7): a reliable manual Disconnect for an
+       active hosted session. Panic (Ctrl+Alt+F12) may be unavailable (see
+       #panic-warning below), and this task also dropped the host's #cut
+       button, so this is the one guaranteed way to end a session that's
+       controlling THIS machine. Shown only while session.isActive(); hooked
+       off the same onStateChange as the consent modal/status line. -->
+  <div id="hosted-session-bar" hidden>
+    <span>This computer is being controlled.</span>
+    <button id="hosted-session-disconnect" class="btn btn-ghost">Disconnect</button>
+  </div>
   <!-- Task 7: the physical panic-hotkey (Ctrl+Alt+F12) instant-kill override is
        normally invisible — this only appears if main couldn't register it
        (another app owns the shortcut), so the user knows it's NOT active. -->

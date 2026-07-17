@@ -28,6 +28,13 @@
 #panic-warning { flex: 0 0 auto; padding: 8px 16px; background: var(--danger-bg); border-top: 1px solid var(--danger-line); color: var(--danger-ink); font-size: 12.5px; text-align: center; }
 #panic-warning[hidden] { display: none; }
 
+/* Security-posture fix: the hosted-session Disconnect bar. Same flex-child
+   pattern as #panic-warning (above the status bar), shown only while this
+   machine is actively being controlled. */
+#hosted-session-bar { flex: 0 0 auto; padding: 8px 16px; background: var(--danger-bg); border-top: 1px solid var(--danger-line); color: var(--danger-ink); font-size: 12.5px; display: flex; align-items: center; justify-content: center; gap: 12px; }
+#hosted-session-bar[hidden] { display: none; }
+#hosted-session-disconnect { padding: 4px 12px; }
+
 /* The consent modal reuses .overlay/.veil/.card from farsight.css; only its
    width is specific to this window (unconstrained, a .card would stretch to
    fill the centering grid cell). */
