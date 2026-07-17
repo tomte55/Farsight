@@ -817,3 +817,58 @@ test('review fix (finding 2): an abort racing an in-flight saveRecord(done) does
   expect(events.some((e) => e.type === 'completed')).toBe(false); // no stray completed after canceled
   expect(sentToSender.some((f) => f.t === 'complete')).toBe(false); // no delivery ack on a torn-down channel
 });
+
+// Re-review on aa35d46 (fix round 1): the same bug class — "cancel flips the
+// receiver to settled, but queued work keeps running real side effects anyway" —
+// survived on a THIRD, unguarded path: onBulk (byte writes) and tryFinalize
+// (fsync/rename onto the real destination + file-done event) had no `settled`
+// awareness at all. Unlike findings 1/2 above, this needs no race/gating —
+// ordinary call ordering proves it: deliver bulk/file_end/job_done WITHOUT
+// awaiting (each just enqueues onto the run() serializer as a microtask), then
+// call abort() synchronously — outside the serializer — so it settles the
+// receiver as 'canceled' before any of the three queued handlers even begin.
+test('review fix round 2: onBulk/tryFinalize have no settled guard — bulk/file_end/job_done queued behind a synchronous abort() must not write the file to disk or emit events after canceled', async () => {
+  const dest = tmp();
+  const payload = Buffer.from('round2-payload'.repeat(30));
+  const hash = createHash('sha256').update(payload).digest('hex');
+  const manifest = { entries: [{ fileId: 0, path: 'r2.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const sentToSender = [];
+  const ch = { sendCtrl(s) { sentToSender.push(parseCtrlFrame(s)); }, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; } };
+  const events = [];
+  const store = memStore();
+  const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true, onEvent: (ev) => events.push(ev) });
+  const settled = rx.start().catch((e) => e.message);
+
+  await recvCtrl(offerFrame({ jobId: 'r2', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  expect(sentToSender.some((f) => f.t === 'accept')).toBe(true); // accepted normally, watchdog armed
+
+  // NOT awaited: each call only enqueues its handler onto the shared serializer
+  // chain as a microtask — it does not run yet. abort() then runs synchronously,
+  // settling the receiver BEFORE the JS engine drains the microtask queue, so all
+  // three queued handlers see `settled === true` the moment they finally run.
+  const p1 = recvBulk(payload);
+  const p2 = recvCtrl(fileEndFrame({ jobId: 'r2', fileId: 0, hash }));
+  const p3 = recvCtrl(jobDoneFrame({ jobId: 'r2' }));
+  rx.abort('canceled');
+  await Promise.all([p1, p2, p3]); // let the (now no-op) queued handlers actually run
+
+  expect(await settled).toBe('canceled');
+  // No real bytes ever landed anywhere on disk — onBulk must bail before even
+  // opening/writing the .part file, and tryFinalize must bail before fsync/rename.
+  expect(existsSync(join(dest, 'r2.bin'))).toBe(false);
+  expect(existsSync(join(dest, 'r2.bin.part'))).toBe(false);
+
+  const iCanceled = events.findIndex((e) => e.type === 'canceled');
+  expect(iCanceled).toBeGreaterThanOrEqual(0);
+  const after = events.slice(iCanceled + 1);
+  expect(after.some((e) => e.type === 'file-done')).toBe(false);
+  expect(after.some((e) => e.type === 'progress')).toBe(false);
+  expect(after.some((e) => e.type === 'completed')).toBe(false);
+  // Audit finding beyond the brief's required assertions: job_done's own
+  // `onEvent({type:'verifying'})` (unrelated to tryFinalize) is reachable
+  // whenever `pending` is non-empty — which it always is post-cancel, since a
+  // guarded tryFinalize never reaches its own `pending.delete(...)`. Must not
+  // leak either.
+  expect(after.some((e) => e.type === 'verifying')).toBe(false);
+});

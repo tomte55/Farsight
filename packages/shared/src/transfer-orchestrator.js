@@ -290,6 +290,10 @@ export function createReceiver({
   }
 
   async function tryFinalize(item) {
+    // A canceled receive must not finalize a file — no fsync/rename onto the real
+    // destination path, no 'file-done'/'file-failed' event — after 'canceled' has
+    // already been emitted and the promise settled (review round 2 finding).
+    if (settled) return;
     if (item.finalizing || !item.partFile || item.received < item.expected || item.hash == null) return;
     item.finalizing = true;
     await item.partFile.fsync();
@@ -303,6 +307,13 @@ export function createReceiver({
 
   channel.onBulk((buf) => run(async () => {
     pokeWatchdog(); // fresh bytes — the transfer is alive
+    // A cancel that landed while this handler was already queued behind the
+    // serializer (abort() runs outside run(), synchronously) must stop byte
+    // writes here too — otherwise a canceled receive keeps writing real bytes
+    // to the .part file after 'canceled' has already been emitted (review
+    // round 2 finding; mirrors the settled discipline already applied to
+    // beginReceive/saveRecord/maybeComplete/tryFinalize).
+    if (settled) return;
     if (!job) return; // bytes before accept: impossible in practice, guard anyway
     let chunk = Buffer.from(buf);
     while (chunk.length > 0 && cursor < seq.length) {
@@ -421,6 +432,13 @@ export function createReceiver({
 
   channel.onCtrl((str) => run(async () => {
     pokeWatchdog(); // fresh ctrl frame — the transfer is alive
+    // Mirrors the onBulk guard above: a cancel that landed while this handler was
+    // already queued must stop EVERY ctrl-frame side effect, not just tryFinalize's
+    // fsync/rename. Found by audit: without this, `job_done`'s `onEvent({type:
+    // 'verifying'})` below fires after 'canceled' whenever `pending` is non-empty —
+    // which it always is post-cancel, since the guarded tryFinalize no longer
+    // reaches its own `pending.delete(...)` (review round 2).
+    if (settled) return;
     const f = parseCtrlFrame(str);
     if (!f) return;
     if (f.t === 'offer') {
