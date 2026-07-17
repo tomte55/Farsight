@@ -11,10 +11,17 @@ import { walkSource } from '@farsight/shared/transfer-io';
 import { buildManifest as buildManifestReal } from '@farsight/shared/transfer-manifest';
 import { createJobsStore } from '@farsight/shared/jobs-store';
 import { newJobId } from '@farsight/shared/transfer-queue';
+import { offerFrame, parseCtrlFrame } from '@farsight/shared/transfer-protocol';
 
 const dirs = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), 'ftsvc-')); dirs.push(d); return d; }
 afterEach(() => { while (dirs.length) { try { rmSync(dirs.pop(), { recursive: true, force: true }); } catch {} } });
+
+// Poll until a predicate holds (same helper as transfer-orchestrator.test.js:11-15).
+async function until(pred, ms = 2000) {
+  const t0 = Date.now();
+  while (!pred()) { if (Date.now() - t0 > ms) throw new Error('until: timed out'); await new Promise((r) => setTimeout(r, 1)); }
+}
 
 // Same cross-wired fake channel pattern as transfer-orchestrator.test.js's
 // loopback(), generalized to produce fresh named sides on each call so a test
@@ -743,4 +750,45 @@ test('resumable() returns only jobs whose persisted state is active/paused/inter
 
   const resumable = await svc.resumable();
   expect(resumable.map((j) => j.jobId).sort()).toEqual(['j-active', 'j-interrupted', 'j-paused']);
+});
+
+test('SP3 P4: cancel aborts a LIVE receive, not just the store record', async () => {
+  // Before this, cancel(recvJobId) fell into the store-only branch: it flipped the
+  // record to 'canceled', returned ok, and the receive kept running — then saved
+  // 'done'/'error' right back over it. A hand-driven channel here: nothing ever
+  // completes the transfer, so the ONLY way the receive settles is a real abort.
+  const { manifest } = await oneFileSource();
+  const dest = tmp();
+  const recvStore = createJobsStore({ dir: tmp() });
+  let recvCtrl = null;
+  const sentToSender = [];
+  const channel = {
+    sendCtrl(s) { sentToSender.push(parseCtrlFrame(s)); },
+    async sendBulk() {},
+    onCtrl(cb) { recvCtrl = cb; }, onBulk() {},
+  };
+  const svc = createTransferService({
+    store: recvStore, transferDir: dest, consent: async () => true,
+    openChannel: async () => ({ channel, close: async () => {} }),
+    receiveCloseGraceMs: 0,
+  });
+  const jobId = newJobId();
+  const recvPromise = svc.startReceive({ rendezvous: { sessionId: 's' } }).catch((e) => e.message);
+  await until(() => recvCtrl !== null); // the receiver has attached to the channel
+  await recvCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await until(() => sentToSender.some((f) => f.t === 'accept')); // consented + accepted → live
+
+  expect(await svc.cancel(jobId)).toEqual({ ok: true });
+  expect(await recvPromise).toBe('canceled'); // the receive REALLY stopped
+  expect(sentToSender.some((f) => f.t === 'cancel')).toBe(true); // and the sender was told
+  const rec = (await recvStore.list()).find((r) => r.jobId === jobId);
+  expect(rec.jobState).toBe('canceled');
+});
+
+test('SP3 P4: cancel on an unknown jobId still falls back to the store-only branch', async () => {
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: loopback().sideA, close: async () => {} }),
+  });
+  expect(await svc.cancel('never-existed')).toEqual({ ok: false });
 });

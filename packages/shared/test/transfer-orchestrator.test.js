@@ -674,3 +674,47 @@ test('a stalled adhoc receive stays a terminal error (nothing will resume it)', 
   expect(events.find((e) => e.type === 'interrupted').resumable).toBe(false);
   expect(store.saved[store.saved.length - 1].jobState).toBe('error');
 });
+
+test('receiver abort sends a cancel frame the sender honors, and rejects', async () => {
+  const dest = tmp();
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 100, mtime: 1700000000000 }], totalBytes: 100, totalFiles: 1 };
+  let recvCtrl = () => {};
+  const sentToSender = [];
+  const ch = { sendCtrl(s) { sentToSender.push(parseCtrlFrame(s)); }, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk() {} };
+  const events = [];
+  const rx = createReceiver({ channel: ch, destRoot: dest, store: memStore(), consent: async () => true, onEvent: (ev) => events.push(ev) });
+  const settled = rx.start().catch((e) => e.message);
+  await recvCtrl(offerFrame({ jobId: 'x1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  rx.abort('canceled');
+  expect(await settled).toBe('canceled');
+  const cancel = sentToSender.find((f) => f.t === 'cancel');
+  expect(cancel).toBeTruthy();
+  expect(cancel.jobId).toBe('x1'); // the sender's inbound-cancel branch (:103) reads exactly this
+  expect(events.find((e) => e.type === 'canceled')).toBeTruthy();
+});
+
+test('receiver abort before any offer is harmless', async () => {
+  const dest = tmp();
+  const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} };
+  const rx = createReceiver({ channel: ch, destRoot: dest, store: memStore(), consent: async () => true });
+  const settled = rx.start().catch((e) => e.message);
+  rx.abort('canceled'); // no jobId yet — must not throw, must still settle
+  expect(await settled).toBe('canceled');
+});
+
+test('receiver abort after settling is a no-op', async () => {
+  const dest = tmp();
+  const payload = Buffer.from('short'.repeat(10));
+  const hash = createHash('sha256').update(payload).digest('hex');
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; } };
+  const rx = createReceiver({ channel: ch, destRoot: dest, store: memStore(), consent: async () => true });
+  const done = rx.start();
+  await recvCtrl(offerFrame({ jobId: 'n1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvBulk(payload);
+  await recvCtrl(fileEndFrame({ jobId: 'n1', fileId: 0, hash }));
+  await recvCtrl(jobDoneFrame({ jobId: 'n1' }));
+  expect((await done).ok).toBe(true);
+  expect(() => rx.abort('canceled')).not.toThrow(); // already resolved — must not re-settle
+});

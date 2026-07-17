@@ -59,6 +59,10 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // can actually tear the channel down (SP3 coherence contract #3) instead of
   // only flipping the persisted record while the transfer keeps running.
   let activeClose = null;
+  // Live receives, keyed by jobId, so cancel() can actually reach one. Sends are
+  // serialized (one activeClose suffices); receives are explicitly NOT queue-gated,
+  // so several can be in flight — this must be a map, not a single slot.
+  const activeReceives = new Map(); // jobId -> { abort }
 
   function emit(jobId, direction, ev) {
     onEvent({ ...ev, jobId, direction });
@@ -199,6 +203,18 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // in memory at all (already finished, or persisted by a previous app run) just
   // gets its store record flipped.
   async function cancel(jobId) {
+    // A live receive: abort it for real (the store-only fallback below would flip
+    // the record while the receive kept running and later saved right back over it).
+    if (activeReceives.has(jobId)) {
+      const entry = activeReceives.get(jobId);
+      activeReceives.delete(jobId);
+      try { entry.abort('canceled'); } catch { /* best effort */ }
+      // startReceive's finally tears the channel down once the receiver rejects.
+      const job = await store.load(jobId);
+      if (job) { try { await store.save({ ...job, jobState: 'canceled' }); } catch { /* best effort */ } }
+      return { ok: true };
+    }
+
     if (!pendingSends.has(jobId)) {
       const job = await store.load(jobId);
       if (!job) return { ok: false };
@@ -248,7 +264,11 @@ export function createTransferService({ store, transferDir, consent, openChannel
       const linked = (rendezvous && typeof rendezvous === 'object') ? !!rendezvous.linked : false;
       const { channel, close, peerAuth } = await openChannel({ role: 'attach', sessionId, linked });
       let currentJobId = null;
-      const tapped = tapJobId(channel, (id) => { currentJobId = id; });
+      let receiverRef = null;
+      const tapped = tapJobId(channel, (id) => {
+        currentJobId = id;
+        activeReceives.set(id, { abort: (r) => { if (receiverRef) receiverRef.abort(r); } });
+      });
       // SP3 Phase 5 Task 6: an own-fleet transfer is auto-accepted — logging into
       // your account on this machine is the standing consent, exactly as for
       // own-fleet unattended control (2026-07-15 decision). A contact — and any
@@ -283,9 +303,11 @@ export function createTransferService({ store, transferDir, consent, openChannel
         getTier: () => resolvedTier || 'adhoc',
         onEvent: (ev) => emit(currentJobId, 'recv', ev),
       });
+      receiverRef = receiver;
       try {
         return await receiver.start();
       } finally {
+        if (currentJobId) activeReceives.delete(currentJobId);
         // Grace before tearing down the worker so the receiver's `complete` ack
         // has time to flush to the sender over the wire — otherwise destroying the
         // window discards it and the sender waits out its whole completion timeout.

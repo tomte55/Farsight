@@ -6,7 +6,7 @@
 import {
   offerFrame, offerBeginFrame, offerEntriesFrame, offerEndFrame,
   fileBeginFrame, fileEndFrame, jobDoneFrame, acceptFrame, rejectFrame, promptingFrame, completeFrame,
-  parseCtrlFrame, TRANSFER_PROTOCOL_VERSION,
+  cancelFrame, parseCtrlFrame, TRANSFER_PROTOCOL_VERSION,
 } from './transfer-protocol.js';
 
 // Split manifest entries into batches whose serialized size stays under maxBytes,
@@ -427,5 +427,17 @@ export function createReceiver({
     }
   }));
 
-  return { start() { return finished; } };
+  return {
+    start() { return finished; },
+    // Mirrors createSender's abort (:131). Tells the sender to stop — it already
+    // honors an inbound `cancel` frame (:103), so no protocol change — then fails
+    // the receive. The persisted 'canceled' record is written by transfer-service's
+    // cancel(), which owns the store for this path.
+    abort(reason = 'aborted') {
+      if (settled) return;
+      try { if (jobId) channel.sendCtrl(cancelFrame(jobId)); } catch { /* best effort */ }
+      onEvent({ type: 'canceled' });
+      fail(new Error(reason));
+    },
+  };
 }
