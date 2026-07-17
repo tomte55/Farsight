@@ -945,18 +945,109 @@ test('review fix round 3: a cancel landing while genuinely parked inside finaliz
     const iCanceled = events.findIndex((e) => e.type === 'canceled');
     expect(iCanceled).toBeGreaterThanOrEqual(0);
     const after = events.slice(iCanceled + 1);
+    // Round 4 (reverts round 3's compensating undo — see transfer-orchestrator.js
+    // tryFinalize): a cancel landing while genuinely parked inside
+    // finalizeReceivedFile must not fire any of these events afterward — that
+    // part of the regression still holds. What round 3 additionally asserted
+    // (no file at the final destination; the .part left in its place) has been
+    // deliberately REMOVED: that behavior came from a rename-back that destroys
+    // a pre-existing destination file with different content (see the tryFinalize
+    // comment) — it was a data-loss bug, not a guarantee worth protecting. An
+    // already-verified file landing at its real destination despite a raced
+    // cancel is the correct, accepted outcome now.
     expect(after.some((e) => e.type === 'file-done')).toBe(false);
     expect(after.some((e) => e.type === 'progress')).toBe(false);
     expect(after.some((e) => e.type === 'completed')).toBe(false);
+  } finally {
+    spy.mockRestore();
+  }
+});
 
-    // The critical assertion: the real rename happened (finalizeReceivedFile
-    // really ran), but the fix must undo it — no file at the final destination.
-    expect(existsSync(join(dest, 'r3.bin'))).toBe(false);
-    // Resumability preserved: the bytes aren't lost, just left as a complete
-    // .part (mirrors the existing "leave the .part in place for resume"
-    // contract), NOT deleted outright.
-    expect(existsSync(join(dest, 'r3.bin.part'))).toBe(true);
-    expect(readFileSync(join(dest, 'r3.bin.part'))).toEqual(payload);
+// Round 4 (fd-leak fix): onBulk opens item.partFile via createPartFile; the only
+// close() used to be inside tryFinalize, which never runs for a file that's still
+// mid-flight (byte-incomplete) when the receive settles — so canceling mid-file
+// leaked the open fd. Spy on createPartFile (module-mocked passthrough already set
+// up at the top of this file) to wrap the REAL returned partFile's close() with a
+// counter, so this proves the actual close() the orchestrator calls internally —
+// not a synthetic stand-in — fires exactly once after abort.
+test('review fix round 4: aborting mid-file closes the open .part file handle (no leak)', async () => {
+  const dest = tmp();
+  const payload = Buffer.from('mid-file-fd-leak-payload'.repeat(20));
+  const half = payload.subarray(0, Math.floor(payload.length / 2));
+  const manifest = { entries: [{ fileId: 0, path: 'leak.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; } };
+  const store = memStore();
+
+  const realCreatePartFile = transferIo.createPartFile;
+  let closeCalls = 0;
+  const spy = vi.spyOn(transferIo, 'createPartFile').mockImplementation(async (args) => {
+    const real = await realCreatePartFile(args);
+    const origClose = real.close.bind(real);
+    real.close = async () => { closeCalls += 1; return origClose(); };
+    return real;
+  });
+
+  try {
+    const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true });
+    const settled = rx.start().catch((e) => e.message);
+
+    await recvCtrl(offerFrame({ jobId: 'r4', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+    await recvBulk(half); // byte-incomplete: no FILE_END, tryFinalize never runs for this item
+
+    rx.abort('canceled');
+    expect(await settled).toBe('canceled');
+
+    // The close is queued through the run() serializer (fire-and-forget), so poll
+    // for it rather than asserting synchronously right after abort().
+    await until(() => closeCalls > 0);
+    expect(closeCalls).toBe(1); // not double-closed
+
+    // Unchanged contract: the .part stays on disk (with exactly the bytes written
+    // so far) for a later resume — only the fd is released, nothing is deleted.
+    expect(existsSync(join(dest, 'leak.bin.part'))).toBe(true);
+    expect(readFileSync(join(dest, 'leak.bin.part'))).toEqual(half);
+    expect(existsSync(join(dest, 'leak.bin'))).toBe(false);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+// Companion to the above: a NORMAL (uncanceled) receive must still close exactly
+// once via tryFinalize's own close — the fd-leak fix's closeOpenPartFiles() must
+// not find anything left to close (item.finalizing is already true by then) and
+// must not double-close an already-closed handle.
+test('review fix round 4: a normal completed receive closes the .part handle exactly once', async () => {
+  const dest = tmp();
+  const payload = Buffer.from('normal-completion-payload'.repeat(20));
+  const hash = createHash('sha256').update(payload).digest('hex');
+  const manifest = { entries: [{ fileId: 0, path: 'ok.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; } };
+  const store = memStore();
+
+  const realCreatePartFile = transferIo.createPartFile;
+  let closeCalls = 0;
+  const spy = vi.spyOn(transferIo, 'createPartFile').mockImplementation(async (args) => {
+    const real = await realCreatePartFile(args);
+    const origClose = real.close.bind(real);
+    real.close = async () => { closeCalls += 1; return origClose(); };
+    return real;
+  });
+
+  try {
+    const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true });
+    const settled = rx.start();
+
+    await recvCtrl(offerFrame({ jobId: 'r4ok', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+    await recvBulk(payload);
+    await recvCtrl(fileEndFrame({ jobId: 'r4ok', fileId: 0, hash }));
+    await recvCtrl(jobDoneFrame({ jobId: 'r4ok' }));
+    await settled;
+
+    expect(closeCalls).toBe(1); // fd-leak fix's closeOpenPartFiles() found nothing to do
+    expect(existsSync(join(dest, 'ok.bin'))).toBe(true);
+    expect(readFileSync(join(dest, 'ok.bin'))).toEqual(payload);
   } finally {
     spy.mockRestore();
   }

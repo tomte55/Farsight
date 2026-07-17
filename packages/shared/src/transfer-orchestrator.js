@@ -26,7 +26,7 @@ function batchEntriesBySize(entries, maxBytes) {
 import { buildManifest, skipExisting } from './transfer-manifest.js';
 import { createSendJob, createReceiveJob } from './transfer-engine.js';
 import { sendFile, createPartFile, finalizeReceivedFile, hasFreeSpace, confineDestPath, publishFullyReceivedFile } from './transfer-io.js';
-import { rename, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 
 // Serialize async event handlers so awaited writes never interleave. Handler
 // exceptions are surfaced to onErr (a `fail(err)`) instead of being swallowed —
@@ -222,8 +222,36 @@ export function createReceiver({
     if (inactive && inactive.unref) inactive.unref();
   }
 
-  const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopWatchdog(); resolve(v); } };
-  const fail = (e) => { if (!settled) { settled = true; watching = false; stopWatchdog(); reject(e); } };
+  // Fd-leak fix: tryFinalize only closes a file's .part handle as part of
+  // actually finalizing it (fsync+close, unconditional, right before the
+  // settled check — see tryFinalize). A receive that settles (abort, stall,
+  // error) while a file is still mid-flight — either still receiving bytes, or
+  // byte-complete but awaiting FILE_END's hash — never reaches that close, so
+  // its fd would otherwise sit open until Node's FileHandle finalizer gets
+  // around to it (non-deterministic, with a process warning). On Windows a
+  // leaked open handle on a `.part` can make a LATER resume's rename onto that
+  // same path fail (EBUSY/EPERM), breaking cancel->resume. Marking
+  // `item.finalizing = true` before closing also prevents a late-queued
+  // tryFinalize call for this same item from trying to finalize/close it too —
+  // though in practice tryFinalize's own `if (settled) return` (its first line)
+  // already makes that impossible once we get here.
+  function closeOpenPartFiles() {
+    for (const item of seq) {
+      if (item.partFile && !item.finalizing) {
+        item.finalizing = true;
+        item.partFile.close().catch(() => { /* best effort */ });
+      }
+    }
+  }
+
+  // Routed through run() (not called directly) so the close is queued behind
+  // any handler currently in-flight on the shared serializer — most notably
+  // onBulk's `await item.partFile.write(take)` for the very item we're about
+  // to close. Closing a fd while a write to it is still parked in libuv would
+  // race the fd itself; run() guarantees the write's handler has already
+  // returned (its own `if (settled) return` bails it out) before this runs.
+  const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopWatchdog(); run(closeOpenPartFiles); resolve(v); } };
+  const fail = (e) => { if (!settled) { settled = true; watching = false; stopWatchdog(); run(closeOpenPartFiles); reject(e); } };
   const run = serializer(fail);
 
   let lastProgressAt = 0;
@@ -306,26 +334,23 @@ export function createReceiver({
     // already canceled.
     if (settled) return;
     const r = await finalizeReceivedFile({ partFile: item.partFile, expectedHash: item.hash, mtime: item.entry.mtime });
-    if (settled) {
-      // Round 3 (CRITICAL, proven by a gate-mock test): finalizeReceivedFile's
-      // rename onto the real destination is a real, uninterruptible disk op —
-      // once the call above was made, it commits regardless of whether `settled`
-      // flips while it's in flight. A settled check placed only AFTER this
-      // resumes (like the pattern used everywhere else in this file) cannot
-      // prevent the rename from having already happened — so if it landed
-      // (r.ok), undo it here: rename the file back onto a complete `.part`,
-      // mirroring the existing "leave the .part in place for resume" contract
-      // (a later resume's beginReceive republishes it via
-      // publishFullyReceivedFile, same as any other already-complete .part). On
-      // a hash mismatch (r.ok:false) finalizeReceivedFile already discarded the
-      // .part itself — nothing to undo. Either way: no pending.delete, no
-      // doneIds/failedIds, no job.markVerified/markFailed, no onEvent, no
-      // maybeComplete() — none of those may fire after 'canceled'.
-      if (r.ok) {
-        try { await rename(item.partFile.finalPath, item.partFile.partPath); } catch { /* best effort */ }
-      }
-      return;
-    }
+    // Round 4 (CRITICAL, reverts round 3): finalizeReceivedFile's rename onto the
+    // real destination is a real, uninterruptible disk op — once the call above
+    // was made, it commits regardless of whether `settled` flips while it's in
+    // flight. Round 3 tried to "undo" a landed rename by renaming the file back
+    // onto a `.part` — but that causes DATA LOSS: skipExisting only skips when
+    // size AND mtime both match (transfer-manifest.js), so a pre-existing
+    // destination file that's merely an OLDER version of the incoming one reaches
+    // this function, and the rename above has already overwritten it before this
+    // check runs. The round-3 undo then relocated the just-landed new content
+    // away to `.part`, leaving the destination EMPTY: the user's original file
+    // was already gone (overwritten) and the new one never actually lands there
+    // either. An already-verified file quietly finishing despite a cancel that
+    // raced its last byte is an acceptable outcome (the user gets the file they
+    // asked for); a file that existed before the transfer vanishing is not. So:
+    // don't undo it — just stop advancing bookkeeping/events for a settled
+    // receiver, same discipline as every other guard in this file.
+    if (settled) return;   // an already-verified file may land; that's acceptable
     pending.delete(item.entry.fileId);
     if (r.ok) { doneIds.add(item.entry.fileId); job.markVerified(item.entry.fileId); onEvent({ type: 'file-done', fileId: item.entry.fileId, progress: job.progress() }); }
     else { ok = false; failedIds.add(item.entry.fileId); job.markFailed(item.entry.fileId); onEvent({ type: 'file-failed', fileId: item.entry.fileId }); }
