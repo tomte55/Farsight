@@ -16,6 +16,12 @@ export function parseConfig(text) {
       // so a corrupt/foreign value can't silently disable the receiver-side
       // gate or be mistaken for an explicit false.
       if (typeof obj.controlAllowed === 'boolean') out.controlAllowed = obj.controlAllowed;
+      // receivedFilesDir: the user-chosen folder for INCOMING files (default
+      // Downloads/Farsight/Received when unset — see receivedFilesDir() in
+      // controller main.js). Only a non-empty string is honored.
+      if (typeof obj.receivedFilesDir === 'string' && obj.receivedFilesDir.trim() !== '') {
+        out.receivedFilesDir = obj.receivedFilesDir;
+      }
       return out;
     }
   } catch { /* fall through to empty */ }
@@ -30,6 +36,9 @@ export function serializeConfig(cfg) {
   }
   if (cfg && typeof cfg.controlAllowed === 'boolean') {
     out.controlAllowed = cfg.controlAllowed;
+  }
+  if (cfg && typeof cfg.receivedFilesDir === 'string' && cfg.receivedFilesDir.trim() !== '') {
+    out.receivedFilesDir = cfg.receivedFilesDir.trim();
   }
   return JSON.stringify(out, null, 2);
 }

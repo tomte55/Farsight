@@ -47,6 +47,22 @@ test('serializeConfig round-trips controlAllowed (including false) alongside sig
   expect(serializeConfig({})).toBe('{}');
 });
 
+test('parseConfig keeps a string receivedFilesDir', () => {
+  expect(parseConfig(JSON.stringify({ receivedFilesDir: 'C:\\Downloads\\FS' })))
+    .toEqual({ receivedFilesDir: 'C:\\Downloads\\FS' });
+});
+
+test('parseConfig drops a non-string/blank receivedFilesDir', () => {
+  expect(parseConfig(JSON.stringify({ receivedFilesDir: 123 }))).toEqual({});
+  expect(parseConfig(JSON.stringify({ receivedFilesDir: '   ' }))).toEqual({});
+});
+
+test('serializeConfig round-trips receivedFilesDir alongside other keys', () => {
+  const out = serializeConfig({ signalingUrl: 'wss://x.example', receivedFilesDir: 'D:\\Recv' });
+  expect(JSON.parse(out)).toEqual({ signalingUrl: 'wss://x.example', receivedFilesDir: 'D:\\Recv' });
+  expect(JSON.parse(serializeConfig({ receivedFilesDir: '   ' }))).toEqual({});
+});
+
 test('resolveSignalingUrl: env wins, then config, then null', () => {
   expect(resolveSignalingUrl({ envUrl: 'ws://localhost:8080', storedUrl: 'wss://s.example.org' }))
     .toEqual({ url: 'ws://localhost:8080', source: 'env' });
