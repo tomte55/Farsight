@@ -67,6 +67,13 @@ export function createSessionWindow({ onStatus = () => {}, onClosed = () => {}, 
   // for the factory's life; the payload is forwarded to the shell by main.js.
   onIpc('session:status', (_e, status) => onStatus(status));
   onIpc('session:log', (_e, obj) => onLog(obj));
+  // The session renderer asks to close the window when a session ends (its
+  // doClose — End button, overlay "Close session", host-ended). Closing the
+  // window (not the factory) triggers win.on('closed') → onClosed exactly like
+  // the user closing it manually, so the shell clears its status bar and a later
+  // session:open recreates a fresh window. Without this, doClose only hid the
+  // video/overlay and left an open, empty window that never went away.
+  onIpc('session:close', () => { if (win && !win.isDestroyed()) win.close(); });
 
   return {
     isOpen: () => !!win && !win.isDestroyed(),

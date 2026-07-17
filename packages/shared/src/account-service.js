@@ -197,6 +197,16 @@ export function createAccountService({
       if (!token) return { ok: false, error: 'not_signed_in' };
       return client.requestUpdate({ accessToken: token, deviceId, targetVersion: targetVersion ?? null });
     },
+    // Console: remove one of the owner's OTHER devices from the fleet — a
+    // server-side revoke (sets revokedAt), which drops it from GET /devices. Used
+    // to prune stale rows (e.g. pre-2.0 installs, or old rows left by the
+    // one-row-per-login server behaviour). Token-gated like the rest.
+    async revokeDevice(deviceId) {
+      const token = await session.getAccessToken();
+      if (!token) return { ok: false, error: 'not_signed_in' };
+      if (!deviceId) return { ok: false, error: 'invalid_request' };
+      return client.revokeDevice({ accessToken: token, deviceId });
+    },
     // Host: register a handler for management directives delivered on the heartbeat
     // response (e.g. { targetVersion }). Called on each beat while signed in.
     onUpdateDirective(cb) { directiveCb = typeof cb === 'function' ? cb : null; },

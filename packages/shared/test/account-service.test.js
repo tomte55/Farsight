@@ -357,6 +357,34 @@ describe('remote update (S2.7)', () => {
     expect(await service.requestDeviceUpdate('x', '1.8.0')).toEqual({ ok: false, error: 'not_signed_in' });
   });
 
+  test('revokeDevice removes a fleet device server-side (token-gated)', async () => {
+    const ff = fakeFetch({
+      '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } },
+      '/devices/heartbeat': { status: 200, body: {} },
+      '/devices/revoke': { status: 200, body: { ok: true } },
+    });
+    const service = createAccountService({
+      baseUrl: 'https://auth.example', safeStorage: fakeSafeStorage, fs: fakeFs(),
+      filePath: '/cfg/token.enc', fetch: ff.impl, now: () => 1_700_000_000_000,
+    });
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+
+    const res = await service.revokeDevice('stale-dev');
+    expect(res.ok).toBe(true);
+    const call = ff.calls.find((c) => c.url.endsWith('/devices/revoke'));
+    expect(JSON.parse(call.init.body)).toEqual({ deviceId: 'stale-dev' });
+    expect(call.init.headers.authorization).toMatch(/^Bearer /);
+  });
+
+  test('revokeDevice is not_signed_in when signed out, invalid_request without an id', async () => {
+    const signedOut = svc({});
+    expect(await signedOut.revokeDevice('x')).toEqual({ ok: false, error: 'not_signed_in' });
+
+    const service = svc({ '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } } });
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+    expect(await service.revokeDevice()).toEqual({ ok: false, error: 'invalid_request' });
+  });
+
   test('onUpdateDirective fires with the heartbeat directive on login', async () => {
     const sched = fakeScheduler();
     const service = createAccountService({

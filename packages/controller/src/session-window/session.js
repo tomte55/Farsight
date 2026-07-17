@@ -121,9 +121,15 @@ function showOverlay(connState, reason) {
     ended: 'The host ended the session.',
     reconnecting: 'Trying to restore the connection…',
   };
-  document.getElementById('ov-glyph').textContent = glyphs[o.kind] || '…';
-  document.getElementById('ov-glyph').style.background =
-    o.kind === 'disconnected' ? 'rgba(255,143,163,.15)' : 'rgba(124,92,255,.15)';
+  // In-flight states get the animated three-dot indicator (positive "not frozen"
+  // feedback); terminal states keep a static glyph.
+  if (o.kind === 'reconnecting' || o.kind === 'connecting') {
+    setGlyphConnecting();
+  } else {
+    const g = document.getElementById('ov-glyph');
+    g.textContent = glyphs[o.kind] || '…';
+    g.style.background = o.kind === 'disconnected' ? 'rgba(255,143,163,.15)' : 'rgba(124,92,255,.15)';
+  }
   document.getElementById('ov-title').textContent = o.title;
   document.getElementById('ov-detail').textContent = details[o.kind] || '';
   const actions = document.getElementById('ov-actions');
@@ -141,9 +147,20 @@ function showOverlay(connState, reason) {
 // Immediate, visible "establishing…" feedback (no buttons). The session window's
 // #status element is hidden, so without this a connect/reconnect attempt showed
 // nothing on screen while it was in flight.
+// Fill the overlay glyph circle with three animated dots (see .ov-dots in
+// session.css) so an in-flight connect/reconnect reads as working, not frozen.
+function setGlyphConnecting() {
+  const g = document.getElementById('ov-glyph');
+  g.textContent = '';
+  const wrap = document.createElement('span');
+  wrap.className = 'ov-dots';
+  for (let i = 0; i < 3; i++) wrap.appendChild(document.createElement('i'));
+  g.appendChild(wrap);
+  g.style.background = 'rgba(124,92,255,.15)';
+}
+
 function showConnecting(title) {
-  document.getElementById('ov-glyph').textContent = '…';
-  document.getElementById('ov-glyph').style.background = 'rgba(124,92,255,.15)';
+  setGlyphConnecting();
   document.getElementById('ov-title').textContent = title || 'Connecting…';
   document.getElementById('ov-detail').textContent = 'Establishing a secure connection…';
   document.getElementById('ov-actions').innerHTML = '';
@@ -183,6 +200,10 @@ function doClose() {
   statusEl.textContent = '';
   setActive(false);
   window.farsightSession.status(null);
+  // Actually close the window — otherwise this teardown just leaves an empty
+  // window sitting open. main closes it, which fires onClosed → the shell clears
+  // its status bar (same path as the user closing the window manually).
+  window.farsightSession.close();
 }
 
 function doReconnect() {

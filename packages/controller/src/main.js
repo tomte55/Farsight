@@ -74,7 +74,11 @@ ipcMain.handle('account:status', async () => {
   return res;
 });
 ipcMain.handle('account:login', async (_e, input) => {
-  const res = await getAccountService().login(input);
+  // Name this device by its machine hostname (authoritative — main owns os), not
+  // a hardcoded label. Before this the renderer sent deviceName:'Controller', so
+  // every device in a fleet showed up as "Controller" and was indistinguishable.
+  // Forced here so the renderer can't override it.
+  const res = await getAccountService().login({ ...input, deviceName: os.hostname() });
   accountLoggedIn = !!res.ok;
   refreshTrayMenu();
   return res;
@@ -95,27 +99,67 @@ ipcMain.handle('account:contact-accept', (_e, input) => getAccountService().acce
 ipcMain.handle('account:contact-decline', (_e, input) => getAccountService().declineContact(input?.contactId));
 // Remote update (S2.7): set a converge-to target version on a fleet device.
 ipcMain.handle('account:request-update', (_e, input) => getAccountService().requestDeviceUpdate(input?.deviceId, input?.targetVersion));
+// Fleet console: remove a stale/old device from the owner's fleet (server-side revoke).
+ipcMain.handle('account:revoke-device', (_e, input) => getAccountService().revokeDevice(input?.deviceId));
 
-// SP3 file transfer (send path). Each transfer gets its own createTransferWorker()
-// — a hidden BrowserWindow owning a DEDICATED RTCPeerConnection + signaling
-// socket (see transfer-worker.js), independent of the main control session's
-// peer. The jobs-store persists progress under userData/transfers so a send
-// survives across app restarts (resume is a later phase — this wiring covers
-// starting a fresh send end to end). `consent` always declines because the
-// controller UI does not offer a receive flow yet (Phase 2 follow-up); nothing
-// currently calls startReceive from this app.
+// SP3 file transfer (send AND receive). Each transfer gets its own
+// createTransferWorker() — a hidden BrowserWindow owning a DEDICATED
+// RTCPeerConnection + signaling socket (see transfer-worker.js), independent of
+// the main control session's peer. The jobs-store persists progress under
+// userData/transfers so a send survives across app restarts. v2: this app now
+// also RECEIVES — an incoming TRANSFER_REQUEST (relayed on the renderer's
+// host-registration socket) routes to transfer:incoming → startReceive, with a
+// real consent prompt (requestReceiveConsent); own-fleet pushes auto-accept.
 let jobsStore = null;
 function getJobsStore() {
   if (!jobsStore) jobsStore = createJobsStore({ dir: path.join(app.getPath('userData'), 'transfers') });
   return jobsStore;
 }
+
+// Where received files land. A discoverable, user-owned location (Downloads/
+// Farsight/Received) — not a hidden userData folder — since the whole point of
+// receiving is that the user then opens the files. Mirrors the retired host.
+function receivedFilesDir() {
+  return path.join(app.getPath('downloads'), 'Farsight', 'Received');
+}
+
+// Consent round-trip for an INCOMING transfer (v2: the unified app can now
+// receive, not just send). transfer-orchestrator's createReceiver calls
+// consent({jobId, manifest}) with the REAL sender-assigned jobId — use it as the
+// correlation id so the prompt, the IPC round-trip, and the persisted record all
+// agree. Own-fleet offers auto-accept inside transfer-service (peerAuth tier),
+// so this human prompt only fires for contacts / ad-hoc peers.
+const pendingConsent = new Map(); // jobId -> resolve(boolean)
+function requestReceiveConsent({ jobId, manifest }) {
+  log?.child('transfer').info(`consent prompt shown job=${jobId} files=${manifest?.totalFiles} bytes=${manifest?.totalBytes}`);
+  return new Promise((resolve) => {
+    if (!mainWindow || mainWindow.isDestroyed()) { resolve(false); return; }
+    pendingConsent.set(jobId, resolve);
+    mainWindow.webContents.send('transfer:consent-request', { jobId, manifest, destDir: receivedFilesDir() });
+    // Surface the prompt: the app is a tray app that may be hidden/covered, and an
+    // unseen prompt is a silently-dropped transfer (same reasoning as an incoming
+    // control CONNECT).
+    bringWindowToAttention();
+  });
+}
+ipcMain.on('transfer:respond-consent', (_e, input) => {
+  const { jobId, accept } = input || {};
+  log?.child('transfer').info(`consent responded job=${jobId} accept=${!!accept}`);
+  const resolve = pendingConsent.get(jobId);
+  if (!resolve) return;
+  pendingConsent.delete(jobId);
+  resolve(!!accept);
+});
+
 let transferService = null;
 function getTransferService() {
   if (!transferService) {
+    const recvDir = receivedFilesDir();
+    try { nodeFs.mkdirSync(recvDir, { recursive: true }); } catch (err) { log?.child('transfer').warn(`could not create received-files dir: ${err.message}`); }
     transferService = createTransferService({
       store: getJobsStore(),
-      transferDir: path.join(app.getPath('userData'), 'transfers-received'),
-      consent: async () => false, // receive UI not wired yet — see comment above
+      transferDir: recvDir,
+      consent: requestReceiveConsent,
       // Canonical rendezvous shape (SP3 coherence contract #1), identical to
       // the host's openChannel: transfer-service always calls this as
       // { role, target, sessionId } — 'initiate' carries target (sessionId
@@ -137,6 +181,22 @@ function getTransferService() {
             rendezvousErrorCb(state.slice('error:'.length));
           }
         });
+        // RECEIVE (attach): resolve the device-keypair-VERIFIED peer's tier
+        // (fleet|contact|null) so transfer-service can auto-accept an own-fleet
+        // push and skip the human prompt. A non-linked (ad-hoc/password) attach
+        // never runs the handshake → resolve null immediately (always prompt)
+        // rather than waiting on a callback that will never fire.
+        let resolvePeerAuth;
+        const peerAuth = new Promise((res) => { resolvePeerAuth = res; });
+        if (role !== 'initiate' && !linked) resolvePeerAuth({ tier: null });
+        worker.onPeerAuth(async ({ publicKey }) => {
+          let tier = null;
+          try { tier = await getAccountService().classifyPublicKey(publicKey); } catch { tier = null; }
+          // publicKey rides along so transfer-service binds a remembered contact
+          // consent to the VERIFIED device — a sender-chosen jobId alone must never
+          // unlock a skipped prompt.
+          resolvePeerAuth({ tier, publicKey });
+        });
         if (role === 'initiate') {
           worker.startRendezvous({
             role: 'initiator',
@@ -155,6 +215,7 @@ function getTransferService() {
           channel: worker.channel,
           close: async () => worker.close(),
           onRendezvousError: (cb) => { rendezvousErrorCb = cb; },
+          peerAuth,
         };
       },
       onEvent: (ev) => {
@@ -164,7 +225,7 @@ function getTransferService() {
         // counters field diagnostics depend on. Verbose connection detail is
         // debug-level (CLAUDE.md); every other (rarer) lifecycle event stays info.
         const level = ev.type === 'progress' ? 'debug' : 'info';
-        log?.child('transfer')[level](`send ev=${ev.type} job=${ev.jobId}${prog}${ev.reason ? ` reason=${ev.reason}` : ''}`);
+        log?.child('transfer')[level](`${ev.direction || 'xfer'} ev=${ev.type} job=${ev.jobId}${prog}${ev.reason ? ` reason=${ev.reason}` : ''}`);
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('transfer:event', ev);
       },
       // SP3 Phase 4 auto-resume: the watcher resolves an interrupted job's peer to
@@ -233,6 +294,24 @@ ipcMain.handle('transfer:list', () => getTransferService().listJobs());
 // persisted job record canceled; a waiting (not-yet-active) job is just
 // dropped from the queue.
 ipcMain.handle('transfer:cancel', async (_e, jobId) => getTransferService().cancel(jobId));
+// Forget a finished/failed job so it leaves the Transfers list (deletes its
+// persisted jobs-store record). Refused for a job still in flight — see removeJob.
+ipcMain.handle('transfer:remove', async (_e, jobId) => getTransferService().removeJob(jobId));
+// RECEIVE path: the renderer's host-registration socket relays a TRANSFER_REQUEST
+// here (a peer wants to push files at this machine). Fire-and-forget — startReceive
+// only settles when the whole job does, so awaiting it would hang this call for the
+// entire transfer; consent/progress flow via transfer:consent-request / transfer:event.
+ipcMain.handle('transfer:incoming', async (_e, input) => {
+  const sessionId = input && input.sessionId;
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return { error: 'invalid_request' };
+  // SP3 Phase 4: the signaling server relays `linked` for an own-fleet transfer;
+  // carry it through so the attacher enforces the device-keypair handshake.
+  const linked = !!(input && input.linked);
+  log?.child('transfer').info(`incoming transfer_request session=${sessionId}${linked ? ' linked' : ''}`);
+  getTransferService().startReceive({ rendezvous: { sessionId, linked } })
+    .catch((err) => log?.child('transfer').warn(`receive failed: ${err?.message || err}`));
+  return { ok: true };
+});
 
 function configFilePath() {
   return path.join(app.getPath('userData'), 'config.json');
@@ -573,6 +652,11 @@ app.on('before-quit', () => lifecycle.beginQuit());
 
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return;   // losing instance: never create a window
+  // No native application menu bar (File/Edit/View/Window/Help). This is a
+  // tray-first consumer app with its own in-window chrome; the default menu adds
+  // nothing and its Alt-key strip clutters the window. Removes it from every
+  // BrowserWindow on Windows/Linux.
+  Menu.setApplicationMenu(null);
   ({ log, minLevel: logMinLevel } = createAppLogger({
     filePath: path.join(app.getPath('userData'), 'logs', 'main.log'),
     fs: nodeFs,

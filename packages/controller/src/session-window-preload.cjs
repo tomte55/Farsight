@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('farsightSession', {
   onLaunch: (cb) => ipcRenderer.on('session:launch', (_e, params) => cb(params)),
   // session -> shell (via main): live {peer,rttMs,width,height,transport} or null.
   status: (s) => ipcRenderer.send('session:status', s),
+  // session -> main: end the session by closing this window (see doClose).
+  close: () => ipcRenderer.send('session:close'),
   // config + identity the moved code reads.
   getSignalingUrl: () => ipcRenderer.invoke('get-signaling-url'),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),

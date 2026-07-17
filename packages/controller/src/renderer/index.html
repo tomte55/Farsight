@@ -170,6 +170,7 @@
             <div class="page-head">
               <div><div class="page-title">Transfers</div></div>
               <div class="row-actions">
+                <button id="transfers-clear" class="btn btn-ghost">Clear finished</button>
                 <button id="transfers-refresh" class="btn btn-ghost">Refresh</button>
               </div>
             </div>
@@ -228,6 +229,27 @@
     <div class="u-row">
       <button id="allow" class="btn btn-primary u-flex1">Allow</button>
       <button id="deny" class="btn btn-ghost u-flex1">Deny</button>
+    </div>
+  </div>
+</div>
+
+<!-- SP3 file transfer (receive path, v2): incoming-consent modal. Nothing is
+     written to disk until the user clicks Accept — main's requestReceiveConsent
+     awaits this round-trip (transfer:consent-request → respondConsent). An
+     own-fleet push auto-accepts in main and never shows this. -->
+<div id="transfer-consent" class="overlay" hidden>
+  <div class="veil"></div>
+  <div class="card attn xfer-consent-card">
+    <div class="page-title">Incoming files</div>
+    <div class="statusline u-tight">A peer wants to send you files.</div>
+    <div id="transfer-consent-summary" class="statusline u-tight xfer-consent-strong"></div>
+    <div class="lbl">Save to</div>
+    <div id="transfer-consent-dest" class="statusline u-tight xfer-consent-dest"></div>
+    <div class="lbl">Contents</div>
+    <div id="transfer-consent-tree" class="xfer-tree-wrap"></div>
+    <div class="u-row xfer-consent-actions">
+      <button id="transfer-consent-accept" class="btn btn-primary u-flex1">Accept</button>
+      <button id="transfer-consent-reject" class="btn btn-ghost u-flex1">Reject</button>
     </div>
   </div>
 </div>

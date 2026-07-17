@@ -424,6 +424,17 @@ export function createTransferService({ store, transferDir, consent, openChannel
       return store.list();
     },
 
+    // Forget a job — delete its persisted record so it leaves the Transfers list.
+    // Refuses while the job is still live in THIS process (a send in flight or an
+    // active receive): those must be cancel()'d first, so the UI only offers this
+    // on terminal jobs. Idempotent — removing an unknown/already-gone job is ok.
+    async removeJob(jobId) {
+      if (typeof jobId !== 'string' || !jobId) return { ok: false, error: 'invalid_request' };
+      if (pendingSends.has(jobId) || activeReceives.has(jobId)) return { ok: false, error: 'active' };
+      try { await store.remove(jobId); } catch { /* best effort — treat as gone */ }
+      return { ok: true };
+    },
+
     async resumable() {
       return selectResumable(await store.list());
     },

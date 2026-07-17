@@ -46,6 +46,7 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   accountContactAccept: (contactId) => ipcRenderer.invoke('account:contact-accept', { contactId }),
   accountContactDecline: (contactId) => ipcRenderer.invoke('account:contact-decline', { contactId }),
   accountRequestUpdate: (input) => ipcRenderer.invoke('account:request-update', input),
+  accountRevokeDevice: (deviceId) => ipcRenderer.invoke('account:revoke-device', { deviceId }),
   // connect-from-console: E2E device-keypair handshake crypto (runs in main).
   connAuthPublicKey: () => ipcRenderer.invoke('conn-auth:public-key'),
   connAuthDeviceId: () => ipcRenderer.invoke('conn-auth:device-id'),
@@ -59,7 +60,14 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   transferSend: (input) => ipcRenderer.invoke('transfer:send', input),
   transferList: () => ipcRenderer.invoke('transfer:list'),
   transferCancel: (jobId) => ipcRenderer.invoke('transfer:cancel', jobId),
+  transferRemove: (jobId) => ipcRenderer.invoke('transfer:remove', jobId),
   onTransferEvent: (cb) => ipcRenderer.on('transfer:event', (_e, ev) => cb(ev)),
+  // SP3 receive path (v2): the host-registration socket relays a TRANSFER_REQUEST,
+  // which the renderer forwards to main; main round-trips consent (manifest preview)
+  // before anything touches disk.
+  transferIncoming: (input) => ipcRenderer.invoke('transfer:incoming', input),
+  onTransferConsent: (cb) => ipcRenderer.on('transfer:consent-request', (_e, req) => cb(req)),
+  respondConsent: (input) => ipcRenderer.send('transfer:respond-consent', input),
   // Unification step 2: the remote-control session lives in its own
   // BrowserWindow (session-window.js). The shell asks main to open/focus it
   // and listens for status/closed pushes to drive its status bar.

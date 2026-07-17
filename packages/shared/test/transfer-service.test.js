@@ -1329,3 +1329,35 @@ test('after recoverStaleSends(), the resume watcher picks up the swept fleet rec
   // resume watcher's listInterrupted actually returned the swept record.
   expect(capturedTarget).toMatchObject({ id: 'sig-CURRENT', deviceId: 'dev-1', linked: true });
 });
+
+test('removeJob deletes a persisted (terminal) job so it leaves the Transfers list', async () => {
+  const store = createJobsStore({ dir: tmp() });
+  const svc = createTransferService({ store, transferDir: tmp(), consent: async () => true });
+  await store.save({ jobId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', dir: 'send', jobState: 'done', peer: {} });
+  await store.save({ jobId: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', dir: 'send', jobState: 'error', peer: {} });
+  expect((await svc.listJobs()).length).toBe(2);
+
+  expect(await svc.removeJob('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toEqual({ ok: true });
+  const left = await svc.listJobs();
+  expect(left.map((j) => j.jobId)).toEqual(['bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb']);
+
+  // Idempotent: removing an unknown/already-gone job is still ok.
+  expect(await svc.removeJob('cccccccccccccccccccccccccccccccc')).toEqual({ ok: true });
+  expect(await svc.removeJob('')).toEqual({ ok: false, error: 'invalid_request' });
+});
+
+test('removeJob refuses while a send is still in flight (must cancel first)', async () => {
+  const store = createJobsStore({ dir: tmp() });
+  const { manifest, sources } = await oneFileSource();
+  // A send that never resolves (dead channel + long rendezvous) stays in pendingSends.
+  const svc = createTransferService({
+    store, transferDir: tmp(), consent: async () => true, rendezvousTimeoutMs: 5000,
+    openChannel: async () => ({ channel: deadChannel(), close: async () => {} }),
+  });
+  const jobId = 'dddddddddddddddddddddddddddddddd';
+  svc.startSend({ jobId, manifest, sources, target: { id: 'sig-x', password: 'pw' } }).catch(() => {});
+  await untilAsync(async () => (await svc.listJobs()).some((j) => j.jobId === jobId));
+
+  expect(await svc.removeJob(jobId)).toEqual({ ok: false, error: 'active' });
+  await svc.cancel(jobId); // teardown so afterEach can clean up
+});

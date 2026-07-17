@@ -137,9 +137,13 @@ async function startHostRegistration() {
         session.end();
         hostStatusEl.textContent = 'Peer disconnected.';
       },
-      // MSG.TRANSFER_REQUEST (SP3 receive path) is not wired into the shell yet
-      // — no window.farsightIpc.transferIncoming bridge exists on this app's
-      // preload, unlike host's. Out of scope for this task.
+      // SP3 receive path (v2): a peer wants to push files at this machine. The
+      // server relays TRANSFER_REQUEST on this same registration socket; forward
+      // it to main, which attaches a transfer worker and round-trips consent
+      // before anything touches disk. (An own-fleet push auto-accepts in main.)
+      [MSG.TRANSFER_REQUEST]: (m) => {
+        window.farsightIpc.transferIncoming({ sessionId: m.sessionId, linked: !!m.linked });
+      },
     }, { password, version, acceptsLinked: true, log: hlog.child('signaling') });
     hostRotator = createIdleRotator({ intervalMs: HOST_PW_ROTATE_MS, onRotate: rotateHostPassword });
     hostRotator.start();
@@ -688,7 +692,7 @@ const fleetList = document.getElementById('fleet-list');
 const fleetSub = document.getElementById('fleet-sub');
 const fleetError = document.getElementById('fleet-error');
 
-const setMsg = (el, text, ok = false) => { el.textContent = text; el.style.color = ok ? 'var(--acc2)' : 'var(--danger-ink)'; };
+const setMsg = (el, text, ok = false) => { el.textContent = text; el.style.color = ok ? 'var(--ok)' : 'var(--danger-ink)'; };
 
 // account:status carries no email (see account-service.status(), which returns
 // only { signedIn }) — the only identity this renderer ever learns is whatever
@@ -726,7 +730,9 @@ async function doSignIn() {
   acctSigninBtn.textContent = 'Signing in…';
   let res;
   try {
-    res = await window.farsightIpc.accountLogin({ email, password, deviceName: 'Controller', code });
+    // deviceName is set authoritatively in main from os.hostname() — don't send a
+    // hardcoded label here (that made every fleet device show as "Controller").
+    res = await window.farsightIpc.accountLogin({ email, password, code });
   } catch {
     res = { ok: false, error: 'network_error' };
   } finally {
@@ -769,13 +775,20 @@ async function doForgot() {
 
 async function loadFleet() {
   setMsg(fleetError, '');
-  const res = await window.farsightIpc.accountFleet();
+  // Fetch the fleet and THIS device's id together so we can drop our own row —
+  // the fleet console is for reaching your OTHER machines; showing the machine
+  // you're sitting at is just noise (and you can't connect to yourself).
+  const [res, myDeviceId] = await Promise.all([
+    window.farsightIpc.accountFleet(),
+    window.farsightIpc.connAuthDeviceId(),
+  ]);
   if (!res.ok) {
     if (res.error === 'not_signed_in') { refreshAccountView(); return; }
     setMsg(fleetError, 'Couldn’t load your fleet. Check your connection.');
     return;
   }
-  renderFleet(res.data.devices || []);
+  const devices = (res.data.devices || []).filter((d) => !myDeviceId || d.id !== myDeviceId);
+  renderFleet(devices);
 }
 function renderFleet(devices) {
   const online = devices.filter((d) => d.online).length;
@@ -848,10 +861,7 @@ function hostRow(d) {
     }
     right.appendChild(btn);
   }
-  const status = document.createElement('span');
-  status.className = 'host-status';
-  status.textContent = d.online ? 'Online' : 'Offline';
-  right.appendChild(status);
+  // Online/offline needs no words — the coloured .host-dot already shows it.
 
   // Connect-from-console (SP2 §4.4): a password-free Connect for an online device
   // that has enrolled a key and reported where it's reachable (signalingId). The
@@ -877,6 +887,35 @@ function hostRow(d) {
       right.appendChild(b);
     }
   }
+
+  // Remove a stale/old device from the fleet (server-side revoke — it drops out of
+  // the list). Two-step to avoid accidents: the first click arms ("Remove?"), the
+  // second confirms; it disarms itself after a few seconds.
+  const remove = document.createElement('button');
+  remove.className = 'btn btn-ghost host-remove';
+  remove.textContent = 'Remove';
+  let armed = false;
+  let armTimer = null;
+  remove.onclick = async () => {
+    if (!armed) {
+      armed = true;
+      remove.textContent = 'Remove?';
+      remove.style.color = 'var(--danger-ink)';
+      armTimer = setTimeout(() => { armed = false; remove.textContent = 'Remove'; remove.style.color = ''; }, 3000);
+      return;
+    }
+    clearTimeout(armTimer);
+    remove.disabled = true;
+    remove.textContent = 'Removing…';
+    const res = await window.farsightIpc.accountRevokeDevice(d.id);
+    if (!res || !res.ok) {
+      remove.disabled = false; armed = false; remove.textContent = 'Remove'; remove.style.color = '';
+      setMsg(fleetError, 'Couldn’t remove that device. Check your connection.');
+    } else {
+      loadFleet();
+    }
+  };
+  right.appendChild(remove);
 
   row.append(dot, main, right);
   return row;
@@ -1042,8 +1081,9 @@ window.farsightIpc.accountStatus().then(({ signedIn }) => {
 // from the settings menu. This uses a DEDICATED transfer-worker connection
 // (main.js's getTransferService/createTransferWorker) — separate from the
 // active remote-control session's peer, so a send doesn't require (or
-// interfere with) an open control session. Receiving isn't wired into this UI
-// yet (main.js's consent always declines) — send-only for this phase.
+// interfere with) an open control session. Receiving is wired too (v2): an
+// incoming offer arrives via the host-registration socket (see the
+// MSG.TRANSFER_REQUEST handler) and prompts through the consent modal below.
 const sendHostId = document.getElementById('send-host-id');
 const sendHostPw = document.getElementById('send-host-pw');
 const sendFilesBtn = document.getElementById('send-files-btn');
@@ -1051,6 +1091,78 @@ const sendFolderBtn = document.getElementById('send-folder-btn');
 const sendStatusEl = document.getElementById('send-status');
 const transfersListEl = document.getElementById('transfers-list');
 const transfersEmptyEl = document.getElementById('transfers-empty');
+
+// ── SP3 file transfer (receive path, v2) ────────────────────────────────────
+// The unified app is now also a transfer DESTINATION: main forwards an incoming
+// offer here as a consent prompt (manifest preview) before anything touches
+// disk. An own-fleet push auto-accepts in main and never reaches this modal.
+const consentModalEl = document.getElementById('transfer-consent');
+const consentSummaryEl = document.getElementById('transfer-consent-summary');
+const consentDestEl = document.getElementById('transfer-consent-dest');
+const consentTreeEl = document.getElementById('transfer-consent-tree');
+
+// Build a nested folder/file tree from the manifest's flat, '/'-separated paths
+// (transfer-manifest sanitizes them to posix-relative), so the prompt shows
+// exactly what the peer wants to write before we write any of it.
+function buildManifestTree(entries) {
+  const root = { dirs: new Map(), files: [] };
+  for (const e of entries || []) {
+    const parts = String(e.path || '').split('/').filter(Boolean);
+    const name = parts.pop();
+    if (!name) continue;
+    let node = root;
+    for (const seg of parts) {
+      if (!node.dirs.has(seg)) node.dirs.set(seg, { dirs: new Map(), files: [] });
+      node = node.dirs.get(seg);
+    }
+    node.files.push({ name, size: e.size });
+  }
+  return root;
+}
+function renderManifestTree(node) {
+  const ul = document.createElement('ul');
+  ul.className = 'xfer-tree';
+  for (const [name, child] of node.dirs) {
+    const li = document.createElement('li');
+    li.className = 'xfer-tree-dir';
+    li.textContent = `\u{1F4C1} ${name}`;
+    li.appendChild(renderManifestTree(child));
+    ul.appendChild(li);
+  }
+  for (const f of node.files) {
+    const li = document.createElement('li');
+    li.className = 'xfer-tree-file';
+    li.textContent = `${f.name} — ${formatBytes(f.size)}`;
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+// req.jobId is the REAL persisted transfer jobId (main's requestReceiveConsent).
+// Only one prompt at a time; a second offer mid-prompt is out of scope here.
+let pendingConsentId = null;
+window.farsightIpc.onTransferConsent((req) => {
+  if (!req || typeof req.jobId !== 'string' || !req.manifest) return;
+  pendingConsentId = req.jobId;
+  const manifest = req.manifest;
+  const n = manifest.totalFiles ?? (manifest.entries || []).length;
+  consentSummaryEl.textContent = `${n} file${n === 1 ? '' : 's'} · ${formatBytes(manifest.totalBytes ?? 0)}`;
+  consentDestEl.textContent = req.destDir || '';
+  consentTreeEl.replaceChildren();
+  consentTreeEl.appendChild(renderManifestTree(buildManifestTree(manifest.entries)));
+  consentModalEl.hidden = false;
+  // Bring the Transfers page up so the accepted transfer's progress is visible.
+  showPage('transfers');
+});
+function respondToTransferConsent(accept) {
+  if (!pendingConsentId) return;
+  window.farsightIpc.respondConsent({ jobId: pendingConsentId, accept });
+  pendingConsentId = null;
+  consentModalEl.hidden = true;
+  if (accept) refreshTransfersList();
+}
+document.getElementById('transfer-consent-accept').addEventListener('click', () => respondToTransferConsent(true));
+document.getElementById('transfer-consent-reject').addEventListener('click', () => respondToTransferConsent(false));
 
 // jobId -> { jobId, direction, target, manifest, progress, state, createdAt }.
 // Seeded from transferList() (persisted jobs-store records) and kept live via
@@ -1183,10 +1295,37 @@ function jobRow(j) {
       renderTransfers();
     };
     right.appendChild(cancelBtn);
+  } else {
+    // A finished/failed/canceled job: let it be removed from the list (deletes
+    // its persisted record). Drop it from the local map so the row disappears
+    // immediately, then re-render.
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn btn-ghost';
+    removeBtn.textContent = 'Remove';
+    removeBtn.onclick = async () => {
+      removeBtn.disabled = true;
+      try { await window.farsightIpc.transferRemove(j.jobId); } catch { /* best effort */ }
+      transferJobs.delete(j.jobId);
+      sendRateEstimators.delete(j.jobId);
+      renderTransfers();
+    };
+    right.appendChild(removeBtn);
   }
 
   row.append(main, right);
   return row;
+}
+
+// Remove every finished/failed/canceled job in one go. Active transfers are left
+// untouched (they show Cancel, not Remove).
+async function clearFinishedTransfers() {
+  const finished = [...transferJobs.values()].filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state));
+  for (const j of finished) {
+    try { await window.farsightIpc.transferRemove(j.jobId); } catch { /* best effort */ }
+    transferJobs.delete(j.jobId);
+    sendRateEstimators.delete(j.jobId);
+  }
+  renderTransfers();
 }
 
 function renderTransfers() {
@@ -1332,6 +1471,7 @@ async function sendToFleetDevice(d, btn, mode = 'files') {
 }
 
 document.getElementById('transfers-refresh').addEventListener('click', refreshTransfersList);
+document.getElementById('transfers-clear').addEventListener('click', clearFinishedTransfers);
 
 // ─── Shell router ────────────────────────────────────────────────────────────
 // ONE source of truth for which page is visible. The old shell wrote the
