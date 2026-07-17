@@ -45,4 +45,10 @@ describe('transfer-ranges', () => {
     expect(r.toJSON()).toEqual([[0, 50]]);
     expect(r.coveredBytes()).toBe(50);
   });
+
+  it('isComplete is true when [0,size) is covered even if extra intervals exist past size', () => {
+    const r = createRangeSet([[0, 50], [60, 70]]);
+    expect(r.isComplete(50)).toBe(true);   // [0,50) fully covered
+    expect(r.gaps(50)).toEqual([]);        // and agrees with gaps()
+  });
 });

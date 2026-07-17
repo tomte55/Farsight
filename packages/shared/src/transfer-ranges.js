@@ -34,7 +34,8 @@ export function createRangeSet(intervals = []) {
     },
     isComplete(size) {
       if (size === 0) return true;
-      return ivals.length === 1 && ivals[0][0] === 0 && ivals[0][1] >= size;
+      for (const [s, e] of ivals) if (s <= 0 && e >= size) return true;
+      return false;
     },
     gaps(size) {
       const out = [];
