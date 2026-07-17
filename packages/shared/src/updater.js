@@ -16,12 +16,26 @@ export function createUpdater({ updater, isPackaged, onStatus, log = () => {}, i
   // Remote update (S2.7): when set, install as soon as the download is ready and
   // no session is active (deferring across an active session).
   let installWhenDownloaded = false;
+  // Remote update (S2.7): the pending install came from an explicit owner request,
+  // so it overrides the session guard and installs silently. Sticky — it must
+  // survive the wait for the download to finish.
+  let pendingForce = false;
 
   const emit = () => onStatus(updateUiState({ status, sessionActive, version, downloaded }));
-  // The guarded install: only quitAndInstall when downloaded AND no active session.
-  const tryInstall = () => {
-    if (canInstallNow({ downloaded, sessionActive })) { updater.quitAndInstall(); return { ok: true }; }
-    return { ok: false, reason: sessionActive ? 'session-active' : 'not-downloaded' };
+  // The guarded install. `force` (an explicit remote Update) overrides the session
+  // guard; a download is always required.
+  const tryInstall = ({ force = false } = {}) => {
+    if (canInstallNow({ downloaded, sessionActive, force })) {
+      // Remote/unattended: silent AND relaunch. Both args are load-bearing —
+      // electron-updater only honours autoRunAppAfterInstall when isSilent is
+      // false, so quitAndInstall(true) alone installs and NEVER comes back.
+      if (force) updater.quitAndInstall(true, true);
+      // At the machine: keep the visible installer, and relaunch via
+      // autoRunAppAfterInstall (default true).
+      else updater.quitAndInstall();
+      return { ok: true };
+    }
+    return { ok: false, reason: (sessionActive && !force) ? 'session-active' : 'not-downloaded' };
   };
   const check = () => {
     try {
@@ -46,7 +60,7 @@ export function createUpdater({ updater, isPackaged, onStatus, log = () => {}, i
       updater.on('update-available', (info) => { status = 'available'; version = info?.version ?? version; log('info', `update available: ${version}`); emit(); });
       updater.on('update-not-available', () => { status = 'idle'; log('info', 'no update available (up to date)'); emit(); });
       updater.on('download-progress', () => { if (status !== 'downloading') log('info', 'downloading update'); status = 'downloading'; emit(); });
-      updater.on('update-downloaded', (info) => { status = 'downloaded'; downloaded = true; version = info?.version ?? version; log('info', `update downloaded: ${version}`); if (installWhenDownloaded) tryInstall(); emit(); });
+      updater.on('update-downloaded', (info) => { status = 'downloaded'; downloaded = true; version = info?.version ?? version; log('info', `update downloaded: ${version}`); if (installWhenDownloaded) tryInstall({ force: pendingForce }); emit(); });
       // The electron-updater 'error' event covers BOTH check and download
       // failures. Classify by the phase we were in: if we'd already found an
       // update (available/downloading), the download broke; otherwise the check
@@ -63,18 +77,20 @@ export function createUpdater({ updater, isPackaged, onStatus, log = () => {}, i
     checkNow() { if (isPackaged) check(); },
     setSessionActive(active) {
       sessionActive = !!active;
-      // If a remote update was pending and deferred for a live session, apply it
-      // the moment the session ends.
-      if (!sessionActive && installWhenDownloaded && downloaded) tryInstall();
+      // If an update was pending and deferred for a live session, apply it the
+      // moment the session ends.
+      if (!sessionActive && installWhenDownloaded && downloaded) tryInstall({ force: pendingForce });
       emit();
     },
     installNow() { return tryInstall(); },
-    // Remote update (S2.7): converge now — install if already downloaded (deferring
-    // if a session is active), else trigger a check/download and install on ready.
-    installWhenReady() {
+    // Remote update (S2.7): converge now — install if already downloaded, else
+    // trigger a check/download and install on ready. `force` (an explicit remote
+    // Update from the owner) installs even during a live session, silently.
+    installWhenReady({ force = false } = {}) {
       if (!isPackaged) return { ok: false, reason: 'not-packaged' };
       installWhenDownloaded = true;
-      if (downloaded) return tryInstall();
+      pendingForce = pendingForce || !!force; // sticky across the wait for the download
+      if (downloaded) return tryInstall({ force: pendingForce });
       check(); // autoDownload is on → 'update-downloaded' will fire tryInstall
       return { ok: true, pending: true };
     },

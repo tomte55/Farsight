@@ -637,7 +637,11 @@ function hostRow(d) {
           btn.textContent = 'Update';
           setMsg(fleetError, 'Couldn’t request the update. Check your connection.');
         } else {
-          setTimeout(loadFleet, 4000); // reflect convergence on the next refresh
+          // A download+install+relaunch takes ~10-60s. Re-poll for a bounded
+          // window so the row reflects the host coming back on the new
+          // version, instead of sitting on "Updating…" until a manual refresh.
+          let polls = 0;
+          const t = setInterval(() => { polls += 1; loadFleet(); if (polls >= 12) clearInterval(t); }, 5000);
         }
       };
     }

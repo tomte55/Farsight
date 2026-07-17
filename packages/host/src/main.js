@@ -595,16 +595,17 @@ app.whenReady().then(() => {
 
   // Remote update (S2.7): act on a converge-to directive delivered via the account
   // heartbeat. Only when the target is strictly newer than us, and only once per
-  // target (installWhenReady checks/downloads then installs — deferring across an
-  // active session). Installs ONLY the official feed release; the directive is just
-  // a version string. Registered here so a linked host that resumed its session on
-  // launch converges without any UI.
+  // target. FORCED: the owner explicitly pressed Update, so it installs even during
+  // a live session (theirs, almost always) and silently — a remote host has nobody
+  // at the screen. It always relaunches, so the host is back in seconds. A
+  // background/automatic update still waits for the session to end.
+  // Installs ONLY the official feed release; the directive is just a version string.
   getAccountService().onUpdateDirective((data) => {
     const target = data && typeof data.targetVersion === 'string' ? data.targetVersion : null;
     if (target && target !== lastHandledTarget && shouldConverge({ currentVersion: app.getVersion(), targetVersion: target })) {
       lastHandledTarget = target;
-      log?.child('updater').info(`remote update directive → converge to ${target}`);
-      if (hostUpdater) hostUpdater.installWhenReady();
+      log?.child('updater').info(`remote update directive → converge to ${target} (forced)`);
+      if (hostUpdater) hostUpdater.installWhenReady({ force: true });
     }
   });
 });

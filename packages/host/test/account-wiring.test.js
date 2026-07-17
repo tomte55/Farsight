@@ -98,4 +98,10 @@ describe('host remote-update wiring (S2.7)', () => {
     expect(main).toMatch(/installWhenReady/);
     expect(main).toMatch(/import\s*\{[^}]*\bshouldConverge\b[^}]*\}\s*from\s*['"]@farsight\/shared\/update-policy['"]/);
   });
+
+  test('the remote-update directive forces the install (overrides the session guard)', () => {
+    // The owner pressed Update while connected to the host; without force the
+    // install defers and nothing appears to happen (observed in the field).
+    expect(main).toMatch(/installWhenReady\(\{\s*force:\s*true\s*\}\)/);
+  });
 });

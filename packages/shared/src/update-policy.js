@@ -47,8 +47,12 @@ export function updateUiState({ status, sessionActive, version, downloaded } = {
 }
 
 // The gate the main process must pass before calling quitAndInstall().
-export function canInstallNow({ downloaded, sessionActive } = {}) {
-  return downloaded === true && sessionActive === false;
+// `force` = an explicit remote Update from the owner: it overrides the
+// "don't interrupt a live session" guard (they asked for it, and the session is
+// almost always their own), but it can never install a download that isn't there.
+export function canInstallNow({ downloaded, sessionActive, force = false } = {}) {
+  if (downloaded !== true) return false;
+  return force === true || sessionActive === false;
 }
 
 // Remote update (S2.7): should a host with `currentVersion` act on a converge-to

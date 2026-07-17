@@ -126,6 +126,61 @@ test('a rejected check surfaces a check-failure status, not a throw', async () =
   expect(log).toHaveBeenCalledWith('error', expect.stringContaining('no feed'));
 });
 
+test('a forced (remote) install is SILENT and ALWAYS relaunches', () => {
+  // quitAndInstall(true) alone would leave isForceRunAfter=false and the host
+  // would install and never come back — the exact bug seen in the field.
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: true, onStatus: () => {} });
+  up.start();
+  u.emit('update-downloaded', { version: '1.14.0' });
+  up.installWhenReady({ force: true });
+  expect(u.quitAndInstall).toHaveBeenCalledWith(true, true); // silent + force-run
+});
+
+test('a forced install overrides an ACTIVE session (the owner asked for it)', () => {
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: true, onStatus: () => {} });
+  up.start();
+  up.setSessionActive(true);
+  u.emit('update-downloaded', { version: '1.14.0' });
+  up.installWhenReady({ force: true });
+  expect(u.quitAndInstall).toHaveBeenCalledWith(true, true); // installed despite the live session
+});
+
+test('the tray install stays VISIBLE and relaunches (no args = autoRunAppAfterInstall)', () => {
+  // Someone is at the machine; the progress window is reassuring. quitAndInstall()
+  // with no args relaunches via autoRunAppAfterInstall (default true).
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: true, onStatus: () => {} });
+  up.start();
+  u.emit('update-downloaded', { version: '1.14.0' });
+  up.installNow();
+  expect(u.quitAndInstall).toHaveBeenCalledWith(); // no arguments
+});
+
+test('a forced install still waits for the download, then installs silently on ready', () => {
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: true, onStatus: () => {} });
+  up.start();
+  up.installWhenReady({ force: true });      // nothing downloaded yet
+  expect(u.quitAndInstall).not.toHaveBeenCalled();
+  u.emit('update-downloaded', { version: '1.14.0' });
+  expect(u.quitAndInstall).toHaveBeenCalledWith(true, true); // force survived the wait
+});
+
+test('an UNforced installWhenReady still defers across an active session', () => {
+  // Regression guard: only the explicit remote directive overrides the guard.
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: true, onStatus: () => {} });
+  up.start();
+  up.setSessionActive(true);
+  u.emit('update-downloaded', { version: '1.14.0' });
+  up.installWhenReady();
+  expect(u.quitAndInstall).not.toHaveBeenCalled();
+  up.setSessionActive(false);
+  expect(u.quitAndInstall).toHaveBeenCalledTimes(1);
+});
+
 test('an error while checking is a check-failure; an error after finding an update is a download-failure', () => {
   // Check phase: error arrives before any update-available → "couldn't check".
   const c = fakeUpdater();

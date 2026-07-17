@@ -49,6 +49,20 @@ test('canInstallNow: only when downloaded AND not in a session', () => {
   expect(canInstallNow({ downloaded: false, sessionActive: false })).toBe(false);
 });
 
+test('canInstallNow: force overrides an active session but NEVER a missing download', () => {
+  // A remote Update is an explicit owner request, so it wins over the "don't
+  // interrupt a live session" guard. It can't conjure a download that isn't there.
+  expect(canInstallNow({ downloaded: true, sessionActive: true, force: true })).toBe(true);
+  expect(canInstallNow({ downloaded: true, sessionActive: false, force: true })).toBe(true);
+  expect(canInstallNow({ downloaded: false, sessionActive: false, force: true })).toBe(false);
+  expect(canInstallNow({ downloaded: false, sessionActive: true, force: true })).toBe(false);
+});
+
+test('canInstallNow: without force the session guard still holds (background updates)', () => {
+  expect(canInstallNow({ downloaded: true, sessionActive: true })).toBe(false);
+  expect(canInstallNow({ downloaded: true, sessionActive: false })).toBe(true);
+});
+
 test('UPDATE_STATUS enumerates the states', () => {
   expect(UPDATE_STATUS.DOWNLOADED).toBe('downloaded');
 });
