@@ -204,6 +204,11 @@ test('an UNforced installWhenReady still defers across an active session', () =>
   up.installWhenReady();
   expect(u.quitAndInstall).not.toHaveBeenCalled();
   up.setSessionActive(false);
+  // Assert the ARGUMENTS, not just the count: an un-defer is not a forced install,
+  // so it must stay visible — and it must relaunch. Count-only assertions are what
+  // let quitAndInstall(true) (silent, isForceRunAfter=false → installs and never
+  // comes back) ship and take a host offline three times.
+  expect(u.quitAndInstall).toHaveBeenCalledWith();
   expect(u.quitAndInstall).toHaveBeenCalledTimes(1);
 });
 
