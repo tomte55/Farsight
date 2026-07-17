@@ -24,4 +24,13 @@ describe('transfer-reconcile', () => {
     t.applyReport([{ fileId: 0, ivals: [[0, 30]] }]); // receiver re-reported less (unusual, but must be respected)
     expect(t.gapsFor(0)).toEqual([{ offset: 30, length: 70 }]);
   });
+
+  it('coveredFor returns the applied coverage (drives gap-skipping)', () => {
+    const t = createCoverageTracker({ manifest });
+    t.applyReport([{ fileId: 0, ivals: [[0, 40], [60, 100]] }]);
+    const rs = t.coveredFor(0);
+    expect(rs.covers(0, 40)).toBe(true);
+    expect(rs.covers(40, 20)).toBe(false);   // the gap is NOT covered
+    expect(rs.covers(60, 40)).toBe(true);
+  });
 });

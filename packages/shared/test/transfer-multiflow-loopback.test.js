@@ -106,14 +106,24 @@ describe('multi-flow loopback', () => {
     expect(tracker.isComplete()).toBe(false); // the dropped range is a real gap
 
     // Round 2: re-dispatch ONLY the gaps (per tracker.coveredFor), this time
-    // delivered in full — no drop.
-    const flowsRound2 = makeFlows(4, deliverAll);
+    // delivered in full — no drop. Record each delivered chunk's offset to verify
+    // that ONLY the gap offsets are resent (not the whole file).
+    const round2Offsets = [];
+    const deliverAllWithRecording = (buf) => {
+      const d = decodeBulkFrame(buf);
+      if (d) round2Offsets.push(d.offset);
+      return router.onBulkFrame(buf);
+    };
+    const flowsRound2 = makeFlows(4, deliverAllWithRecording);
     const p2 = createChunkProducer({
       readChunk: (o, l) => Promise.resolve(src.subarray(o, o + l)),
       hashUpdate: () => {},
       chunkSize: 4096,
     });
     await createSendPool({ flows: flowsRound2 }).run(p2.produce({ fileId: 0, size }, tracker.coveredFor(0)));
+
+    // Verify round 2 sent ONLY the gap chunks (offsets 8192 and 12288), not the whole file.
+    expect([...new Set(round2Offsets)].sort((a, b) => a - b)).toEqual([8192, 12288]);
 
     tracker.applyReport(router.rangesFor());
     expect(tracker.isComplete()).toBe(true); // gap refilled
