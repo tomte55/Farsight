@@ -453,6 +453,13 @@ export function createReceiver({
       resolveOnce({ jobId, ok: false, rejected: 'declined' });
       return;
     }
+    // The receiver now has the manifest and has committed to receiving. Surface
+    // it so the UI can label the transfer (file/folder name + count) immediately
+    // — the receiver's other events (progress/file-done/…) carry no manifest, so
+    // without this the name stayed blank until a manual Refresh re-read the store
+    // record. Covers both the prompted and the auto-accepted (own-fleet) paths,
+    // since consent() resolves true in both.
+    onEvent({ type: 'accepted', manifest: m });
     const have = {};
     for (const e of m.entries) have[e.fileId] = await resumeOffsetFor(destRoot, e);
     if (settled) return;

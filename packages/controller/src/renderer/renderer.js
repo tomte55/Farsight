@@ -1380,6 +1380,9 @@ window.farsightIpc.onTransferEvent((ev) => {
   if (ev.type === 'accepted') {
     // The host approved — ONLY now is the transfer genuinely active.
     existing.state = 'active';
+    // A receiver's 'accepted' carries the manifest so its row gets the file/
+    // folder name + count from the first render, without waiting for a Refresh.
+    if (ev.manifest) existing.manifest = ev.manifest;
   } else if (ev.type === 'interrupted') {
     // Only an own-fleet/contact drop actually resumes; an ad-hoc one is terminal.
     // The event carries `resumable` — honor it so an ad-hoc drop reads "Failed —

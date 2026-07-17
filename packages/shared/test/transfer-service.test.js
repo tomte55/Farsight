@@ -147,6 +147,45 @@ test('loopback send -> receive through the service layer lands files byte-identi
   expect(sendRec.peer).toEqual({ id: 'device-t1' });
 });
 
+test('a receive surfaces the manifest on accept so the UI can label it before any Refresh', async () => {
+  // Field bug: just after a transfer started, the RECEIVER's panel showed no
+  // file/folder name until the user hit Refresh. The receiver's live events
+  // (progress/file-done/…) carry no manifest, and the name only appeared once a
+  // manual Refresh re-read the store record (written at accept, racing the
+  // panel's own auto-refresh). Fix: the receiver emits the manifest on accept.
+  const srcRoot = tmp();
+  const src = join(srcRoot, 'MyFolder');
+  mkdirSync(src, { recursive: true });
+  writeFileSync(join(src, 'a.txt'), Buffer.from('alpha'.repeat(200)));
+  writeFileSync(join(src, 'b.txt'), Buffer.from('beta'.repeat(200)));
+  const { entries, sources } = await walkSource([{ path: src }]);
+  const manifest = buildManifestReal(entries);
+
+  const dest = tmp();
+  const { sideA, sideB } = loopback();
+  const recvEvents = [];
+  const receiverSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: dest, consent: async () => true,
+    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    onEvent: (ev) => recvEvents.push(ev),
+    receiveCloseGraceMs: 0,
+  });
+  const senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+  });
+
+  const recvPromise = receiverSvc.startReceive({ rendezvous: 'r1' });
+  await senderSvc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'dev', password: 'pw' } });
+  await recvPromise;
+
+  const labeled = recvEvents.find(
+    (e) => e.direction === 'recv' && e.manifest && Array.isArray(e.manifest.entries)
+      && e.manifest.entries.length === manifest.entries.length,
+  );
+  expect(labeled).toBeTruthy(); // a receive event carried the manifest → name renders live
+});
+
 test('SP3 P4: an own-fleet (linked) send passes target.linked to openChannel and records tier:fleet', async () => {
   const { manifest, sources } = await oneFileSource();
   const dest = tmp();

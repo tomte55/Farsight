@@ -160,6 +160,13 @@ describe('renderer: Send… entry point + Transfers panel', () => {
     expect(renderer).toMatch(/case 'declined'/);
   });
 
+  test('a receive labels its row live from the manifest on the accepted event (no Refresh needed)', () => {
+    // Field bug: the receiver's panel showed no file/folder name until Refresh,
+    // because the receiver's live events carried no manifest. The receiver now
+    // emits its manifest on accept and onTransferEvent must apply it.
+    expect(renderer).toMatch(/if \(ev\.manifest\) existing\.manifest = ev\.manifest/);
+  });
+
   test('controller renderer imports the rate helpers', () => {
     const src = readFileSync(new URL('../src/renderer/renderer.js', import.meta.url), 'utf8');
     expect(src).toMatch(/import \{[^}]*createRateEstimator[^}]*\} from '@farsight\/shared\/transfer-rate'/);
