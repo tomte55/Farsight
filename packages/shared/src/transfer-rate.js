@@ -86,6 +86,20 @@ export function formatRate(bytesPerSec) {
   return `${formatBytes(bytesPerSec)}/s`;
 }
 
+// Classify whether an incoming transfer of `totalBytes` fits in `freeBytes` at
+// the destination volume. `freeBytes` null/non-finite means "could not measure"
+// → unknown (never a warning; we don't block on an inability to measure).
+// remaining < margin (including exactly 0) is 'low-margin' — it fits, but leaves
+// little/no headroom.
+export function classifyDiskSpace({ totalBytes, freeBytes, lowMarginBytes }) {
+  if (freeBytes == null || !Number.isFinite(freeBytes)) return { status: 'unknown' };
+  const total = Number(totalBytes) || 0;
+  if (total > freeBytes) return { status: 'insufficient' };
+  const remaining = freeBytes - total;
+  if (remaining < lowMarginBytes) return { status: 'low-margin' };
+  return { status: 'ok' };
+}
+
 // Coarse on purpose: an ETA precise to the second is noise on a multi-hour transfer.
 export function formatDuration(seconds) {
   const s = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds) : 0;

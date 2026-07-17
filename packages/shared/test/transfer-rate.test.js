@@ -1,7 +1,31 @@
 import { expect, test } from 'vitest';
 import {
   createRateEstimator, etaSeconds, bytesDone, filesDone, formatBytes, formatRate, formatDuration,
+  classifyDiskSpace,
 } from '../src/transfer-rate.js';
+
+const GiB = 1024 * 1024 * 1024;
+
+test('classifyDiskSpace: unknown when freeBytes is null or non-finite', () => {
+  expect(classifyDiskSpace({ totalBytes: 10, freeBytes: null, lowMarginBytes: GiB }).status).toBe('unknown');
+  expect(classifyDiskSpace({ totalBytes: 10, freeBytes: Infinity, lowMarginBytes: GiB }).status).toBe('unknown');
+});
+
+test('classifyDiskSpace: insufficient when total exceeds free (boundary total = free + 1)', () => {
+  expect(classifyDiskSpace({ totalBytes: 101, freeBytes: 100, lowMarginBytes: GiB }).status).toBe('insufficient');
+});
+
+test('classifyDiskSpace: total == free is low-margin (fits, zero headroom)', () => {
+  expect(classifyDiskSpace({ totalBytes: 100, freeBytes: 100, lowMarginBytes: GiB }).status).toBe('low-margin');
+});
+
+test('classifyDiskSpace: remaining just under the margin is low-margin', () => {
+  expect(classifyDiskSpace({ totalBytes: 1, freeBytes: 1 + (GiB - 1), lowMarginBytes: GiB }).status).toBe('low-margin');
+});
+
+test('classifyDiskSpace: remaining at or above the margin is ok', () => {
+  expect(classifyDiskSpace({ totalBytes: 1, freeBytes: 1 + GiB, lowMarginBytes: GiB }).status).toBe('ok');
+});
 
 test('rate estimator needs two samples before it reports a rate', () => {
   let t = 0;
