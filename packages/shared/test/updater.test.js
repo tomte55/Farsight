@@ -181,6 +181,24 @@ test('an UNforced installWhenReady still defers across an active session', () =>
   expect(u.quitAndInstall).toHaveBeenCalledTimes(1);
 });
 
+test('a FAILED forced download does not leave a later background update forced', () => {
+  // The force means "install what I asked for, now". Once the attempt fails that
+  // intent is stale: a later background download must install politely (deferring
+  // across a live session), not kill the owner's session days later.
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: true, onStatus: () => {} });
+  up.start();
+  up.installWhenReady({ force: true });        // owner presses Update
+  u.emit('update-available', { version: '1.14.0' });
+  u.emit('error', new Error('download failed')); // the forced attempt dies
+  // Days later: a real session is live, and the background check finds a version.
+  up.setSessionActive(true);
+  u.emit('update-downloaded', { version: '1.15.0' });
+  expect(u.quitAndInstall).not.toHaveBeenCalled();  // deferred, session intact
+  up.setSessionActive(false);
+  expect(u.quitAndInstall).toHaveBeenCalledTimes(1); // and it lands politely on session end
+});
+
 test('an error while checking is a check-failure; an error after finding an update is a download-failure', () => {
   // Check phase: error arrives before any update-available → "couldn't check".
   const c = fakeUpdater();

@@ -50,4 +50,14 @@ describe('controller connect-from-console wiring', () => {
     expect(renderer).toMatch(/accountRequestUpdate/);
     expect(renderer).toMatch(/host-update/);
   });
+
+  // Regression guard: closing the fleet panel (accountEl.hidden = true) — which
+  // also happens on connect — must not leave the "Updating…" re-poll interval
+  // making IPC calls + DOM writes into a panel nobody can see for up to 60s.
+  test('the fleet re-poll bails out once the panel is no longer visible', () => {
+    const pollBlock = renderer.match(/const t = setInterval\(\(\) => \{[\s\S]*?\}, 5000\);/);
+    expect(pollBlock).toBeTruthy();
+    expect(pollBlock[0]).toMatch(/accountEl\.hidden/);
+    expect(pollBlock[0]).toMatch(/clearInterval\(t\)/);
+  });
 });

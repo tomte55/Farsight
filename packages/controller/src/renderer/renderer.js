@@ -641,7 +641,13 @@ function hostRow(d) {
           // window so the row reflects the host coming back on the new
           // version, instead of sitting on "Updating…" until a manual refresh.
           let polls = 0;
-          const t = setInterval(() => { polls += 1; loadFleet(); if (polls >= 12) clearInterval(t); }, 5000);
+          const t = setInterval(() => {
+            // The fleet panel may have been closed (or a connect started, which
+            // also closes it) while this poll was running — bail out instead of
+            // making IPC calls + DOM writes into a panel nobody can see.
+            if (accountEl.hidden) { clearInterval(t); return; }
+            polls += 1; loadFleet(); if (polls >= 12) clearInterval(t);
+          }, 5000);
         }
       };
     }

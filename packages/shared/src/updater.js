@@ -29,13 +29,13 @@ export function createUpdater({ updater, isPackaged, onStatus, log = () => {}, i
       // Remote/unattended: silent AND relaunch. Both args are load-bearing —
       // electron-updater only honours autoRunAppAfterInstall when isSilent is
       // false, so quitAndInstall(true) alone installs and NEVER comes back.
-      if (force) updater.quitAndInstall(true, true);
+      if (force === true) updater.quitAndInstall(true, true);
       // At the machine: keep the visible installer, and relaunch via
       // autoRunAppAfterInstall (default true).
       else updater.quitAndInstall();
       return { ok: true };
     }
-    return { ok: false, reason: (sessionActive && !force) ? 'session-active' : 'not-downloaded' };
+    return { ok: false, reason: (sessionActive && force !== true) ? 'session-active' : 'not-downloaded' };
   };
   const check = () => {
     try {
@@ -68,6 +68,14 @@ export function createUpdater({ updater, isPackaged, onStatus, log = () => {}, i
       updater.on('error', (err) => {
         const duringDownload = status === 'available' || status === 'downloading';
         status = duringDownload ? 'download-error' : 'check-error';
+        // A forced install (S2.7) means "install what I asked for, right now".
+        // If that attempt's check/download just failed, the intent is stale —
+        // clear it so a LATER background download (found on some future 6-hour
+        // check) installs politely (deferring across a live session) instead of
+        // inheriting a stickiness that would kill an unrelated session days
+        // later. installWhenDownloaded stays set: the owner's update still
+        // lands, just without the force.
+        pendingForce = false;
         log('error', `${status}: ${errText(err)}`);
         emit();
       });
