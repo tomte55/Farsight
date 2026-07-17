@@ -597,6 +597,7 @@ function respondToTransferConsent(accept) {
 document.getElementById('transfer-consent-accept').addEventListener('click', () => respondToTransferConsent(true));
 document.getElementById('transfer-consent-reject').addEventListener('click', () => respondToTransferConsent(false));
 
+// Receive-side job rows: jobId -> { jobId, manifest, state, progress, rate,
 // createdAt }, seeded from transfer:list (persisted jobs-store records) and
 // kept live via transfer:event while a receive is actively running.
 const transferJobs = new Map();
@@ -609,10 +610,12 @@ function estimatorFor(jobId) {
   return rateEstimators.get(jobId);
 }
 
-// 'interrupted'/'reconnecting' are deliberately NOT terminal: a fleet/contact send
-// auto-resumes with the SAME jobId, so the row must stay live to receive the
-// resumed transfer's events. Freezing it here is what made a working resume read
-// as a permanent "Failed".
+// 'interrupted' is deliberately NOT terminal: a fleet/contact send auto-resumes
+// with the SAME jobId, so the row must stay live to receive the resumed
+// transfer's events. Freezing it here is what made a working resume read as a
+// permanent "Failed". ('reconnecting' is a SEND-side-only event — emitted by
+// transfer-service.js's own-fleet reestablish(), :354 — the receiver never
+// emits it, so it isn't (and shouldn't be) handled here.)
 const RECV_TERMINAL_STATES = ['done', 'error', 'canceled'];
 
 function receiveFraction(j) {

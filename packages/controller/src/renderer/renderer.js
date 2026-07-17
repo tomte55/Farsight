@@ -938,7 +938,6 @@ function stateLabel(j) {
   const p = j.progress;
   const total = p && Number.isFinite(p.filesTotal) ? p.filesTotal
     : (j.manifest && (j.manifest.totalFiles ?? (j.manifest.entries || []).length));
-  const sent = p && Number.isFinite(p.filesSent) ? p.filesSent : (j.state === 'done' ? total : 0);
   const hasCount = Number.isFinite(total) && total > 0;
   switch (j.state) {
     case 'awaiting-approval': return 'Waiting for approval…';
@@ -1086,6 +1085,8 @@ window.farsightIpc.onTransferEvent((ev) => {
     existing.state = 'done'; // both sides agree: all files received and hashes verified
   } else if (ev.type === 'declined') {
     existing.state = 'declined';
+  } else if (ev.type === 'canceled') {
+    existing.state = 'canceled';
   } else if (ev.type === 'error') {
     existing.state = 'error';
     if (ev.reason) existing.error = ev.reason;

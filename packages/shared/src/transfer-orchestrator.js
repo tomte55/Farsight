@@ -117,7 +117,7 @@ export function createSender({
       return;
     }
     if (f.t === 'reject') { onEvent({ type: 'declined', reason: f.reason }); fail(new Error(`rejected: ${f.reason}`)); return; }
-    if (f.t === 'cancel') { canceled = true; fail(new Error('canceled')); return; }
+    if (f.t === 'cancel') { onEvent({ type: 'canceled' }); canceled = true; fail(new Error('canceled')); return; }
     // pump() is intentionally NOT awaited here: it must run outside the
     // serializer chain, otherwise a later `cancel` frame would queue behind
     // the entire (possibly long-running) pump and could never abort it.

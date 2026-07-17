@@ -170,7 +170,15 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // Own-fleet + a recoverable (transport) failure → resumable `interrupted`,
       // and poke the resume watcher to try again as soon as the peer is online.
       const recoverable = (tier === 'fleet' || tier === 'contact') && !isTerminalReason(reason);
-      try { await saveSendRecord({ jobId, manifest, createdAt, jobState: recoverable ? 'interrupted' : 'error', peer, tier, sourceRoots }); } catch { /* best effort */ }
+      // A receiver-initiated cancel surfaces here as reason === 'canceled' (the
+      // orchestrator's sole message for an inbound cancel frame — see
+      // transfer-orchestrator.js). Persist the accurate 'canceled' state rather
+      // than a generic 'error'; it's still excluded from RESUMABLE_STATES
+      // (transfer-queue.js) and still terminal per isTerminalReason's `canceled`
+      // match above, so `recoverable` is unaffected and this can never be
+      // auto-resumed by the resume watcher.
+      const jobState = recoverable ? 'interrupted' : (reason === 'canceled' ? 'canceled' : 'error');
+      try { await saveSendRecord({ jobId, manifest, createdAt, jobState, peer, tier, sourceRoots }); } catch { /* best effort */ }
       if (recoverable) { emit(jobId, 'send', { type: 'interrupted' }); if (resumeWatcher) resumeWatcher.notify(); }
     } finally {
       disarmApprovalTimer();

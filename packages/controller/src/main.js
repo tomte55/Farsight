@@ -130,7 +130,12 @@ function getTransferService() {
       },
       onEvent: (ev) => {
         const prog = ev.progress ? ` files=${ev.progress.filesSent ?? ev.progress.filesDone}/${ev.progress.filesTotal}` : '';
-        log?.child('transfer').info(`send ev=${ev.type || 'progress'} job=${ev.jobId}${prog}${ev.reason ? ` reason=${ev.reason}` : ''}`);
+        // 'progress' fires ~4x/second on a long transfer — logging it at info
+        // floods the rotating sink (2MB x 2 files) and evicts the [ft-worker]
+        // counters field diagnostics depend on. Verbose connection detail is
+        // debug-level (CLAUDE.md); every other (rarer) lifecycle event stays info.
+        const level = ev.type === 'progress' ? 'debug' : 'info';
+        log?.child('transfer')[level](`send ev=${ev.type} job=${ev.jobId}${prog}${ev.reason ? ` reason=${ev.reason}` : ''}`);
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('transfer:event', ev);
       },
       // SP3 Phase 4 auto-resume: the watcher resolves an interrupted job's peer to

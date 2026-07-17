@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createSender } from '../src/transfer-orchestrator.js';
-import { parseCtrlFrame, acceptFrame, rejectFrame, completeFrame } from '@farsight/shared/transfer-protocol';
+import { parseCtrlFrame, acceptFrame, rejectFrame, completeFrame, cancelFrame } from '@farsight/shared/transfer-protocol';
 // Fix-round-3 regression test needs to gate transfer-io's finalizeReceivedFile
 // mid-call (see below) — a passthrough vi.mock lets a single test spy over one
 // export while every other test in this file still gets the REAL io module.
@@ -105,6 +105,31 @@ test('createSender emits a "declined" event (and rejects) when the receiver reje
   const declined = events.find((e) => e.type === 'declined');
   expect(declined).toBeTruthy();
   expect(declined.reason).toBe('declined');
+});
+
+// Regression (final SP3 whole-branch review, finding 1): a receiver-initiated
+// cancel mid-transfer is the ONLY inbound terminal ctrl frame the sender used to
+// swallow silently — 'reject' emits 'declined', complete{ok:false} emits 'error',
+// but 'cancel' just failed the promise with no event at all. That left the
+// SENDER's UI row stuck at "Transferring…" forever (nothing ever downgrades a
+// live 'active' row without a terminal event). Assert the sender now emits a
+// real 'canceled' event, symmetric with its 'declined'/'error' siblings.
+test('createSender emits a "canceled" event (and rejects) when the receiver cancels mid-transfer', async () => {
+  const root = tmp();
+  const f = join(root, 'a.bin');
+  const data = Buffer.from('cancel-me-mid-transfer-payload'.repeat(50));
+  writeFileSync(f, data);
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: data.length, mtime: 5 }], totalBytes: data.length, totalFiles: 1 };
+  const events = [];
+  const ch = fakeChannel();
+  const sender = createSender({ channel: ch, jobId: 'j1', manifest, sources: new Map([[0, f]]), chunkSize: 64, onEvent: (ev) => events.push(ev) });
+  const finished = sender.start();
+  await ch.feedCtrl(acceptFrame({ jobId: 'j1', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await until(() => events.some((e) => e.type === 'accepted')); // transfer is genuinely under way
+  await ch.feedCtrl(cancelFrame('j1')); // the receiver cancels mid-transfer
+  await expect(finished).rejects.toThrow(/canceled/);
+  const canceled = events.find((e) => e.type === 'canceled');
+  expect(canceled).toBeTruthy();
 });
 
 test('createSender skips a file the receiver already has fully', async () => {
