@@ -1,5 +1,5 @@
 // packages/controller/src/main.js
-import { app, BrowserWindow, desktopCapturer, screen, ipcMain, clipboard, dialog, shell, safeStorage, globalShortcut } from 'electron';
+import { app, BrowserWindow, desktopCapturer, screen, ipcMain, clipboard, dialog, shell, safeStorage, globalShortcut, Tray, Menu, nativeImage } from 'electron';
 // electron-updater is CommonJS: a named ESM import fails in the packaged app's
 // ESM loader, so use the default import + destructure interop.
 import electronUpdater from 'electron-updater';
@@ -21,6 +21,8 @@ import { createUpdater } from '@farsight/shared/updater';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from './account.js';
 import { revealWindow } from './reveal-window.js';
 import { createSessionWindow } from './session-window.js';
+import { buildTrayMenuTemplate } from './tray-menu.js';
+import { createLifecycle } from './lifecycle.js';
 // Verbose diagnostic logging: consent-gated upload of a redaction-safe log
 // bundle for support triage (see docs/SECURITY.md).
 import { buildDiagnosticsBundle } from '@farsight/shared/diagnostics-bundle';
@@ -61,9 +63,28 @@ ipcMain.handle('conn-auth:sign', (_e, message) => getAccountService().signTransc
 ipcMain.handle('conn-auth:verify', (_e, publicKey, message, signature) => getAccountService().verifyTranscript(publicKey, message, signature));
 ipcMain.handle('conn-auth:is-account-key', (_e, publicKey) => getAccountService().isAccountPublicKey(publicKey));
 ipcMain.handle('conn-auth:is-transfer-peer-key', (_e, publicKey) => getAccountService().isTransferPeerKey(publicKey));
-ipcMain.handle('account:status', () => getAccountService().status());
-ipcMain.handle('account:login', (_e, input) => getAccountService().login(input));
-ipcMain.handle('account:logout', () => getAccountService().logout());
+// Cached sign-in flag so the (synchronously-built) tray menu can gate the
+// diagnostics item without awaiting the account service on every rebuild.
+// Kept in sync from the three places sign-in state can change.
+let accountLoggedIn = false;
+ipcMain.handle('account:status', async () => {
+  const res = await getAccountService().status();
+  accountLoggedIn = !!res.signedIn;
+  refreshTrayMenu();
+  return res;
+});
+ipcMain.handle('account:login', async (_e, input) => {
+  const res = await getAccountService().login(input);
+  accountLoggedIn = !!res.ok;
+  refreshTrayMenu();
+  return res;
+});
+ipcMain.handle('account:logout', async () => {
+  const res = await getAccountService().logout();
+  accountLoggedIn = false;
+  refreshTrayMenu();
+  return res;
+});
 ipcMain.handle('account:register', (_e, input) => getAccountService().register(input));
 ipcMain.handle('account:resend-verification', (_e, input) => getAccountService().resendVerification(input));
 ipcMain.handle('account:request-password-reset', (_e, input) => getAccountService().requestPasswordReset(input));
@@ -313,10 +334,18 @@ ipcMain.on('session:open', (_e, params) => getSessionWindow().launch(params));
 ipcMain.on('session:focus', () => getSessionWindow().focus());
 
 let mainWindow = null;
+let tray = null;
+// Centralizes the "is the app really quitting?" latch shared by the window
+// close-guard and every quit path (tray Quit, auto-update install).
+const lifecycle = createLifecycle();
 let ctrlUpdater = null;
+let latestUpdateUi = { showRestartPrompt: false, checking: false, message: '', version: null };
 let log = null;   // root logger; assigned on app ready, referenced as log?.*
 let logMinLevel = null; // createAppLogger's resolved level; used in diagnostics meta
 let hostId = '';
+// 16×16 Aurora gradient PNG (violet→blue, rounded). Inline data URL so the tray
+// needs no external icon asset (packaging-safe).
+const TRAY_ICON_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAmUlEQVR4nKXT4QrBYBiG4ef4RCKRLKyxsLCwsEitpKSkpKSkpJzlLXIE33sA189LKw+lLbT0Yd6BJIRZHyYRxCMYxzCcQpTAYAG9FMI1dDcoyJArJsjA3yILpr0DWXBzD7Jg7wCy4MYRZMH1E8iCa2eQBVcvIAuuXEEWXL6BLLh0B1lw8QGy4MIT9F/lhPMv9Cv5XeWCc2/0AR9g1yt6gn/UAAAAAElFTkSuQmCC';
 
 // Per-launch session password. Generated in the trusted main process (node:crypto)
 // and handed to the renderer via IPC — the sandboxed renderer can't run node:crypto.
@@ -346,9 +375,8 @@ function getInjector() {
 
 // Bring the window to attention when a controller (or a transfer offer) asks
 // for it. The renderer forwards a control CONNECT via IPC 'request-attention';
-// we apply the pure windowAttentionPlan. (Ported from the host — no tray here
-// yet, so unlike the host this has no refreshTrayMenu() call; Task 3 adds the
-// tray and will wire attention/panic into it.)
+// we apply the pure windowAttentionPlan. (Mirrors the host, minus its
+// refreshTrayMenu() call — attention doesn't change any tray-displayed state.)
 function bringWindowToAttention() {
   log?.child('session').info('attention requested by incoming connection');
   const win = mainWindow;
@@ -367,20 +395,19 @@ function bringWindowToAttention() {
 ipcMain.on('request-attention', () => bringWindowToAttention());
 
 // The renderer reports its registered id so the account service can publish
-// the host's current signaling id (connect-from-console rendezvous). No tray
-// yet on the controller (Task 3), so unlike the host this does not call
-// refreshTrayMenu().
-ipcMain.on('set-host-id', (_e, id) => { hostId = String(id || ''); getAccountService().setSignalingId(hostId); log?.child('session').info('host id registered'); });
+// the host's current signaling id (connect-from-console rendezvous), and so
+// the tray can display it.
+ipcMain.on('set-host-id', (_e, id) => { hostId = String(id || ''); getAccountService().setSignalingId(hostId); log?.child('session').info('host id registered'); refreshTrayMenu(); });
 
 // The renderer displays the session password and sends it on REGISTER.
 ipcMain.handle('get-session-password', () => sessionPassword);
 
 // Rotate the session password on demand (renderer's manual button or idle
-// timer). Regenerate in the trusted main process and return the new value so
-// the renderer can display it and push UPDATE_PASSWORD. No tray yet on the
-// controller (Task 3), so unlike the host this does not refresh a tray label.
+// timer). Regenerate in the trusted main process, refresh the tray label, and
+// return the new value so the renderer can display it and push UPDATE_PASSWORD.
 ipcMain.handle('regenerate-session-password', () => {
   sessionPassword = generateSessionPassword();
+  refreshTrayMenu();
   return sessionPassword;
 });
 
@@ -417,6 +444,54 @@ async function sendDiagnostics() {
 }
 ipcMain.handle('diagnostics:send', () => sendDiagnostics());
 
+function refreshTrayMenu() {
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate(buildTrayMenuTemplate({
+    id: hostId,
+    password: sessionPassword,
+    onShow: () => revealWindow(mainWindow),
+    onQuit: () => { lifecycle.beginQuit(); app.quit(); },
+    updateReady: latestUpdateUi.showRestartPrompt,
+    updateVersion: latestUpdateUi.version,
+    onRestartUpdate: () => ctrlUpdater && ctrlUpdater.installNow(),
+    onCheckUpdates: () => ctrlUpdater && ctrlUpdater.checkNow(),
+    onOpenLogs: () => shell.openPath(path.join(app.getPath('userData'), 'logs')),
+    loggedIn: accountLoggedIn,
+    onSendDiagnostics: async () => {
+      const res = await sendDiagnostics();
+      if (res.ok) {
+        await dialog.showMessageBox(mainWindow || undefined, {
+          type: 'info',
+          title: 'Send diagnostics to support',
+          message: `Diagnostics sent — reference ${res.id}`,
+        });
+      } else if (res.error === 'cancelled') {
+        // user declined the consent prompt inside sendDiagnostics(); no further dialog
+      } else if (res.error === 'not_logged_in') {
+        await dialog.showMessageBox(mainWindow || undefined, {
+          type: 'error',
+          title: 'Send diagnostics to support',
+          message: 'Sign in to send diagnostics',
+        });
+      } else {
+        await dialog.showMessageBox(mainWindow || undefined, {
+          type: 'error',
+          title: 'Send diagnostics to support',
+          message: `Diagnostics upload failed: ${res.error}`,
+        });
+      }
+    },
+  })));
+}
+
+function createTray() {
+  const icon = nativeImage.createFromDataURL(TRAY_ICON_DATA_URL);
+  tray = new Tray(icon);
+  tray.setToolTip('Farsight');
+  tray.on('click', () => revealWindow(mainWindow));
+  refreshTrayMenu();
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1280, height: 800,
@@ -437,16 +512,15 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (e, url) => { if (url !== win.webContents.getURL()) e.preventDefault(); });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
-  // Closing the window QUITS the app — every controller process stops.
-  // 'window-all-closed' is not enough on its own: a running transfer owns a
-  // hidden transfer-worker BrowserWindow (transfer-worker.js), which still counts
-  // as a window, so that event never fires mid-transfer. The process would linger
-  // invisibly — still moving bytes — and, since it holds the single-instance lock,
-  // relaunching would silently do nothing. app.quit() closes the worker windows too.
-  // Safe, not destructive: an in-flight send is already persisted 'active'
-  // (transfer-service persists before the first byte), and the next launch sweeps
-  // it to 'interrupted' and resumes it.
-  win.on('closed', () => { mainWindow = null; app.quit(); });
+  // Attended-access: the app must keep running to receive connections, so
+  // closing the window hides it to the tray instead of quitting. A real quit
+  // (from any path) latches lifecycle.beginQuit() via app 'before-quit' first,
+  // so shouldHideOnClose() returns false and the window is allowed to close —
+  // which then lets 'window-all-closed' fire and take the session + transfer
+  // worker windows down with app.quit() (see that handler below).
+  win.on('close', (e) => {
+    if (lifecycle.shouldHideOnClose()) { e.preventDefault(); win.hide(); }
+  });
   mainWindow = win;
   return win;
 }
@@ -461,17 +535,20 @@ function createWindow() {
 // record to 'interrupted' out from under it, and the resume watcher would then
 // try to re-establish a job that is still actively sending. Mirrors the host's
 // lock (packages/host/src/main.js) — first instance wins; a later launch hands
-// off via 'second-instance' (focus/restore the existing window; no tray here)
-// and exits.
+// off via 'second-instance' to reveal the running window, then exits.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) app.quit();
-// Relaunching must always give the user a window back. Revealing a destroyed
-// mainWindow would silently do nothing — which is exactly what a lingering
-// process looked like before the close-quits-the-app fix above.
-app.on('second-instance', () => {
-  if (!mainWindow || mainWindow.isDestroyed()) { if (app.isReady()) createWindow(); return; }
-  revealWindow(mainWindow);
-});
+// Now that the window hides to the tray on close instead of being destroyed,
+// it is never gone while the app is running — a plain reveal (mirrors the
+// host) is always correct; the old recreate-if-destroyed fallback no longer
+// applies.
+app.on('second-instance', () => revealWindow(mainWindow));
+// Any genuine quit — tray "Quit", autoUpdater.quitAndInstall(), or the
+// autoInstallOnAppQuit fallback — routes through app 'before-quit', which
+// latches quitting BEFORE the window gets its 'close' event. Without this the
+// close-guard preventDefaults the quit, the process stays alive, and the update
+// installer can't shut the running app down.
+app.on('before-quit', () => lifecycle.beginQuit());
 
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return;   // losing instance: never create a window
@@ -497,6 +574,7 @@ app.whenReady().then(async () => {
   });
 
   createWindow();
+  createTray();
   mainWindow.on('focus', () => mainWindow.flashFrame(false));
   // Panic hotkey: a physical override that instantly kills any session.
   // globalShortcut.register fails silently if another app already owns the
@@ -506,8 +584,7 @@ app.whenReady().then(async () => {
   // triggered in createWindow can complete), so it cannot fire before this
   // listener is registered; the renderer's own onPanicUnavailable listener is
   // wired up before its first await, so it is guaranteed to be registered by
-  // the time did-finish-load fires. (Ported from the host — no tray here yet,
-  // so unlike the host this does not refresh a tray menu.)
+  // the time did-finish-load fires.
   const panicOk = registerPanicKey(globalShortcut, 'CommandOrControl+Alt+F12', () => {
     log?.child('session').warn('panic hotkey fired — killing session');
     if (mainWindow) mainWindow.webContents.send('panic');
@@ -541,7 +618,11 @@ app.whenReady().then(async () => {
     updater: autoUpdater,
     isPackaged: app.isPackaged,
     log: (level, msg) => { const l = log?.child('updater'); if (l && l[level]) l[level](msg); },
-    onStatus: (ui) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updater:status', ui); },
+    onStatus: (ui) => {
+      latestUpdateUi = ui;
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('updater:status', ui);
+      refreshTrayMenu();
+    },
   });
   ctrlUpdater.start();
   ipcMain.handle('updater:check', () => { ctrlUpdater.checkNow(); return true; });
@@ -549,5 +630,10 @@ app.whenReady().then(async () => {
   ipcMain.on('updater:set-session-active', (_e, active) => ctrlUpdater.setSessionActive(active));
   ipcMain.handle('open-logs', () => shell.openPath(path.join(app.getPath('userData'), 'logs')));
 });
-app.on('will-quit', () => { globalShortcut.unregisterAll(); });
-app.on('window-all-closed', () => { log?.info('controller quitting'); if (process.platform !== 'darwin') app.quit(); });
+app.on('will-quit', () => { log?.info('controller quitting'); globalShortcut.unregisterAll(); });
+// The main window only HIDES on close while running (see the close-guard
+// above), so this does not fire mid-session/mid-transfer — correct, the app
+// must keep running in the tray. On a real quit, before-quit has already
+// latched lifecycle.beginQuit(), the close-guard lets the window close, and
+// THIS event fires and takes the session + transfer worker windows down too.
+app.on('window-all-closed', () => { if (lifecycle.isQuitting() && process.platform !== 'darwin') app.quit(); });

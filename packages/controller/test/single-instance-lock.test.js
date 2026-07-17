@@ -11,8 +11,17 @@
 //
 // Mirrors packages/host/src/main.js's lock (see its 'Single-instance lock'
 // comment) — first instance wins; a later launch hands off via 'second-instance'
-// (focus/restore the existing window, no tray here) and exits. Same
-// source-substring style as the other *-wiring tests in this package.
+// and exits. Same source-substring style as the other *-wiring tests in this
+// package.
+//
+// UPDATED (unification step 3, tray + hide-to-tray lifecycle): the controller is
+// now a tray app like the host, so closing the window HIDES it instead of
+// quitting — the old 'closing the window quits every process' contract
+// (win.on('closed', ...) -> app.quit()) is GONE, replaced by a close-guard that
+// only lets the window close during a real quit. Because the window is now
+// hidden rather than destroyed, it is NEVER gone while the app is running, so
+// second-instance's old "recreate if destroyed" fallback no longer applies
+// either — a plain reveal (mirrors the host) is always correct.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -32,16 +41,15 @@ describe('controller main: single-instance lock', () => {
     expect(main).toMatch(/revealWindow\(mainWindow\)/);
   });
 
-  test('a later launch RECREATES the window if the running one is gone', () => {
-    // Field report: "I closed the controller during the transfer and tried to
-    // start it again, but nothing happens" — the process lingered (a running
-    // transfer's hidden worker window kept it alive), so it still held the lock,
-    // and second-instance revealed a DESTROYED mainWindow = a silent no-op. The
-    // close-quits-the-app fix removes the lingering process; this is the belt to
-    // that braces — a relaunch must never do nothing.
-    const handler = main.slice(main.indexOf("app.on('second-instance'"), main.indexOf("app.on('second-instance'") + 400);
-    expect(handler).toMatch(/mainWindow\.isDestroyed\(\)/);
-    expect(handler).toMatch(/createWindow\(\)/);
+  test('second-instance is a PLAIN reveal — no recreate-if-destroyed fallback', () => {
+    // The window now hides to the tray on close instead of being destroyed, so
+    // it is never gone while the app runs. Pin the handler to a bare one-liner
+    // so a regression that reintroduces the old destroyed-window special case
+    // (now the wrong model — see the host, which has no such fallback either)
+    // gets caught.
+    const handler = main.slice(main.indexOf("app.on('second-instance'"), main.indexOf("app.on('second-instance'") + 120);
+    expect(handler).toMatch(/app\.on\('second-instance',\s*\(\)\s*=>\s*revealWindow\(mainWindow\)\);/);
+    expect(handler).not.toMatch(/isDestroyed/);
   });
 
   test('the losing instance never builds a window inside whenReady', () => {
@@ -50,27 +58,45 @@ describe('controller main: single-instance lock', () => {
     expect(main).toMatch(/whenReady\(\)\.then\(async\s*\(\)\s*=>\s*\{\s*\n\s*if\s*\(\s*!gotSingleInstanceLock\s*\)\s*return;/);
   });
 
-  test('imports revealWindow from a local module (mirrors the host, no tray here)', () => {
+  test('imports revealWindow from a local module (mirrors the host)', () => {
     expect(main).toMatch(/import\s*\{\s*revealWindow\s*\}\s*from\s*'\.\/reveal-window\.js'/);
   });
 });
 
-describe('controller main: closing the window quits every process', () => {
-  test('the main window close handler quits the app', () => {
-    // Field report: "I closed the controller during the transfer ... the process
-    // is still running and has network activity. When I close the program by
-    // pressing the windows X every controller process should stop."
-    //
-    // 'window-all-closed' (below) is NOT sufficient: a running transfer owns a
-    // hidden transfer-worker BrowserWindow (transfer-worker.js: `show: false`),
-    // which still counts as a window — so that event never fires mid-transfer and
-    // the process lingers invisibly, still moving bytes, holding the
-    // single-instance lock so a relaunch silently does nothing.
-    expect(main).toMatch(/win\.on\('closed'[\s\S]{0,120}app\.quit\(\)/);
+describe('controller main: closing the window hides it to the tray (unification step 3)', () => {
+  // Attended-access: the unified app must stay reachable as a host, so it is
+  // now a tray app like packages/host — closing the window HIDES it instead of
+  // quitting (INVERTS the old 'closing the window quits every process'
+  // contract this file used to pin). Quit lives in the tray menu; the
+  // lifecycle quit-latch (src/lifecycle.js) is what makes it reliable — see
+  // lifecycle.test.js for the pure-unit coverage of shouldHideOnClose()/
+  // beginQuit(), and the mutation check below for the main.js WIRING of it.
+  test('the main window close handler is guarded by lifecycle.shouldHideOnClose()', () => {
+    const handler = main.slice(main.indexOf("win.on('close'"), main.indexOf("win.on('close'") + 220);
+    expect(handler).toMatch(/lifecycle\.shouldHideOnClose\(\)/);
+    expect(handler).toMatch(/e\.preventDefault\(\)/);
+    expect(handler).toMatch(/win\.hide\(\)/);
   });
 
-  test('window-all-closed still quits too (the no-transfer path)', () => {
+  test('before-quit latches lifecycle.beginQuit() so a real quit is allowed through the close-guard', () => {
+    expect(main).toMatch(/app\.on\('before-quit',\s*\(\)\s*=>\s*lifecycle\.beginQuit\(\)\)/);
+  });
+
+  test('window-all-closed only quits once lifecycle.isQuitting() (not unconditionally)', () => {
+    // A running transfer/session owns extra hidden or visible windows, so this
+    // must NOT fire — and must NOT quit — just because the main window hides.
+    // It only fires once the main window's 'close' was actually allowed
+    // through (see the close-guard above), which only happens once quitting
+    // is latched — so gating this on isQuitting() too is belt-and-braces, but
+    // pin it since it's exactly what makes a real Quit take the session +
+    // transfer worker windows down with it.
     expect(main).toMatch(/app\.on\('window-all-closed'/);
-    expect(main).toMatch(/window-all-closed[\s\S]{0,160}app\.quit\(\)/);
+    const handler = main.slice(main.indexOf("app.on('window-all-closed'"), main.indexOf("app.on('window-all-closed'") + 160);
+    expect(handler).toMatch(/lifecycle\.isQuitting\(\)/);
+    expect(handler).toMatch(/app\.quit\(\)/);
+  });
+
+  test('the old unconditional close-quits-the-app contract is gone', () => {
+    expect(main).not.toMatch(/win\.on\('closed'/);
   });
 });
