@@ -54,7 +54,10 @@ describe('controller renderer: interrupted/reconnecting states', () => {
     expect(renderer).toMatch(/ev\.type === 'reconnecting'/);
     expect(renderer).toMatch(/case 'interrupted':/);
     expect(renderer).toMatch(/case 'reconnecting':/);
-    // must NOT be terminal, so they keep updating
-    expect(renderer).toMatch(/TERMINAL_STATES = \['done', 'canceled', 'error', 'declined'\]/);
+    // must NOT be terminal, so they keep updating. TERMINAL_TRANSFER_STATES is the
+    // shared single source of truth (imported from shell-nav), not a hand-rolled
+    // local list — see shell-wiring.test.js for the "no local redefinition" guard.
+    expect(renderer).toMatch(/import\s*\{[^}]*\bTERMINAL_TRANSFER_STATES\b[^}]*\}\s*from\s*['"]@farsight\/shared\/shell-nav['"]/);
+    expect(renderer).toMatch(/TERMINAL_TRANSFER_STATES\.includes\(/);
   });
 });

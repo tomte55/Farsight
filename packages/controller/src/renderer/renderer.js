@@ -9,6 +9,7 @@ import { normalizeHostId, passwordCandidates } from '@farsight/shared/credential
 import { isOlder } from '@farsight/shared/version';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
 import { createRateEstimator, etaSeconds, bytesDone, formatBytes, formatRate, formatDuration } from '@farsight/shared/transfer-rate';
+import { railItems, activeTransferCount, TERMINAL_TRANSFER_STATES, isShellPage } from '@farsight/shared/shell-nav';
 import { sessionOverlayFor } from '../session-overlay.js';
 import { extractStats, throughputKbps, formatQuality } from '../stats.js';
 import { createRendererLogger } from './rlog.js';
@@ -25,19 +26,11 @@ let clog = rlog.child(`conn:${connId}`);
 
 const idInput = document.getElementById('host-id');
 const statusEl = document.getElementById('status');
-const connectEl = document.getElementById('connect-wrap');
 const screenEl = document.getElementById('screen');
 const video = document.getElementById('video');
 const setupEl = document.getElementById('setup');
 const urlInput = document.getElementById('signaling-url');
 const setupError = document.getElementById('setup-error');
-// SP3 file transfer panels (declared here so openFleet()/menu handlers below
-// can reference them; wired up at the bottom of this file).
-const sendPanelEl = document.getElementById('send-panel');
-const transfersPanelEl = document.getElementById('transfers-panel');
-// Contacts panel (friends list) — declared here for the same reason as the
-// transfer panels above (openFleet()/openContacts() cross-reference each other).
-const contactsPanelEl = document.getElementById('contacts-panel');
 let signalingUrl = null;
 let peer = null, signal = null;
 const overlayEl = document.getElementById('overlay');
@@ -112,20 +105,14 @@ window.farsightIpc.onUpdateStatus((ui) => {
 });
 document.getElementById('update-restart').addEventListener('click', (e) => { e.preventDefault(); window.farsightIpc.installUpdate(); });
 
-// Settings cogwheel menu (top-right): toggle on click, dismiss on outside click.
-const settingsCog = document.getElementById('settings-cog');
-const settingsMenu = document.getElementById('settings-menu');
-settingsCog.addEventListener('click', (e) => { e.stopPropagation(); settingsMenu.classList.toggle('open'); });
-document.addEventListener('click', (e) => { if (!settingsMenu.contains(e.target) && e.target !== settingsCog) settingsMenu.classList.remove('open'); });
 document.getElementById('menu-check-updates').addEventListener('click', () => window.farsightIpc.checkForUpdates());
-document.getElementById('menu-open-logs').addEventListener('click', () => { settingsMenu.classList.remove('open'); window.farsightIpc.openLogs(); });
+document.getElementById('menu-open-logs').addEventListener('click', () => { window.farsightIpc.openLogs(); });
 
 // Verbose diagnostic logging: only shown once signed in (see refreshAccountView
 // and the resume-session call near the bottom of this file, which both keep
 // this in sync with the real signed-in state).
 const menuSendDiagnostics = document.getElementById('menu-send-diagnostics');
 menuSendDiagnostics.addEventListener('click', async () => {
-  settingsMenu.classList.remove('open');
   const res = await window.farsightIpc.sendDiagnostics();
   if (res.ok) menuStatus.textContent = `Diagnostics sent (id ${res.id}).`;
   else if (res.error !== 'cancelled') menuStatus.textContent = `Diagnostics upload failed: ${res.error}`;
@@ -133,9 +120,10 @@ menuSendDiagnostics.addEventListener('click', async () => {
 
 async function refreshSignalingUrl() {
   signalingUrl = await window.farsightIpc.getSignalingUrl();
-  const configured = !!signalingUrl;
+  const configured = Boolean(signalingUrl);
   setupEl.hidden = configured;
-  connectEl.style.display = configured ? '' : 'none';
+  shellEl.hidden = !configured;
+  if (configured) showPage(activePage);
 }
 async function saveSignaling() {
   const res = await window.farsightIpc.setSignalingUrl(urlInput.value);
@@ -144,14 +132,11 @@ async function saveSignaling() {
 }
 document.getElementById('save-signaling').addEventListener('click', saveSignaling);
 document.getElementById('menu-change-server').addEventListener('click', async () => {
-  settingsMenu.classList.remove('open');
   urlInput.value = (await window.farsightIpc.getSignalingUrl()) || '';
-  connectEl.style.display = 'none';
+  setupError.textContent = '';
+  shellEl.hidden = true;
   setupEl.hidden = false;
-  sendPanelEl.hidden = true;
-  transfersPanelEl.hidden = true;
 });
-refreshSignalingUrl();
 
 // Paint the subtle build-version label in the bottom-left corner. Also cache
 // our own version for the SP1 version-aware handshake (sent on CONNECT and
@@ -219,7 +204,6 @@ function doClose() {
   if (signal) { signal.close && signal.close(); signal = null; }
   overlayEl.hidden = true;
   screenEl.style.display = 'none';
-  connectEl.style.display = '';
   statusEl.textContent = '';
   setActive(false);
 }
@@ -256,7 +240,6 @@ let pendingStream = null;
 function revealSession(stream) {
   video.srcObject = stream;
   setActive(true);
-  connectEl.style.display = 'none';
   screenEl.style.display = 'block';
   document.getElementById('end').onclick = doClose;
   startStatsPoll();
@@ -449,7 +432,7 @@ async function connectTo({ targetId, candidates, linked }) {
       stopClipboardSync();
       if (sessionClosing) return; // host already told us it ended — keep that overlay
       if (screenEl.style.display === 'block') showOverlay(null, 'peer_disconnected');
-      else { statusEl.textContent = 'Host disconnected.'; connectEl.style.display = ''; }
+      else { statusEl.textContent = 'Host disconnected.'; }
     },
   }, { log: clog.child('signaling') });
 
@@ -480,7 +463,6 @@ document.getElementById('go').addEventListener('click', async () => {
 // note when it lags this build (the SP1 host-version note, promoted). All
 // account work happens in main (window.farsightIpc.account*); the renderer only
 // renders and never touches the password beyond passing it through.
-const accountEl = document.getElementById('account');
 const acctSignin = document.getElementById('acct-signin');
 const acctFleet = document.getElementById('acct-fleet');
 const acctEmail = document.getElementById('acct-email');
@@ -493,20 +475,6 @@ const fleetSub = document.getElementById('fleet-sub');
 const fleetError = document.getElementById('fleet-error');
 
 const setMsg = (el, text, ok = false) => { el.textContent = text; el.style.color = ok ? 'var(--acc2)' : 'var(--danger-ink)'; };
-
-function openFleet() {
-  connectEl.style.display = 'none';
-  setupEl.hidden = true;
-  accountEl.hidden = false;
-  sendPanelEl.hidden = true;
-  transfersPanelEl.hidden = true;
-  contactsPanelEl.hidden = true;
-  refreshAccountView();
-}
-function closeFleet() {
-  accountEl.hidden = true;
-  connectEl.style.display = '';
-}
 
 async function refreshAccountView() {
   const { signedIn } = await window.farsightIpc.accountStatus();
@@ -642,10 +610,11 @@ function hostRow(d) {
           // version, instead of sitting on "Updating…" until a manual refresh.
           let polls = 0;
           const t = setInterval(() => {
-            // The fleet panel may have been closed (or a connect started, which
-            // also closes it) while this poll was running — bail out instead of
-            // making IPC calls + DOM writes into a panel nobody can see.
-            if (accountEl.hidden) { clearInterval(t); return; }
+            // The fleet page may have been navigated away from (or a connect
+            // started, which also leaves it) while this poll was running — bail
+            // out instead of making IPC calls + DOM writes into a page nobody
+            // can see.
+            if (activePage !== 'fleet') { clearInterval(t); return; }
             polls += 1; loadFleet(); if (polls >= 12) clearInterval(t);
           }, 5000);
         }
@@ -665,7 +634,7 @@ function hostRow(d) {
     const btn = document.createElement('button');
     btn.className = 'btn btn-primary host-connect';
     btn.textContent = 'Connect';
-    btn.onclick = () => { closeFleet(); connectTo({ targetId: d.signalingId, candidates: [], linked: true }); };
+    btn.onclick = () => { showPage('home'); connectTo({ targetId: d.signalingId, candidates: [], linked: true }); };
     right.appendChild(btn);
 
     // SP3 Phase 4: password-free send to an own-fleet device. The same
@@ -698,8 +667,6 @@ function lastSeenText(d) {
   return `seen ${Math.floor(hrs / 24)}d ago`;
 }
 
-document.getElementById('menu-fleet').addEventListener('click', () => { settingsMenu.classList.remove('open'); openFleet(); });
-document.getElementById('acct-close').addEventListener('click', closeFleet);
 document.getElementById('acct-signout').addEventListener('click', async () => { await window.farsightIpc.accountLogout(); refreshAccountView(); });
 document.getElementById('fleet-refresh').addEventListener('click', loadFleet);
 acctSigninBtn.addEventListener('click', doSignIn);
@@ -716,25 +683,11 @@ for (const el of [acctPassword, acctCode, acctEmail]) {
 // "linked" transfer path as the fleet console (sendToFleetDevice), but the
 // target also carries contact:true so main/transfer-service route it through
 // the contact-consent path rather than the own-fleet auto-accept path.
-function openContacts() {
-  connectEl.style.display = 'none';
-  setupEl.hidden = true;
-  accountEl.hidden = true;
-  sendPanelEl.hidden = true;
-  transfersPanelEl.hidden = true;
-  contactsPanelEl.hidden = false;
-  loadContacts();
-}
-function closeContacts() {
-  contactsPanelEl.hidden = true;
-  connectEl.style.display = '';
-}
-
 async function loadContacts() {
   setMsg(document.getElementById('contacts-error'), '');
   const res = await window.farsightIpc.accountContacts();
   if (!res.ok) {
-    if (res.error === 'not_signed_in') { closeContacts(); openFleet(); return; }
+    if (res.error === 'not_signed_in') { showPage('fleet'); return; }
     setMsg(document.getElementById('contacts-error'), 'Couldn’t load contacts. Check your connection.');
     return;
   }
@@ -814,13 +767,13 @@ async function sendToContact(c, btn, mode = 'files') {
     const res = await window.farsightIpc.transferSend({
       target: { id: c.signalingId, deviceId: c.deviceId, linked: true, contact: true }, paths,
     });
-    closeContacts();
+    showPage('home');
     if (res && res.jobId) {
       transferJobs.set(res.jobId, {
         jobId: res.jobId, direction: 'send', target: { id: c.email || c.signalingId },
         manifest: res.manifest, state: 'awaiting-approval', createdAt: Date.now(),
       });
-      openTransfersPanel();
+      showPage('transfers');
     } else {
       setMsg(document.getElementById('contacts-error'), (res && res.error) || 'Could not start the transfer.');
     }
@@ -831,8 +784,6 @@ async function sendToContact(c, btn, mode = 'files') {
   }
 }
 
-document.getElementById('menu-contacts').addEventListener('click', () => { settingsMenu.classList.remove('open'); openContacts(); });
-document.getElementById('contacts-close').addEventListener('click', closeContacts);
 document.getElementById('contacts-refresh').addEventListener('click', loadContacts);
 document.getElementById('contact-add-btn').addEventListener('click', async () => {
   const email = document.getElementById('contact-add-email').value.trim();
@@ -870,33 +821,6 @@ const sendFolderBtn = document.getElementById('send-folder-btn');
 const sendStatusEl = document.getElementById('send-status');
 const transfersListEl = document.getElementById('transfers-list');
 const transfersEmptyEl = document.getElementById('transfers-empty');
-
-function hideTransferPanels() {
-  sendPanelEl.hidden = true;
-  transfersPanelEl.hidden = true;
-}
-function backToConnectFromTransfers() {
-  hideTransferPanels();
-  connectEl.style.display = '';
-}
-function openSendPanel() {
-  connectEl.style.display = 'none';
-  setupEl.hidden = true;
-  accountEl.hidden = true;
-  transfersPanelEl.hidden = true;
-  contactsPanelEl.hidden = true;
-  sendPanelEl.hidden = false;
-  sendStatusEl.textContent = '';
-}
-function openTransfersPanel() {
-  connectEl.style.display = 'none';
-  setupEl.hidden = true;
-  accountEl.hidden = true;
-  sendPanelEl.hidden = true;
-  contactsPanelEl.hidden = true;
-  transfersPanelEl.hidden = false;
-  refreshTransfersList();
-}
 
 // jobId -> { jobId, direction, target, manifest, progress, state, createdAt }.
 // Seeded from transferList() (persisted jobs-store records) and kept live via
@@ -962,7 +886,6 @@ function stateLabel(j) {
     default: return j.state || 'Transferring…';
   }
 }
-const TERMINAL_STATES = ['done', 'canceled', 'error', 'declined'];
 
 // Byte fraction: the sender now reports absolute bytes over the full manifest
 // (transfer-engine), the same denominator the receiver uses — so this agrees with
@@ -1018,7 +941,7 @@ function jobRow(j) {
 
   const right = document.createElement('div');
   right.className = 'host-right';
-  const active = !TERMINAL_STATES.includes(j.state);
+  const active = !TERMINAL_TRANSFER_STATES.includes(j.state);
   if (active) {
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'btn btn-ghost';
@@ -1075,7 +998,7 @@ window.farsightIpc.onTransferEvent((ev) => {
   if (!ev || typeof ev.jobId !== 'string') return;
   const existing = transferJobs.get(ev.jobId) || { jobId: ev.jobId, direction: ev.direction, state: 'awaiting-approval', createdAt: Date.now() };
   existing.direction = ev.direction || existing.direction;
-  if (TERMINAL_STATES.includes(existing.state)) { transferJobs.set(ev.jobId, existing); return; } // don't resurrect a finished job
+  if (TERMINAL_TRANSFER_STATES.includes(existing.state)) { transferJobs.set(ev.jobId, existing); return; } // don't resurrect a finished job
   if (ev.type === 'accepted') {
     // The host approved — ONLY now is the transfer genuinely active.
     existing.state = 'active';
@@ -1109,7 +1032,8 @@ window.farsightIpc.onTransferEvent((ev) => {
     existing.rate = sendEstimatorFor(ev.jobId).sample(bytesDone(ev.progress));
   }
   transferJobs.set(ev.jobId, existing);
-  if (!transfersPanelEl.hidden) renderTransfers();
+  if (activePage === 'transfers') renderTransfers();
+  renderRail();
 });
 
 // mode: 'files' (multi-select files) or 'folder' (one directory). Windows/Linux
@@ -1159,13 +1083,13 @@ async function sendToFleetDevice(d, btn, mode = 'files') {
     const res = await window.farsightIpc.transferSend({
       target: { id: d.signalingId, deviceId: d.id, linked: true }, paths,
     });
-    closeFleet();
+    showPage('home');
     if (res && res.jobId) {
       transferJobs.set(res.jobId, {
         jobId: res.jobId, direction: 'send', target: { id: d.name || d.signalingId },
         manifest: res.manifest, state: 'awaiting-approval', createdAt: Date.now(),
       });
-      openTransfersPanel();
+      showPage('transfers');
     } else {
       setMsg(fleetError, (res && res.error) || 'Could not start the transfer.');
     }
@@ -1176,8 +1100,70 @@ async function sendToFleetDevice(d, btn, mode = 'files') {
   }
 }
 
-document.getElementById('menu-send').addEventListener('click', () => { settingsMenu.classList.remove('open'); openSendPanel(); });
-document.getElementById('menu-transfers').addEventListener('click', () => { settingsMenu.classList.remove('open'); openTransfersPanel(); });
-document.getElementById('send-close').addEventListener('click', backToConnectFromTransfers);
-document.getElementById('transfers-close').addEventListener('click', backToConnectFromTransfers);
 document.getElementById('transfers-refresh').addEventListener('click', refreshTransfersList);
+
+// ─── Shell router ────────────────────────────────────────────────────────────
+// ONE source of truth for which page is visible. The old shell wrote the
+// "hide every sibling" list out four times (openFleet/openContacts/
+// openSendPanel/openTransfersPanel) plus a partial fifth in the change-server
+// handler that forgot #account and #contacts-panel — which is exactly the bug
+// class a router removes.
+const shellEl = document.getElementById('shell');
+const railEl = document.getElementById('rail');
+const pageEls = new Map(
+  ['home', 'fleet', 'people', 'transfers', 'settings'].map((p) => [p, document.getElementById(`page-${p}`)]),
+);
+let activePage = 'home';
+
+// Per-page loaders. Kept here so showPage() is the only place that knows what a
+// page needs on entry — the old open* functions each carried their own tail.
+const PAGE_ENTER = {
+  fleet: () => refreshAccountView(),
+  people: () => loadContacts(),
+  transfers: () => { sendStatusEl.textContent = ''; refreshTransfersList(); },
+  settings: () => refreshSettingsView(),
+};
+
+function showPage(name) {
+  if (!isShellPage(name)) return;
+  activePage = name;
+  for (const [page, el] of pageEls) el.hidden = page !== name;
+  renderRail();
+  const enter = PAGE_ENTER[name];
+  if (enter) enter();
+}
+
+function renderRail() {
+  railEl.replaceChildren();
+  for (const item of railItems({ active: activePage, transferCount: activeTransferCount([...transferJobs.values()]) })) {
+    const b = document.createElement('button');
+    b.className = `rail-item${item.selected ? ' sel' : ''}`;
+    b.dataset.page = item.page;
+    const icon = document.createElement('span');
+    icon.className = 'rail-icon';
+    icon.textContent = item.icon;
+    const label = document.createElement('span');
+    label.textContent = item.label;
+    b.append(icon, label);
+    if (item.badge !== null) {
+      const badge = document.createElement('span');
+      badge.className = 'rail-badge';
+      badge.textContent = String(item.badge);
+      b.appendChild(badge);
+    }
+    b.onclick = () => showPage(item.page);
+    railEl.appendChild(b);
+    if (item.page === 'transfers') railEl.appendChild(Object.assign(document.createElement('div'), { className: 'rail-gap' }));
+  }
+}
+
+function refreshSettingsView() {
+  document.getElementById('settings-signaling').textContent = signalingUrl || 'not configured';
+}
+
+// Eager init — MUST be the last thing in the file. refreshSignalingUrl() reaches
+// showPage() → renderRail() → transferJobs, a const that is in its temporal dead
+// zone until :909 executes. Running this at the old :154 position throws before
+// the renderer ever finishes.
+renderRail();
+refreshSignalingUrl();

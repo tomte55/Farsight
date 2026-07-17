@@ -7,9 +7,12 @@ const html = read('../src/renderer/index.html');
 const renderer = read('../src/renderer/renderer.js');
 
 describe('controller contacts panel wiring', () => {
-  it('has a Contacts menu entry and panel', () => {
-    expect(html).toMatch(/id="menu-contacts"/);
-    expect(html).toMatch(/id="contacts-panel"/);
+  // Unification step 1: contacts moved from a standalone menu entry + full-screen
+  // panel to the "People" rail page (shell-wiring.test.js guards the rail itself;
+  // this guards that the contacts UI actually lives inside that page).
+  it('has a People page reachable from the rail, with the contacts list container', () => {
+    expect(html).toMatch(/id="page-people"/);
+    expect(html).toMatch(/id="contacts-list"/);
   });
   it('loads contacts and renders add/accept/decline + send', () => {
     expect(renderer).toMatch(/accountContacts\(\)/);

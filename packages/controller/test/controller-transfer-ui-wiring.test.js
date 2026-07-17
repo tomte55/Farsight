@@ -90,13 +90,15 @@ describe('preload.cjs: SP3 transfer bridge', () => {
 });
 
 describe('renderer: Send… entry point + Transfers panel', () => {
-  test('index.html has the Send… and Transfers… menu entries', () => {
-    expect(html).toMatch(/<button id="menu-send">/);
-    expect(html).toMatch(/<button id="menu-transfers">/);
+  // Unification step 1: the standalone Send/Transfers menu entries and
+  // full-screen panels were replaced by a single "Transfers" rail page (rail
+  // markup itself is guarded by shell-wiring.test.js) that holds both the send
+  // form and the live job list.
+  test('index.html has a Transfers page reachable from the rail', () => {
+    expect(html).toMatch(/<section id="page-transfers"/);
   });
 
-  test('index.html has a send panel with host id + password inputs reusing the .input styling', () => {
-    expect(html).toMatch(/<div id="send-panel"/);
+  test('index.html has a send form with host id + password inputs reusing the .input styling', () => {
     expect(html).toMatch(/<input id="send-host-id" class="input"/);
     expect(html).toMatch(/<input id="send-host-pw" class="input"/);
     // Two explicit choices (Windows/Linux can't combine file+folder in one dialog).
@@ -104,8 +106,8 @@ describe('renderer: Send… entry point + Transfers panel', () => {
     expect(html).toMatch(/<button id="send-folder-btn"/);
   });
 
-  test('index.html has a transfers panel with a job list container', () => {
-    expect(html).toMatch(/<div id="transfers-panel"/);
+  test('index.html has a job list container on the Transfers page', () => {
+    expect(html).toMatch(/<section id="page-transfers"/);
     expect(html).toMatch(/<div id="transfers-list">/);
   });
 

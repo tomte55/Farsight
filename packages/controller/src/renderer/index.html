@@ -2,19 +2,26 @@
 <!doctype html>
 <meta charset="utf-8" />
 <!--
-  CSP: the real containment here is connect-src/object-src/base-uri/default-src
-  (blocks a compromised renderer from exfiltrating to or navigating to
-  arbitrary origins). 'unsafe-inline' is retained for script/style only
-  because of the inline importmap below and pervasive inline style="..."
-  attributes throughout this file; a hash/nonce-based tightening is a future
-  improvement.
+  CSP: default-src/connect-src/object-src/base-uri are the real containment (they
+  stop a compromised renderer exfiltrating to, or navigating to, another origin).
+  Unification step 1 additionally retired BOTH 'unsafe-inline' escapes:
+    * script-src — the only inline script is the import map below, now pinned by its
+      exact sha256 (same discipline as the transfer worker's, which has always been
+      hash-only). Change the import map and the hash MUST be recomputed; the guard
+      in test/shell-wiring.test.js fails loudly if you forget.
+    * style-src — every rule now lives in the shared Aurora stylesheet and every
+      inline style attribute is gone. A hash would NOT have covered those attributes,
+      so removing them was the only route.
+  Runtime CSSOM writes (el.style.width = …) are unaffected by style-src.
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'sha256-lcKn2H6UHfPw9LBfxOgU/tO8F7RFkOi5iJEP7PkQesw='; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>Farsight Controller</title>
 <link rel="stylesheet" href="../shared/farsight.css" />
+<link rel="stylesheet" href="./shell.css" />
 <!--
-  Import map: resolve bare @farsight/shared/* specifiers to real source files
-  (relative to this document) so the renderer works without a bundler.
+  Import map: resolve bare @farsight/shared/* specifiers to the vendored copies
+  (scripts/vendor-shared.mjs, run by prestart/predist). This relative path resolves
+  identically in dev AND inside the packaged asar.
 -->
 <script type="importmap">
 {
@@ -28,234 +35,167 @@
     "@farsight/shared/version": "../shared/version.js",
     "@farsight/shared/connect-transcript": "../shared/connect-transcript.js",
     "@farsight/shared/connection-auth": "../shared/connection-auth.js",
-    "@farsight/shared/transfer-rate": "../shared/transfer-rate.js"
+    "@farsight/shared/transfer-rate": "../shared/transfer-rate.js",
+    "@farsight/shared/shell-nav": "../shared/shell-nav.js",
+    "@farsight/shared/status-bar": "../shared/status-bar.js"
   }
 }
 </script>
-<style>
-  /* Video fills the window; connect card centers over the dark base. The fixed
-     .sessionbar (top:0, out of flow) would otherwise overlap the top of the
-     video, so reserve its height here — mirrors the host's in-session
-     padding-top:46px for the same bar. */
-  #screen { position: fixed; inset: 0; display: none; background: #000; box-sizing: border-box; padding-top: 46px; }
-  #screen video { width: 100%; height: 100%; object-fit: contain; }
-  #connect-wrap { min-height: 100vh; display: grid; place-items: center; }
-  #connect { width: 340px; }
-  /* Layout lives here (not inline) so the `hidden` attribute can hide it: an
-     inline `display` would beat the UA `[hidden]{display:none}` rule and leave
-     the setup panel stacked above the connect page. #setup[hidden] out-specifies
-     the #setup display rule so hiding wins. */
-  #setup { min-height: 100vh; display: grid; place-items: center; }
-  #setup[hidden] { display: none; }
-  #monitors {
-    background: var(--panel); color: var(--ink); border: 1px solid var(--line);
-    border-radius: 7px; padding: 5px 8px; font-size: 12.5px;
-  }
-  /* Host-version note in the session bar: muted by default; amber when the host
-     lags behind this build (SP1 groundwork for SP2's one-click remote update). */
-  #host-version { opacity: .7; }
-  #host-version.outdated { opacity: 1; color: var(--warn, #f0b429); }
-
-  /* Saved-hosts console (SP2). Full-height centered panel, hidden by default;
-     #account[hidden] out-specifies the display rule so hiding wins (mirrors
-     #setup). */
-  #account { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
-  #account[hidden] { display: none; }
-  .acct-wrap { width: 440px; max-width: 100%; }
-  .acct-title { font-size: 15px; font-weight: 700; margin-bottom: 3px; }
-  .acct-opt { color: var(--sub); font-weight: 400; text-transform: none; letter-spacing: 0; }
-  .acct-links { display: flex; justify-content: space-between; margin-top: 13px; }
-  .linkbtn { background: none; border: none; color: var(--acc2); font: inherit; font-size: 12.5px; cursor: pointer; padding: 0; }
-  .linkbtn:hover { text-decoration: underline; }
-  .acct-back { display: block; margin: 15px auto 0; color: var(--sub); }
-  .fleet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
-  .fleet-head-actions { display: flex; gap: 8px; flex-shrink: 0; }
-  /* Each saved host: presence dot · name/meta · right-aligned status/version. */
-  .host-row { display: flex; align-items: center; gap: 13px; padding: 13px 2px; border-top: 1px solid var(--line); }
-  .host-row:first-child { border-top: none; }
-  .host-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: #39395400; box-shadow: inset 0 0 0 2px #3a3a52; }
-  .host-row.online .host-dot { background: var(--acc2); box-shadow: 0 0 9px rgba(74,168,255,.65); }
-  .host-main { flex: 1; min-width: 0; }
-  .host-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .host-meta { font-size: 11.5px; color: var(--sub); margin-top: 3px; font-family: var(--mono); }
-  .host-right { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
-  .host-status { font-size: 11px; color: var(--sub); }
-  .host-row.online .host-status { color: #9ccaff; }
-  .host-badge { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: rgba(240,180,41,.14); color: #f0b429; text-transform: uppercase; letter-spacing: .06em; }
-  .fleet-empty { text-align: center; color: var(--sub); font-size: 12.5px; padding: 30px 12px; line-height: 1.65; }
-
-  /* SP3 file transfer: Send panel + Transfers panel (send path only for now —
-     see main.js). Mirror #account's full-height centered panel, hidden by
-     default via the [hidden] attribute out-specifying the display rule. */
-  #send-panel, #transfers-panel, #contacts-panel { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
-  #send-panel[hidden], #transfers-panel[hidden], #contacts-panel[hidden] { display: none; }
-  #transfers-panel .acct-wrap { width: 480px; }
-  .xfer-row { flex-direction: column; align-items: stretch; gap: 6px; }
-  .xfer-row .host-main { display: flex; flex-direction: column; gap: 5px; }
-  .xfer-row .host-right { justify-content: flex-end; }
-  .xfer-bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
-  .xfer-bar-fill { height: 100%; background: linear-gradient(135deg, var(--acc), var(--acc2)); transition: width .2s ease; }
-</style>
 
 <div id="version-tag" aria-hidden="true"></div>
-
-<button id="settings-cog" class="cog" title="Settings" aria-label="Settings">⚙</button>
-<div id="settings-menu" class="menu">
-  <button id="menu-fleet">My fleet…</button>
-  <button id="menu-contacts">Contacts…</button>
-  <button id="menu-send">Send files…</button>
-  <button id="menu-transfers">Transfers…</button>
-  <button id="menu-change-server">Change signaling server…</button>
-  <button id="menu-check-updates">Check for updates</button>
-  <button id="menu-open-logs">Open logs folder</button>
-  <button id="menu-send-diagnostics" hidden>Send diagnostics to support…</button>
-  <div id="menu-status" class="menu-status"></div>
-</div>
 
 <div id="update-banner">
   <span id="update-msg"></span>
   <a id="update-restart" href="#">Restart now</a>
 </div>
 
-<div id="setup" hidden>
-  <div style="width:340px">
+<div id="setup" class="setup-screen" hidden>
+  <div class="setup-card">
     <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
-    <div style="font-size:15px;font-weight:700;margin-bottom:3px">Set up your signaling server</div>
-    <div class="statusline" style="margin-top:0;margin-bottom:16px">Enter the address of your Farsight signaling server (wss://…).</div>
+    <div class="page-title">Set up your signaling server</div>
+    <div class="statusline u-tight u-mb16">Enter the address of your Farsight signaling server (wss://…).</div>
     <div class="lbl">Signaling server URL</div>
     <input id="signaling-url" class="input" placeholder="wss://signal.example.org" />
-    <button id="save-signaling" class="btn btn-primary" style="width:100%;margin-top:4px">Save</button>
-    <p id="setup-error" class="statusline" style="color:var(--danger-ink)"></p>
+    <button id="save-signaling" class="btn btn-primary u-full">Save</button>
+    <p id="setup-error" class="statusline u-danger"></p>
   </div>
 </div>
 
-<div id="connect-wrap" style="display:none">
-  <div id="connect">
-    <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
-    <div style="font-size:15px;font-weight:700;margin-bottom:3px">Connect to a host</div>
-    <div class="statusline" style="margin-top:0;margin-bottom:16px">Enter the ID and password shown on the host.</div>
-    <div class="lbl">Host ID</div>
-    <input id="host-id" class="input" placeholder="947 188 129" />
-    <div class="lbl">Password</div>
-    <input id="host-pw" class="input" placeholder="Password" />
-    <button id="go" class="btn btn-primary" style="width:100%;margin-top:4px">Connect</button>
-    <p id="status" class="statusline"></p>
-  </div>
-</div>
+<div id="shell" class="shell" hidden>
+  <div class="shell-body">
+    <nav id="rail" class="rail" aria-label="Primary"></nav>
+    <main class="pane">
 
-<div id="account" hidden>
-  <div class="acct-wrap">
-    <!-- Signed out: sign in to reach your fleet -->
-    <div id="acct-signin" class="card">
-      <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
-      <div class="acct-title">Sign in to your fleet</div>
-      <div class="statusline" style="margin-top:0;margin-bottom:16px">See your saved hosts — who's online and what version they run.</div>
-      <div class="lbl">Email</div>
-      <input id="acct-email" class="input" type="email" placeholder="you@example.com" autocomplete="username" />
-      <div class="lbl">Password</div>
-      <input id="acct-password" class="input" type="password" placeholder="Password" autocomplete="current-password" />
-      <div class="lbl">Two-factor code <span class="acct-opt">— if you enabled it</span></div>
-      <input id="acct-code" class="input" inputmode="numeric" placeholder="123 456" autocomplete="one-time-code" />
-      <button id="acct-signin-btn" class="btn btn-primary" style="width:100%;margin-top:4px">Sign in</button>
-      <p id="acct-signin-error" class="statusline" style="color:var(--danger-ink)"></p>
-      <div class="acct-links">
-        <button id="acct-forgot" class="linkbtn">Forgot password?</button>
-        <button id="acct-register" class="linkbtn">Create account</button>
-      </div>
-    </div>
-    <!-- Signed in: the saved-hosts fleet -->
-    <div id="acct-fleet" class="card" hidden>
-      <div class="fleet-head">
-        <div>
-          <div class="acct-title">Your fleet</div>
-          <div id="fleet-sub" class="statusline" style="margin-top:2px"></div>
+      <section id="page-home" class="page">
+        <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
+        <div class="page-head">
+          <div>
+            <div class="page-title">Connect to a host</div>
+            <div class="page-sub">Enter the ID and password shown on the host.</div>
+          </div>
         </div>
-        <div class="fleet-head-actions">
-          <button id="fleet-refresh" class="btn btn-ghost" style="padding:7px 12px">Refresh</button>
-          <button id="acct-signout" class="btn btn-ghost" style="padding:7px 12px">Sign out</button>
-        </div>
-      </div>
-      <div id="fleet-list"></div>
-      <p id="fleet-error" class="statusline" style="color:var(--danger-ink)"></p>
-    </div>
-    <button id="acct-close" class="linkbtn acct-back">← Back to connect</button>
-  </div>
-</div>
+        <div class="lbl">Host ID</div>
+        <input id="host-id" class="input" placeholder="947 188 129" />
+        <div class="lbl">Password</div>
+        <input id="host-pw" class="input" placeholder="Password" />
+        <button id="go" class="btn btn-primary u-full">Connect</button>
+        <p id="status" class="statusline"></p>
+      </section>
 
-<!-- Contacts (friends list): add-by-email, incoming/outgoing requests, and
-     accepted contacts (one row per device) with password-free send when
-     online — mirrors #acct-fleet, backed by window.farsightIpc.accountContacts*. -->
-<div id="contacts-panel" hidden>
-  <div class="acct-wrap">
-    <div class="card">
-      <div class="fleet-head">
-        <div><div class="acct-title">Contacts</div><div id="contacts-sub" class="statusline" style="margin-top:2px"></div></div>
-        <div class="fleet-head-actions">
-          <button id="contacts-refresh" class="btn btn-ghost" style="padding:7px 12px">Refresh</button>
+      <section id="page-fleet" class="page" hidden>
+        <div id="acct-signin" class="card">
+          <div class="page-title">Sign in to your fleet</div>
+          <div class="statusline u-tight u-mb16">See your saved hosts — who's online and what version they run.</div>
+          <div class="lbl">Email</div>
+          <input id="acct-email" class="input" type="email" placeholder="you@example.com" autocomplete="username" />
+          <div class="lbl">Password</div>
+          <input id="acct-password" class="input" type="password" placeholder="Password" autocomplete="current-password" />
+          <div class="lbl">Two-factor code <span class="acct-opt">— if you enabled it</span></div>
+          <input id="acct-code" class="input" inputmode="numeric" placeholder="123 456" autocomplete="one-time-code" />
+          <button id="acct-signin-btn" class="btn btn-primary u-full">Sign in</button>
+          <p id="acct-signin-error" class="statusline u-danger"></p>
+          <div class="acct-links">
+            <button id="acct-forgot" class="linkbtn">Forgot password?</button>
+            <button id="acct-register" class="linkbtn">Create account</button>
+          </div>
         </div>
-      </div>
-      <div style="display:flex;gap:8px;margin:10px 0">
-        <input id="contact-add-email" class="input" type="email" placeholder="Add a contact by email" style="flex:1" />
-        <button id="contact-add-btn" class="btn btn-primary">Add</button>
-      </div>
-      <p id="contacts-error" class="statusline" style="color:var(--danger-ink)"></p>
-      <div id="contacts-incoming"></div>
-      <div id="contacts-list"></div>
-      <div id="contacts-outgoing"></div>
-    </div>
-    <button id="contacts-close" class="linkbtn acct-back">← Back to connect</button>
-  </div>
-</div>
+        <div id="acct-fleet" class="card" hidden>
+          <div class="page-head">
+            <div>
+              <div class="page-title">Your fleet</div>
+              <div id="fleet-sub" class="page-sub"></div>
+            </div>
+            <div class="row-actions">
+              <button id="fleet-refresh" class="btn btn-ghost">Refresh</button>
+              <button id="acct-signout" class="btn btn-ghost">Sign out</button>
+            </div>
+          </div>
+          <div id="fleet-list"></div>
+          <p id="fleet-error" class="statusline u-danger"></p>
+        </div>
+      </section>
 
-<!-- SP3 file transfer: send files/folders to another Farsight device by ID +
-     password, over a DEDICATED transfer-worker connection (not the active
-     control session — see transfer-worker.js / main.js's getTransferService). -->
-<div id="send-panel" hidden>
-  <div class="acct-wrap">
-    <div class="card">
-      <div class="wm"><div class="glyph">◆</div><div class="name">Farsight</div></div>
-      <div class="acct-title">Send files</div>
-      <div class="statusline" style="margin-top:0;margin-bottom:16px">Send files or a folder directly to another Farsight device.</div>
-      <div class="lbl">Host ID</div>
-      <input id="send-host-id" class="input" placeholder="947 188 129" />
-      <div class="lbl">Password</div>
-      <input id="send-host-pw" class="input" placeholder="Password" />
-      <div style="display:flex;gap:8px;margin-top:4px">
-        <button id="send-files-btn" class="btn btn-primary" style="flex:1">Send files…</button>
-        <button id="send-folder-btn" class="btn" style="flex:1">Send folder…</button>
-      </div>
-      <p id="send-status" class="statusline"></p>
-    </div>
-    <button id="send-close" class="linkbtn acct-back">← Back to connect</button>
-  </div>
-</div>
+      <section id="page-people" class="page" hidden>
+        <div class="card">
+          <div class="page-head">
+            <div>
+              <div class="page-title">Contacts</div>
+              <div id="contacts-sub" class="page-sub"></div>
+            </div>
+            <div class="row-actions">
+              <button id="contacts-refresh" class="btn btn-ghost">Refresh</button>
+            </div>
+          </div>
+          <div class="u-row">
+            <input id="contact-add-email" class="input u-flex1" type="email" placeholder="Add a contact by email" />
+            <button id="contact-add-btn" class="btn btn-primary">Add</button>
+          </div>
+          <p id="contacts-error" class="statusline u-danger"></p>
+          <div id="contacts-incoming"></div>
+          <div id="contacts-list"></div>
+          <div id="contacts-outgoing"></div>
+        </div>
+      </section>
 
-<div id="transfers-panel" hidden>
-  <div class="acct-wrap">
-    <div class="card">
-      <div class="fleet-head">
-        <div>
-          <div class="acct-title">Transfers</div>
+      <section id="page-transfers" class="page" hidden>
+        <div class="stack">
+          <div class="card">
+            <div class="page-title">Send files</div>
+            <div class="statusline u-tight u-mb16">Send files or a folder directly to another Farsight device.</div>
+            <div class="lbl">Host ID</div>
+            <input id="send-host-id" class="input" placeholder="947 188 129" />
+            <div class="lbl">Password</div>
+            <input id="send-host-pw" class="input" placeholder="Password" />
+            <div class="u-row">
+              <button id="send-files-btn" class="btn btn-primary u-flex1">Send files…</button>
+              <button id="send-folder-btn" class="btn btn-ghost u-flex1">Send folder…</button>
+            </div>
+            <p id="send-status" class="statusline"></p>
+          </div>
+          <div class="card">
+            <div class="page-head">
+              <div><div class="page-title">Transfers</div></div>
+              <div class="row-actions">
+                <button id="transfers-refresh" class="btn btn-ghost">Refresh</button>
+              </div>
+            </div>
+            <div id="transfers-list"></div>
+            <p id="transfers-empty" class="fleet-empty" hidden>No transfers yet. Use “Send files…” to start one.</p>
+          </div>
         </div>
-        <div class="fleet-head-actions">
-          <button id="transfers-refresh" class="btn btn-ghost" style="padding:7px 12px">Refresh</button>
+      </section>
+
+      <section id="page-settings" class="page" hidden>
+        <div class="card">
+          <div class="page-title">Settings</div>
+          <div class="statusline u-tight u-mb16">Preferences for this installation.</div>
+          <div class="lbl">Signaling server</div>
+          <div id="settings-signaling" class="host-meta"></div>
+          <div class="u-row settings-actions">
+            <button id="menu-change-server" class="btn btn-ghost">Change signaling server…</button>
+            <button id="menu-check-updates" class="btn btn-ghost">Check for updates</button>
+          </div>
+          <div class="u-row settings-actions">
+            <button id="menu-open-logs" class="btn btn-ghost">Open logs folder</button>
+            <button id="menu-send-diagnostics" class="btn btn-ghost" hidden>Send diagnostics to support…</button>
+          </div>
+          <p id="menu-status" class="statusline"></p>
         </div>
-      </div>
-      <div id="transfers-list"></div>
-      <p id="transfers-empty" class="fleet-empty" hidden>No transfers yet. Use “Send files…” to start one.</p>
-    </div>
-    <button id="transfers-close" class="linkbtn acct-back">← Back to connect</button>
+      </section>
+
+    </main>
   </div>
+  <div id="statusbar" class="statusbar"></div>
 </div>
 
 <div id="screen">
   <div class="sessionbar">
     <span>Remote session</span>
-    <span style="display:flex;gap:10px;align-items:center">
+    <span class="sessionbar-right">
       <span id="host-version" class="qstat"></span>
       <span id="quality" class="qstat"></span>
-      <select id="monitors" style="display:none"></select>
-      <button id="end" class="btn btn-danger" style="padding:5px 12px">Disconnect</button>
+      <select id="monitors" class="monitors-select"></select>
+      <button id="end" class="btn btn-danger">Disconnect</button>
     </span>
   </div>
   <video id="video" autoplay playsinline></video>

@@ -51,13 +51,13 @@ describe('controller connect-from-console wiring', () => {
     expect(renderer).toMatch(/host-update/);
   });
 
-  // Regression guard: closing the fleet panel (accountEl.hidden = true) — which
-  // also happens on connect — must not leave the "Updating…" re-poll interval
-  // making IPC calls + DOM writes into a panel nobody can see for up to 60s.
-  test('the fleet re-poll bails out once the panel is no longer visible', () => {
+  // Regression guard: navigating away from the fleet page (showPage('home') etc,
+  // which also happens on connect) must not leave the "Updating…" re-poll interval
+  // making IPC calls + DOM writes into a page nobody can see for up to 60s.
+  test('the fleet re-poll bails out once the fleet page is no longer active', () => {
     const pollBlock = renderer.match(/const t = setInterval\(\(\) => \{[\s\S]*?\}, 5000\);/);
     expect(pollBlock).toBeTruthy();
-    expect(pollBlock[0]).toMatch(/accountEl\.hidden/);
+    expect(pollBlock[0]).toMatch(/activePage !== 'fleet'/);
     expect(pollBlock[0]).toMatch(/clearInterval\(t\)/);
   });
 });
