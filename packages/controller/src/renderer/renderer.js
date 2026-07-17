@@ -9,7 +9,7 @@ import { normalizeHostId, passwordCandidates } from '@farsight/shared/credential
 import { isOlder } from '@farsight/shared/version';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
 import { createRateEstimator, etaSeconds, bytesDone, formatBytes, formatRate, formatDuration } from '@farsight/shared/transfer-rate';
-import { railItems, activeTransferCount, TERMINAL_TRANSFER_STATES, isShellPage } from '@farsight/shared/shell-nav';
+import { railItems, activeTransferCount, TERMINAL_TRANSFER_STATES, isShellPage, SHELL_PAGES } from '@farsight/shared/shell-nav';
 import { sessionOverlayFor } from '../session-overlay.js';
 import { extractStats, throughputKbps, formatQuality } from '../stats.js';
 import { createRendererLogger } from './rlog.js';
@@ -1111,7 +1111,7 @@ document.getElementById('transfers-refresh').addEventListener('click', refreshTr
 const shellEl = document.getElementById('shell');
 const railEl = document.getElementById('rail');
 const pageEls = new Map(
-  ['home', 'fleet', 'people', 'transfers', 'settings'].map((p) => [p, document.getElementById(`page-${p}`)]),
+  SHELL_PAGES.map((p) => [p, document.getElementById(`page-${p}`)]),
 );
 let activePage = 'home';
 
@@ -1133,8 +1133,17 @@ function showPage(name) {
   if (enter) enter();
 }
 
-function renderRail() {
-  railEl.replaceChildren();
+// page -> { btn, badge } built once by renderRail()'s first call, then updated
+// in place on every later call. A keyboard user can be focused on a rail
+// button when a transfer event lands (file-sent/file-done are per-file and
+// UNTHROTTLED, unlike progress) — rebuilding the buttons via replaceChildren()
+// on every call moved focus to <body> mid-transfer. Structure (five
+// `.rail-item` buttons + the `.rail-gap` div after 'transfers', in
+// SHELL_PAGES order) is built once from railItems() and never replaced;
+// only the `.sel` class and the `.rail-badge` child are mutated thereafter.
+const railButtons = new Map();
+
+function buildRail() {
   for (const item of railItems({ active: activePage, transferCount: activeTransferCount([...transferJobs.values()]) })) {
     const b = document.createElement('button');
     b.className = `rail-item${item.selected ? ' sel' : ''}`;
@@ -1145,15 +1154,40 @@ function renderRail() {
     const label = document.createElement('span');
     label.textContent = item.label;
     b.append(icon, label);
+    let badge = null;
     if (item.badge !== null) {
-      const badge = document.createElement('span');
+      badge = document.createElement('span');
       badge.className = 'rail-badge';
       badge.textContent = String(item.badge);
       b.appendChild(badge);
     }
     b.onclick = () => showPage(item.page);
     railEl.appendChild(b);
+    railButtons.set(item.page, { btn: b, badge });
     if (item.page === 'transfers') railEl.appendChild(Object.assign(document.createElement('div'), { className: 'rail-gap' }));
+  }
+}
+
+function renderRail() {
+  if (railButtons.size === 0) { buildRail(); return; }
+  for (const item of railItems({ active: activePage, transferCount: activeTransferCount([...transferJobs.values()]) })) {
+    const entry = railButtons.get(item.page);
+    if (!entry) continue;
+    entry.btn.classList.toggle('sel', item.selected);
+    if (item.badge !== null) {
+      if (entry.badge) {
+        entry.badge.textContent = String(item.badge);
+      } else {
+        const badge = document.createElement('span');
+        badge.className = 'rail-badge';
+        badge.textContent = String(item.badge);
+        entry.btn.appendChild(badge);
+        entry.badge = badge;
+      }
+    } else if (entry.badge) {
+      entry.badge.remove();
+      entry.badge = null;
+    }
   }
 }
 
