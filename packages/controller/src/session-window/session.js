@@ -408,6 +408,16 @@ let signalingUrl = null;
 let appVersion = null;
 
 window.farsightSession.onLaunch(async ({ targetId, candidates, linked }) => {
+  // A second launch switches targets in the SAME window. The shell stays
+  // interactive under this window, so openSession can fire again mid-session —
+  // tear down any in-progress session first (mirrors doReconnect) or the prior
+  // peer + signaling socket leak until the window closes. No-op on first launch
+  // (peer/signal null; the stop* polls guard on their timers).
+  stopStatsPoll();
+  stopClipboardSync();
+  if (peer) { peer.close(); peer = null; }
+  if (signal) { signal.close(); signal = null; }
+  overlayEl.hidden = true;
   signalingUrl = await window.farsightSession.getSignalingUrl();
   appVersion = (await window.farsightSession.getAppVersion()) || null;
   lastCreds.targetId = targetId;
