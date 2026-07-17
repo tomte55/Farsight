@@ -40,3 +40,19 @@ test('the controller main window keeps its sandboxed-renderer hardening', () => 
   expect(prefs).toMatch(/contextIsolation:\s*true/);
   expect(prefs).toMatch(/nodeIntegration:\s*false/);
 });
+
+// Unification step 2: the remote-control session moved into its own
+// BrowserWindow, declared in session-window.js rather than main.js. It owns
+// input capture and the peer connection exactly like the shell's main window
+// used to, so it needs the identical hardening — guard it here too, reusing
+// the same brace-matching extractor (mainWindowPrefs finds the FIRST
+// webPreferences block in whichever source string it's given).
+const sessionWindowSrc = readFileSync(new URL('../src/session-window.js', import.meta.url), 'utf8');
+
+test('the session window sets backgroundThrottling:false and the R-7 trio', () => {
+  const prefs = mainWindowPrefs(sessionWindowSrc);
+  expect(prefs).toMatch(/backgroundThrottling:\s*false/);
+  expect(prefs).toMatch(/sandbox:\s*true/);
+  expect(prefs).toMatch(/contextIsolation:\s*true/);
+  expect(prefs).toMatch(/nodeIntegration:\s*false/);
+});

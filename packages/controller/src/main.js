@@ -14,6 +14,7 @@ import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl
 import { createUpdater } from '@farsight/shared/updater';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from './account.js';
 import { revealWindow } from './reveal-window.js';
+import { createSessionWindow } from './session-window.js';
 // Verbose diagnostic logging: consent-gated upload of a redaction-safe log
 // bundle for support triage (see docs/SECURITY.md).
 import { buildDiagnosticsBundle } from '@farsight/shared/diagnostics-bundle';
@@ -237,6 +238,27 @@ ipcMain.handle('get-app-version', () => app.getVersion());
 
 ipcMain.handle('clipboard-read', () => clipboard.readText());
 ipcMain.on('clipboard-write', (_e, text) => { if (typeof text === 'string' && text.length <= 100000) clipboard.writeText(text); });
+
+// Unification step 2: the remote-control session now lives in its own
+// BrowserWindow (session-window.js) instead of taking over the shell's main
+// window. Created lazily on first session:open; its status/closed events are
+// forwarded to the shell window so the shell can show a status bar. The
+// factory itself registers the session:status/session:log ipcMain listeners
+// (called back via onStatus/onLog below) — do NOT re-register those topics
+// here, that would double-handle them.
+let sessionWindow = null;
+function getSessionWindow() {
+  if (!sessionWindow) {
+    sessionWindow = createSessionWindow({
+      onStatus: (status) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('session:status', status); },
+      onClosed: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('session:closed'); },
+      onLog: (obj) => log?.child('session-window').info(JSON.stringify(obj)),
+    });
+  }
+  return sessionWindow;
+}
+ipcMain.on('session:open', (_e, params) => getSessionWindow().launch(params));
+ipcMain.on('session:focus', () => getSessionWindow().focus());
 
 let mainWindow = null;
 let ctrlUpdater = null;

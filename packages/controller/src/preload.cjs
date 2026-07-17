@@ -44,4 +44,11 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   transferList: () => ipcRenderer.invoke('transfer:list'),
   transferCancel: (jobId) => ipcRenderer.invoke('transfer:cancel', jobId),
   onTransferEvent: (cb) => ipcRenderer.on('transfer:event', (_e, ev) => cb(ev)),
+  // Unification step 2: the remote-control session lives in its own
+  // BrowserWindow (session-window.js). The shell asks main to open/focus it
+  // and listens for status/closed pushes to drive its status bar.
+  openSession: (params) => ipcRenderer.send('session:open', params),
+  focusSession: () => ipcRenderer.send('session:focus'),
+  onSessionStatus: (cb) => ipcRenderer.on('session:status', (_e, s) => cb(s)),
+  onSessionClosed: (cb) => ipcRenderer.on('session:closed', () => cb()),
 });
