@@ -65,13 +65,70 @@ test('send with no resume starts every file at 0', () => {
   expect(tx.nextFile()).toEqual({ fileId: 1, offset: 0, size: 20 });
 });
 
-test('send progress counts remaining-to-send bytes', () => {
+test('send progress reports absolute bytes over the FULL manifest (not remaining-only)', () => {
   const tx = createSendJob({ manifest, resume: [{ fileId: 0, haveBytes: 4 }] });
-  // to-send = (10-4) + (20-0) = 26
-  expect(tx.progress().total).toBe(26);
+  // total = whole manifest = 10 + 20 = 30 (was: remaining-to-send = 26)
+  expect(tx.progress().total).toBe(30);
+  // the resumed offset counts as already sent — absolute, comparable to the receiver
+  expect(tx.progress().sent).toBe(4);
   tx.onFileSent(0);
-  expect(tx.progress().sent).toBe(6);
+  expect(tx.progress().sent).toBe(10); // file 0 fully sent (was: 6, the remaining-only delta)
   expect(tx.progress().filesSent).toBe(1);
+});
+
+test('send job reports absolute byte progress over the FULL manifest', () => {
+  const manifest = { entries: [{ fileId: 1, size: 100 }, { fileId: 2, size: 300 }] };
+  const job = createSendJob({ manifest });
+  const p = job.progress();
+  expect(p.total).toBe(400); // the whole manifest, not "what's left to do"
+  expect(p.sent).toBe(0);
+  expect(p.fraction).toBe(0);
+});
+
+test('send job counts a resumed offset as already sent (absolute, comparable to the receiver)', () => {
+  const manifest = { entries: [{ fileId: 1, size: 100 }, { fileId: 2, size: 300 }] };
+  const job = createSendJob({ manifest, resume: [{ fileId: 1, haveBytes: 100 }, { fileId: 2, haveBytes: 100 }] });
+  const p = job.progress();
+  expect(p.total).toBe(400);
+  expect(p.sent).toBe(200);   // 100 (whole file 1) + 100 (partial file 2)
+  expect(p.fraction).toBe(0.5);
+  expect(p.filesSent).toBe(1); // only file 1 is complete
+});
+
+test('send job onBytes advances progress mid-file (the bar must move during one huge file)', () => {
+  const manifest = { entries: [{ fileId: 1, size: 1000 }] };
+  const job = createSendJob({ manifest });
+  expect(job.onBytes(1, 250)).toBe(0.25); // returns this file's fraction
+  expect(job.progress().sent).toBe(250);
+  expect(job.progress().fraction).toBe(0.25);
+  job.onBytes(1, 250);
+  expect(job.progress().sent).toBe(500);
+});
+
+test('send job onBytes never exceeds the file size and ignores bad input', () => {
+  const manifest = { entries: [{ fileId: 1, size: 100 }] };
+  const job = createSendJob({ manifest });
+  job.onBytes(1, 500); // more than the file — clamp
+  expect(job.progress().sent).toBe(100);
+  expect(job.onBytes(99, 10)).toBe(0);   // unknown fileId
+  expect(job.onBytes(1, -5)).toBe(0);    // negative
+  expect(job.progress().sent).toBe(100);
+});
+
+test('onFileSent snaps the file to fully sent even if no bytes were reported', () => {
+  const manifest = { entries: [{ fileId: 1, size: 100 }, { fileId: 2, size: 100 }] };
+  const job = createSendJob({ manifest });
+  job.onFileSent(1);
+  const p = job.progress();
+  expect(p.sent).toBe(100);
+  expect(p.filesSent).toBe(1);
+});
+
+test('a fully-resumed send job reads as complete', () => {
+  const manifest = { entries: [{ fileId: 1, size: 100 }] };
+  const job = createSendJob({ manifest, resume: [{ fileId: 1, haveBytes: 100 }] });
+  expect(job.isComplete()).toBe(true);
+  expect(job.progress().fraction).toBe(1);
 });
 
 test('nextJobState models the queue lifecycle', () => {

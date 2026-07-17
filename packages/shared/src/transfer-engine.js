@@ -47,7 +47,10 @@ export function createSendJob({ manifest, resume = [] }) {
   for (const r of resume) have.set(r.fileId, r.haveBytes);
   const plan = manifest.entries.map((e) => {
     const start = Math.min(have.get(e.fileId) || 0, e.size);
-    return { fileId: e.fileId, size: e.size, offset: start, sent: start >= e.size };
+    // sentBytes starts at the resumed offset: progress is ABSOLUTE (bytes of this
+    // file that exist on the far end), so it is directly comparable to the
+    // receiver's `received` and a resumed job doesn't restart the bar at 0.
+    return { fileId: e.fileId, size: e.size, offset: start, sent: start >= e.size, sentBytes: start };
   });
   let idx = 0;
   function advance() { while (idx < plan.length && plan[idx].sent) idx += 1; }
@@ -59,14 +62,27 @@ export function createSendJob({ manifest, resume = [] }) {
       const p = plan[idx];
       return { fileId: p.fileId, offset: p.offset, size: p.size };
     },
-    onFileSent(fileId) { const p = plan.find((x) => x.fileId === fileId); if (p) p.sent = true; advance(); },
+    // Per-chunk byte accounting (mirrors the receive job's onBytes). Without this
+    // the sender's progress only moves at file boundaries, so a single huge file
+    // shows a frozen bar and no speed/ETA for hours.
+    onBytes(fileId, n) {
+      const p = plan.find((x) => x.fileId === fileId);
+      if (!p || !Number.isInteger(n) || n < 0) return 0;
+      p.sentBytes = Math.min(p.sentBytes + n, p.size);
+      return p.size > 0 ? p.sentBytes / p.size : 1;
+    },
+    onFileSent(fileId) {
+      const p = plan.find((x) => x.fileId === fileId);
+      if (p) { p.sent = true; p.sentBytes = p.size; }
+      advance();
+    },
     isComplete() { return plan.every((p) => p.sent); },
     progress() {
       let total = 0, sent = 0, filesSent = 0;
       for (const p of plan) {
-        const rem = p.size - p.offset;
-        total += rem;
-        if (p.sent) { sent += rem; filesSent += 1; }
+        total += p.size;       // the WHOLE manifest — same denominator the receiver uses
+        sent += p.sentBytes;   // absolute, continuous
+        if (p.sent) filesSent += 1;
       }
       return { sent, total, fraction: total > 0 ? sent / total : 1, filesSent, filesTotal: plan.length };
     },
