@@ -2,7 +2,7 @@
 import { isValidHostId } from '@farsight/shared/host-id';
 import { normalizeHostId, passwordCandidates, formatHostId } from '@farsight/shared/credentials-format';
 import { isOlder } from '@farsight/shared/version';
-import { createRateEstimator, etaSeconds, bytesDone, formatBytes, formatRate, formatDuration } from '@farsight/shared/transfer-rate';
+import { createRateEstimator, etaSeconds, bytesDone, filesDone, formatBytes, formatRate, formatDuration } from '@farsight/shared/transfer-rate';
 import { railItems, activeTransferCount, TERMINAL_TRANSFER_STATES, isShellPage, SHELL_PAGES } from '@farsight/shared/shell-nav';
 import { buildStatusSegments } from '@farsight/shared/status-bar';
 import { transferLabel } from '@farsight/shared/transfer-label';
@@ -1252,7 +1252,7 @@ function sendDetailText(j) {
     if (eta !== null && j.state === 'active') parts.push(`~${formatDuration(eta)} left`);
   }
   if (Number.isFinite(p.filesTotal) && p.filesTotal > 1) {
-    parts.push(`${Number.isFinite(p.filesSent) ? p.filesSent : 0} / ${p.filesTotal} files`);
+    parts.push(`${filesDone(p)} / ${p.filesTotal} files`);
   }
   return parts.join(' · ');
 }

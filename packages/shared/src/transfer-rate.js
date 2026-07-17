@@ -60,6 +60,17 @@ export function bytesDone(progress) {
   return 0;
 }
 
+// Same mismatch for the completed-file COUNT: the sender's progress calls it
+// `filesSent`, the receiver's calls it `filesDone` (transfer-engine.js:87 vs :18).
+// The panel used to read only `filesSent`, so a receive showed "0 / N files" the
+// whole time. Prefer whichever is present (0 is a real value, not a fallback).
+export function filesDone(progress) {
+  if (!progress) return 0;
+  if (Number.isFinite(progress.filesSent)) return progress.filesSent;
+  if (Number.isFinite(progress.filesDone)) return progress.filesDone;
+  return 0;
+}
+
 const UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
 
 // Binary units with the labels users expect from Windows (1 GB = 1024^3).

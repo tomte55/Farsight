@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import {
-  createRateEstimator, etaSeconds, bytesDone, formatBytes, formatRate, formatDuration,
+  createRateEstimator, etaSeconds, bytesDone, filesDone, formatBytes, formatRate, formatDuration,
 } from '../src/transfer-rate.js';
 
 test('rate estimator needs two samples before it reports a rate', () => {
@@ -65,6 +65,17 @@ test('bytesDone normalizes the receiver {received} and sender {sent} shapes', ()
   expect(bytesDone({ sent: 17, total: 100 })).toBe(17);
   expect(bytesDone(null)).toBe(0);
   expect(bytesDone({})).toBe(0);
+});
+
+test('filesDone normalizes the receiver {filesDone} and sender {filesSent} shapes', () => {
+  // The transfer panel showed "0 / N files" for the ENTIRE receive because it
+  // read the sender's field (filesSent) on a receive whose progress only has
+  // filesDone. One normalizer, mirroring bytesDone, so both directions count.
+  expect(filesDone({ filesSent: 3, filesTotal: 10 })).toBe(3);   // sender shape
+  expect(filesDone({ filesDone: 7, filesTotal: 10 })).toBe(7);   // receiver shape
+  expect(filesDone({ filesDone: 0, filesTotal: 10 })).toBe(0);   // a real 0, not a fallback
+  expect(filesDone(null)).toBe(0);
+  expect(filesDone({})).toBe(0);
 });
 
 test('formatBytes uses binary units with the familiar labels', () => {
