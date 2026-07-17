@@ -1,11 +1,19 @@
 // SP3 transfer-orchestrator: send/receive drivers over an abstract channel.
-import { expect, test, afterEach } from 'vitest';
+import { expect, test, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createSender } from '../src/transfer-orchestrator.js';
 import { parseCtrlFrame, acceptFrame, rejectFrame, completeFrame } from '@farsight/shared/transfer-protocol';
+// Fix-round-3 regression test needs to gate transfer-io's finalizeReceivedFile
+// mid-call (see below) — a passthrough vi.mock lets a single test spy over one
+// export while every other test in this file still gets the REAL io module.
+import * as transferIo from '../src/transfer-io.js';
+vi.mock('../src/transfer-io.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual };
+});
 
 // Poll until a predicate holds (the sender's pump runs async after accept).
 async function until(pred, ms = 2000) {
@@ -871,4 +879,85 @@ test('review fix round 2: onBulk/tryFinalize have no settled guard — bulk/file
   // guarded tryFinalize never reaches its own `pending.delete(...)`. Must not
   // leak either.
   expect(after.some((e) => e.type === 'verifying')).toBe(false);
+});
+
+// Re-review on aa35d46/2773717 (fix rounds 1-2): the same bug class survives a
+// THIRD time — round 2 only guarded tryFinalize/onBulk/onCtrl at their own
+// ENTRY, not after their own internal awaits. tryFinalize's
+// `await item.partFile.fsync()`, `.close()`, and — critically —
+// `await finalizeReceivedFile(...)` (the real rename onto the destination
+// path) were unguarded: a cancel landing while PARKED INSIDE any of them still
+// resumed straight into the unconditional `pending.delete(...)` +
+// `onEvent('file-done')`.
+//
+// Round 2's own regression test (above) cannot catch this: it proves the bug
+// via pure call-ORDERING (queue bulk/file_end/job_done, then abort()
+// synchronously before any of them even start) — but that ordering trick
+// aborts before onBulk/tryFinalize ever begin running, so it can never observe
+// a cancel landing genuinely PARKED inside a real in-flight async op. This
+// test uses the gate-mock technique instead: mock finalizeReceivedFile to
+// pause on a controllable gate (calling through to the REAL implementation
+// once released, so the real hash+rename actually happens), drive a real
+// single-file receive until tryFinalize is genuinely parked awaiting it, abort
+// while parked, THEN release the gate — reproducing the exact race the
+// reviewer found.
+test('review fix round 3: a cancel landing while genuinely parked inside finalizeReceivedFile must not leave the file at its final destination or emit events after canceled', async () => {
+  const dest = tmp();
+  const payload = Buffer.from('round3-payload'.repeat(30));
+  const hash = createHash('sha256').update(payload).digest('hex');
+  const manifest = { entries: [{ fileId: 0, path: 'r3.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const sentToSender = [];
+  const ch = { sendCtrl(s) { sentToSender.push(parseCtrlFrame(s)); }, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; } };
+  const events = [];
+  const store = memStore();
+
+  // Gate the REAL finalizeReceivedFile: the mock calls straight through to the
+  // actual implementation (real hash + real rename) once released, so this
+  // proves the fix against the genuine disk operation, not a synthetic stand-in.
+  let releaseGate, gateEntered = false;
+  const gate = new Promise((r) => { releaseGate = r; });
+  const realFinalize = transferIo.finalizeReceivedFile;
+  const spy = vi.spyOn(transferIo, 'finalizeReceivedFile').mockImplementation(async (args) => {
+    gateEntered = true;
+    await gate;
+    return realFinalize(args);
+  });
+
+  try {
+    const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true, onEvent: (ev) => events.push(ev) });
+    const settled = rx.start().catch((e) => e.message);
+
+    await recvCtrl(offerFrame({ jobId: 'r3', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+    await recvBulk(payload); // bytes land; FILE_END hasn't arrived yet so tryFinalize just defers (hash == null)
+
+    // NOT awaited: file_end's handler drives into tryFinalize -> the gated
+    // finalizeReceivedFile and parks there until we release it.
+    const fileEndHandled = recvCtrl(fileEndFrame({ jobId: 'r3', fileId: 0, hash }));
+    await until(() => gateEntered); // genuinely parked INSIDE finalizeReceivedFile, not just queued behind it
+
+    rx.abort('canceled'); // lands while the real hash+rename is in flight
+    releaseGate(); // let it actually run now (real hash + real rename onto the final path)
+    await fileEndHandled; // let tryFinalize's continuation (the fix) run to completion
+
+    expect(await settled).toBe('canceled');
+
+    const iCanceled = events.findIndex((e) => e.type === 'canceled');
+    expect(iCanceled).toBeGreaterThanOrEqual(0);
+    const after = events.slice(iCanceled + 1);
+    expect(after.some((e) => e.type === 'file-done')).toBe(false);
+    expect(after.some((e) => e.type === 'progress')).toBe(false);
+    expect(after.some((e) => e.type === 'completed')).toBe(false);
+
+    // The critical assertion: the real rename happened (finalizeReceivedFile
+    // really ran), but the fix must undo it — no file at the final destination.
+    expect(existsSync(join(dest, 'r3.bin'))).toBe(false);
+    // Resumability preserved: the bytes aren't lost, just left as a complete
+    // .part (mirrors the existing "leave the .part in place for resume"
+    // contract), NOT deleted outright.
+    expect(existsSync(join(dest, 'r3.bin.part'))).toBe(true);
+    expect(readFileSync(join(dest, 'r3.bin.part'))).toEqual(payload);
+  } finally {
+    spy.mockRestore();
+  }
 });
