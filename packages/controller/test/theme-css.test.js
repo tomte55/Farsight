@@ -34,6 +34,17 @@ test('renderer links farsight.css via the packaging-safe ../shared path', () => 
 // not exclude, so `.card` still matches even after the bare `.card` rule is
 // deleted. Verified by mutation-testing that regex directly against this file
 // before writing the version below.
+//
+// SECOND FIX (this round): the previous version split each selector-list entry
+// on *all* whitespace and credited every resulting piece — so a descendant rule
+// like `.xfer-row .host-main { ... }` wrongly credited `.host-main` as though it
+// had its own standalone rule, even after the real `.host-main { ... }` rule was
+// deleted. A selector is only "defined" by a rule whose HEAD it is — the
+// leftmost compound of a selector-list entry — not by appearing anywhere inside
+// a descendant/child/sibling combinator chain. So each selector-list entry is
+// now split on combinators (descendant space, `>`, `+`, `~`) and only the FIRST
+// piece (the head) is added to the token set; everything after the first
+// combinator is discarded, not credited.
 function definedSelectors(css) {
   const noComments = css.replace(/\/\*[\s\S]*?\*\//g, '');
   const tokens = new Set();
@@ -41,10 +52,12 @@ function definedSelectors(css) {
     for (const rawSelector of rule[1].split(',')) {
       const selector = rawSelector.trim();
       if (!selector) continue;
-      for (const token of selector.split(/\s+/)) {
-        if (token === '>' || token === '+' || token === '~' || token === '') continue;
-        tokens.add(token);
-      }
+      // Split on combinators (descendant space, >, +, ~) and keep only the
+      // leftmost compound — the rule's head. Collapse `>`/`+`/`~` to a single
+      // separator alongside whitespace so `.stack > * + *` splits into
+      // ['.stack', '*', '*'] and we take just '.stack'.
+      const head = selector.split(/\s*[>+~]\s*|\s+/)[0];
+      if (head) tokens.add(head);
     }
   }
   return tokens;
