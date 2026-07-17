@@ -147,6 +147,44 @@ test('loopback send -> receive through the service layer lands files byte-identi
   expect(sendRec.peer).toEqual({ id: 'device-t1' });
 });
 
+test('transferDir may be a function, resolved per receive (not captured at construction)', async () => {
+  // The controller passes a function so a Settings change to the received-files
+  // folder takes effect on the NEXT transfer without recreating the service.
+  const destA = tmp();
+  const destB = tmp();
+  let current = destA;
+  const recvSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: () => current, consent: async () => true,
+    openChannel: async () => ({ channel: recvSide, close: async () => {} }),
+    receiveCloseGraceMs: 0,
+  });
+
+  let recvSide; // set per round below
+  async function oneRound(expectRoot) {
+    const src = join(tmp(), 'payload');
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, 'x.bin'), Buffer.alloc(2048, 7));
+    const { entries, sources } = await walkSource([{ path: src }]);
+    const manifest = buildManifestReal(entries);
+    const { sideA, sideB } = loopback();
+    recvSide = sideB;
+    const sendSvc = createTransferService({
+      store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+      openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    });
+    const recvPromise = recvSvc.startReceive({ rendezvous: 'r' });
+    const sendResult = await sendSvc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'd', password: 'p' } });
+    const recvResult = await recvPromise;
+    expect(sendResult.ok).toBe(true);
+    expect(recvResult.ok).toBe(true);
+    for (const e of manifest.entries) expect(existsSync(join(expectRoot, ...e.path.split('/')))).toBe(true);
+  }
+
+  await oneRound(destA);   // resolves () => destA
+  current = destB;         // change the setting between transfers
+  await oneRound(destB);   // must land in destB, proving per-receive resolution
+});
+
 test('a receive surfaces the manifest on accept so the UI can label it before any Refresh', async () => {
   // Field bug: just after a transfer started, the RECEIVER's panel showed no
   // file/folder name until the user hit Refresh. The receiver's live events

@@ -412,7 +412,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
         return ok;
       };
       const receiver = createReceiver({
-        channel: tapped, destRoot: transferDir, store, consent: receiveConsent,
+        channel: tapped, destRoot: (typeof transferDir === 'function' ? transferDir() : transferDir), store, consent: receiveConsent,
         getTier: () => resolvedTier || 'adhoc',
         onEvent: (ev) => emit(currentJobId, 'recv', ev),
       });
