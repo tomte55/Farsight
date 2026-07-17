@@ -120,8 +120,44 @@ function getJobsStore() {
 // Where received files land. A discoverable, user-owned location (Downloads/
 // Farsight/Received) — not a hidden userData folder — since the whole point of
 // receiving is that the user then opens the files. Mirrors the retired host.
-function receivedFilesDir() {
+// The user can override the folder in Settings; the value is config-backed and
+// resolved PER RECEIVE (see ensureReceivedFilesDir passed to the transfer
+// service), so a change takes effect on the next transfer.
+function defaultReceivedFilesDir() {
   return path.join(app.getPath('downloads'), 'Farsight', 'Received');
+}
+function receivedFilesDir() {
+  const stored = readStoredConfig();
+  const chosen = stored.receivedFilesDir;
+  // Fail safe to the default on anything unusable (unset/relative/garbage) so a
+  // corrupt config can never point transfers at a nonsensical location.
+  if (typeof chosen === 'string' && chosen.trim() !== '' && path.isAbsolute(chosen)) return chosen;
+  return defaultReceivedFilesDir();
+}
+// Resolve AND create the destination; passed as `transferDir` to the transfer
+// service so each receive lands in (and lazily creates) the CURRENT folder.
+function ensureReceivedFilesDir() {
+  const d = receivedFilesDir();
+  try { nodeFs.mkdirSync(d, { recursive: true }); } catch (err) { log?.child('transfer').warn(`could not create received-files dir: ${err.message}`); }
+  return d;
+}
+// Free bytes available to the user on the destination volume. The dir may not
+// exist yet (created lazily at receive), so statfs the nearest existing ancestor
+// — volume free space is identical for any path on that volume. null on failure
+// (the UI then shows the path with no space line and never blocks on it).
+function freeBytesAt(startDir) {
+  let d = startDir;
+  for (let i = 0; i < 40; i++) {
+    try {
+      const s = nodeFs.statfsSync(d);
+      return s.bavail * s.bsize;
+    } catch {
+      const parent = path.dirname(d);
+      if (parent === d) return null;
+      d = parent;
+    }
+  }
+  return null;
 }
 
 // Consent round-trip for an INCOMING transfer (v2: the unified app can now
@@ -136,7 +172,8 @@ function requestReceiveConsent({ jobId, manifest }) {
   return new Promise((resolve) => {
     if (!mainWindow || mainWindow.isDestroyed()) { resolve(false); return; }
     pendingConsent.set(jobId, resolve);
-    mainWindow.webContents.send('transfer:consent-request', { jobId, manifest, destDir: receivedFilesDir() });
+    const destDir = receivedFilesDir();
+    mainWindow.webContents.send('transfer:consent-request', { jobId, manifest, destDir, freeBytes: freeBytesAt(destDir) });
     // Surface the prompt: the app is a tray app that may be hidden/covered, and an
     // unseen prompt is a silently-dropped transfer (same reasoning as an incoming
     // control CONNECT).
@@ -155,11 +192,12 @@ ipcMain.on('transfer:respond-consent', (_e, input) => {
 let transferService = null;
 function getTransferService() {
   if (!transferService) {
-    const recvDir = receivedFilesDir();
-    try { nodeFs.mkdirSync(recvDir, { recursive: true }); } catch (err) { log?.child('transfer').warn(`could not create received-files dir: ${err.message}`); }
+    // transferDir is the ensure-function, not a captured string: each receive
+    // resolves + creates the CURRENT configured folder (so a Settings change
+    // takes effect on the next transfer without recreating the service).
     transferService = createTransferService({
       store: getJobsStore(),
-      transferDir: recvDir,
+      transferDir: ensureReceivedFilesDir,
       consent: requestReceiveConsent,
       // Canonical rendezvous shape (SP3 coherence contract #1), identical to
       // the host's openChannel: transfer-service always calls this as
@@ -338,6 +376,27 @@ ipcMain.handle('set-signaling-url', (_e, url) => {
   } catch (err) {
     return { ok: false, error: err.message };
   }
+});
+
+// Received-files folder: read the current resolved path, let the user pick a new
+// one (persisted), or reset to the Downloads default. All writes MERGE onto the
+// stored config (a bare write would clobber signalingUrl/controlAllowed).
+ipcMain.handle('received-dir:get', () => receivedFilesDir());
+ipcMain.handle('received-dir:choose', async () => {
+  const r = await dialog.showOpenDialog(mainWindow || undefined, {
+    title: 'Choose where received files are saved',
+    defaultPath: receivedFilesDir(),
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (r.canceled || !r.filePaths || !r.filePaths[0]) return { ok: false, path: receivedFilesDir() };
+  const chosen = r.filePaths[0];
+  writeFileSync(configFilePath(), serializeConfig({ ...readStoredConfig(), receivedFilesDir: chosen }), { encoding: 'utf8', mode: 0o600 });
+  return { ok: true, path: chosen };
+});
+ipcMain.handle('received-dir:reset', () => {
+  const { receivedFilesDir: _drop, ...rest } = readStoredConfig();
+  writeFileSync(configFilePath(), serializeConfig(rest), { encoding: 'utf8', mode: 0o600 });
+  return { ok: true, path: receivedFilesDir() };
 });
 
 // "Allow this computer to be controlled" — persisted, receiver-side-enforced
