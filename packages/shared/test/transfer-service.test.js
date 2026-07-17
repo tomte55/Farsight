@@ -294,6 +294,30 @@ test('review fix: a peerAuth that never resolves (classifyPublicKey stuck) times
   expect(consentCalled).toBe(true); // timed out → fell through to prompt, did not hang, did not auto-accept
 });
 
+test('SP3 P4: startReceive threads the verified peer tier into the persisted receive record', async () => {
+  // The receiver hardcoded tier:'adhoc', so a stalled own-fleet/contact receive
+  // recorded a permanent 'error' even though the SENDER auto-resumes it.
+  const { manifest, sources } = await oneFileSource();
+  const dest = tmp();
+  const { sideA, sideB } = loopback();
+  const recvStore = createJobsStore({ dir: tmp() });
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: dest, consent: async () => true,
+    openChannel: async () => ({ channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact' }) }),
+    receiveCloseGraceMs: 0,
+  });
+  const senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+  });
+  const recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's', linked: true } });
+  await senderSvc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'dev', linked: true } });
+  await recvPromise;
+  const records = await recvStore.list();
+  expect(records.length).toBeGreaterThan(0);
+  expect(records.every((r) => r.tier === 'contact')).toBe(true); // was hardcoded 'adhoc'
+});
+
 test('SP3 P4: the resume watcher re-walks sourceRoots and re-sends an interrupted own-fleet job to completion', async () => {
   const srcDir = tmp();
   const srcFile = join(srcDir, 'resume-me.txt');

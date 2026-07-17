@@ -583,3 +583,94 @@ test('sender emits throttled progress events as chunks go out', async () => {
   expect(prog.length).toBeGreaterThan(1);
   expect(prog[prog.length - 1].progress.sent).toBeGreaterThan(0);
 });
+
+// SP3 P4: real receiver terminal events + tier-aware interrupted persistence.
+
+test('receiver emits a real completed event when it acks delivery', async () => {
+  const dest = tmp();
+  const payload = Buffer.from('done-bytes'.repeat(20));
+  const hash = createHash('sha256').update(payload).digest('hex');
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; } };
+  const events = [];
+  const rx = createReceiver({ channel: ch, destRoot: dest, store: memStore(), consent: async () => true, onEvent: (ev) => events.push(ev) });
+  const done = rx.start();
+  await recvCtrl(offerFrame({ jobId: 'c1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvBulk(payload);
+  await recvCtrl(fileEndFrame({ jobId: 'c1', fileId: 0, hash }));
+  await recvCtrl(jobDoneFrame({ jobId: 'c1' }));
+  await done;
+  const completed = events.filter((e) => e.type === 'completed');
+  expect(completed.length).toBe(1); // the UI no longer has to infer this from fraction >= 1
+  expect(completed[0].ok).toBe(true);
+  expect(completed[0].progress.fraction).toBe(1);
+});
+
+test('receiver persists the REAL tier, not a hardcoded adhoc', async () => {
+  const dest = tmp();
+  const payload = Buffer.from('tiered'.repeat(20));
+  const hash = createHash('sha256').update(payload).digest('hex');
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; } };
+  const store = memStore();
+  const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true, getTier: () => 'contact' });
+  const done = rx.start();
+  await recvCtrl(offerFrame({ jobId: 't1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvBulk(payload);
+  await recvCtrl(fileEndFrame({ jobId: 't1', fileId: 0, hash }));
+  await recvCtrl(jobDoneFrame({ jobId: 't1' }));
+  await done;
+  expect(store.saved.length).toBeGreaterThan(0);
+  expect(store.saved.every((r) => r.tier === 'contact')).toBe(true);
+});
+
+test('a stalled fleet receive persists interrupted (resumable), not a permanent error', async () => {
+  const dest = tmp();
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 100, mtime: 1700000000000 }], totalBytes: 100, totalFiles: 1 };
+  let recvCtrl = () => {};
+  const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk() {} };
+  const events = [];
+  const store = memStore();
+  // Capture the watchdog timer instead of waiting on a real one (the file's
+  // established pattern — see the completionTimeoutMs test at :160-172).
+  let fire = null;
+  const setTimer = (fn) => { fire = fn; return { unref() {} }; };
+  const rx = createReceiver({
+    channel: ch, destRoot: dest, store, consent: async () => true,
+    getTier: () => 'fleet', inactivityMs: 10, setTimer, clearTimer: () => {},
+    onEvent: (ev) => events.push(ev),
+  });
+  const settled = rx.start().catch((e) => e.message);
+  await recvCtrl(offerFrame({ jobId: 'i1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await until(() => typeof fire === 'function'); // watchdog armed at accept
+  fire(); // the sender went silent
+  expect(await settled).toBe('stalled');
+  const interrupted = events.find((e) => e.type === 'interrupted');
+  expect(interrupted.resumable).toBe(true); // the sender's resume watcher WILL re-establish this jobId
+  expect(store.saved[store.saved.length - 1].jobState).toBe('interrupted');
+});
+
+test('a stalled adhoc receive stays a terminal error (nothing will resume it)', async () => {
+  const dest = tmp();
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 100, mtime: 1700000000000 }], totalBytes: 100, totalFiles: 1 };
+  let recvCtrl = () => {};
+  const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk() {} };
+  const events = [];
+  const store = memStore();
+  let fire = null;
+  const setTimer = (fn) => { fire = fn; return { unref() {} }; };
+  const rx = createReceiver({
+    channel: ch, destRoot: dest, store, consent: async () => true,
+    getTier: () => 'adhoc', inactivityMs: 10, setTimer, clearTimer: () => {},
+    onEvent: (ev) => events.push(ev),
+  });
+  const settled = rx.start().catch((e) => e.message);
+  await recvCtrl(offerFrame({ jobId: 'i2', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await until(() => typeof fire === 'function');
+  fire();
+  expect(await settled).toBe('stalled');
+  expect(events.find((e) => e.type === 'interrupted').resumable).toBe(false);
+  expect(store.saved[store.saved.length - 1].jobState).toBe('error');
+});

@@ -164,6 +164,11 @@ async function resumeOffsetFor(destRoot, entry) {
 
 export function createReceiver({
   channel, destRoot, store, consent, peer = {}, onEvent = () => {},
+  // The receiver learns its peer's trust tier only AFTER the consent classify
+  // resolves, so it's read lazily. It decides whether a stall is recoverable:
+  // fleet/contact sends auto-resume (the SENDER's resume watcher re-establishes
+  // with the same jobId), adhoc does not.
+  getTier = () => 'adhoc',
   // A consented, active receive that stops getting data (the sender vanished /
   // the connection dropped) must NOT hang "Receiving" forever — after this long
   // with no ctrl/bulk frame, fail it and persist the terminal state so the UI
@@ -205,8 +210,13 @@ export function createReceiver({
     inactive = setTimer(() => run(async () => {
       if (settled) return;
       ok = false;
-      try { await saveRecord('error'); } catch { /* best effort */ }
-      onEvent({ type: 'interrupted' });
+      // fleet/contact: the sender auto-resumes this same jobId, so this is a
+      // recoverable pause, not a failure — persist 'interrupted' so a refresh
+      // (and the UI) says "reconnecting", not "Failed". adhoc has no resume path.
+      const tier = getTier();
+      const resumable = tier === 'fleet' || tier === 'contact';
+      try { await saveRecord(resumable ? 'interrupted' : 'error'); } catch { /* best effort */ }
+      onEvent({ type: 'interrupted', resumable });
       fail(new Error('stalled'));
     }), inactivityMs);
     if (inactive && inactive.unref) inactive.unref();
@@ -237,6 +247,10 @@ export function createReceiver({
       // without it the sender would tear the channel down mid-drain). Best effort:
       // if the ack is lost the sender falls back to its completion timeout.
       try { channel.sendCtrl(completeFrame({ jobId, ok })); } catch { /* best effort */ }
+      // The receiver's own terminal event. Without it the UI has to INFER done
+      // from fraction >= 1, which fires early (last file verified, job_done not yet
+      // seen) and fires instantly for a fully-resumed job.
+      onEvent({ type: 'completed', ok, progress: job ? job.progress() : undefined });
       resolveOnce({ jobId, ok });
     }
   }
@@ -255,7 +269,7 @@ export function createReceiver({
   async function saveRecord(jobState) {
     if (!store || !manifest) return;
     await store.save({
-      jobId, dir: 'recv', tier: 'adhoc', peer, destRoot,
+      jobId, dir: 'recv', tier: getTier() || 'adhoc', peer, destRoot,
       manifest,
       perFile: perFileSnapshot(),
       jobState, createdAt: 0,
@@ -406,6 +420,9 @@ export function createReceiver({
       if (item) { job.onFileEnd({ fileId: f.fileId }); item.hash = f.hash; await tryFinalize(item); }
     } else if (f.t === 'job_done') {
       jobDoneSeen = true;
+      // All bytes are in but hashes are still being verified/finalized — a real,
+      // visible phase on a big transfer, not a stall.
+      if (pending.size > 0) onEvent({ type: 'verifying', progress: job ? job.progress() : undefined });
       await maybeComplete();
     }
   }));

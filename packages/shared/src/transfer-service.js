@@ -260,6 +260,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // against auth.sovexa.org) — race it against a timeout so a stalled/offline
       // auth server can't hang the receive forever. Fail-closed means falling
       // through to the human `consent` prompt, never auto-accepting.
+      let resolvedTier = null; // set by the consent classify below; read lazily by the receiver
       const receiveConsent = async ({ jobId, manifest }) => {
         let tier = null;
         try {
@@ -273,11 +274,13 @@ export function createTransferService({ store, transferDir, consent, openChannel
             }
           }
         } catch { tier = null; }
+        resolvedTier = tier;
         if (tier === 'fleet') return true;   // own-fleet auto-accepts; contact/adhoc/timeout → prompt
         return consent({ jobId, manifest });
       };
       const receiver = createReceiver({
         channel: tapped, destRoot: transferDir, store, consent: receiveConsent,
+        getTier: () => resolvedTier || 'adhoc',
         onEvent: (ev) => emit(currentJobId, 'recv', ev),
       });
       try {
