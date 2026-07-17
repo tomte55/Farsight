@@ -1,12 +1,12 @@
 # Self-hosting Farsight
 
 Farsight has no shared, baked-in server — you run your own signaling server and TURN relay,
-and point the host + controller apps at them. This guide covers a from-scratch deployment.
+and point the Farsight app at them. This guide covers a from-scratch deployment.
 
 ## What you're deploying
 
 - **Signaling server** (`packages/signaling-server`) — a small Node `ws` process, run in
-  Docker, that brokers the WebRTC handshake (host/controller pairing, password auth,
+  Docker, that brokers the WebRTC handshake (peer pairing, password auth,
   rate-limiting). It's the only piece of Farsight that needs to be reachable from the
   internet.
 - **coturn** (`infra/coturn`) — a TURN relay used as a fallback when a direct peer-to-peer
@@ -98,9 +98,9 @@ Before your first run, open these on your firewall/router (forwarded to the serv
 Re-running `deploy.sh` rotates the TURN secret and restarts both coturn and the signaling
 server to pick it up — safe to do periodically.
 
-## 5. Point the apps at your server
+## 5. Point the app at your server
 
-Farsight's host and controller apps have no baked-in signaling server. On first run, each app
+The Farsight app has no baked-in signaling server. On first run, it
 prompts for a signaling URL — enter:
 
 ```
@@ -142,13 +142,13 @@ ACCOUNT_DIAGNOSTICS_TTL_DAYS=30   # optional; default 30 if unset or invalid
 Farsight's installers ship unsigned by default (see `docs/SECURITY.md`). The release workflow
 (`.github/workflows/release.yml`) does NOT pass `CSC_LINK` / `CSC_KEY_PASSWORD` through to
 electron-builder by default — electron-builder 24.x treats an empty `CSC_LINK` as a set-but-invalid
-cert path and fails the build, so the two build steps intentionally leave those vars unset. To
+cert path and fails the build, so the build step intentionally leaves those vars unset. To
 enable signing:
 
 1. Add two repo secrets: `CSC_LINK` (a base64-encoded `.pfx` code-signing certificate) and
    `CSC_KEY_PASSWORD` (the certificate's password).
-2. Add an `env:` block with those two vars to the "Build host installer" and "Build controller
-   installer" steps in `.github/workflows/release.yml` (see the comment above those steps).
+2. Add an `env:` block with those two vars to the "Build Farsight installer" step in
+   `.github/workflows/release.yml` (see the comment above that step).
 
 Only once both the secrets exist and the workflow is updated will electron-builder sign the
 installers; until then, builds remain unsigned.
