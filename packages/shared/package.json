@@ -33,6 +33,7 @@
     "./transfer-chunk": "./src/transfer-chunk.js",
     "./transfer-send-pool": "./src/transfer-send-pool.js",
     "./transfer-ranges": "./src/transfer-ranges.js",
+    "./transfer-reconcile": "./src/transfer-reconcile.js",
     "./transfer-receive-router": "./src/transfer-receive-router.js",
     "./transfer-producer": "./src/transfer-producer.js",
     "./transfer-io": "./src/transfer-io.js",
