@@ -1320,3 +1320,13 @@ function refreshSettingsView() {
 renderRail();
 renderStatusBar();
 refreshSignalingUrl();
+
+// Positive-proof marker for test/shell-launch.probe.mjs. Set LAST, so its presence
+// means every import above resolved AND the module ran to completion. CLAUDE.md:
+// Electron's console-message does not fire on an ES-module resolution failure, so
+// absence of errors proves nothing — only a value like this does.
+window.__farsightShellReady = {
+  pages: [...pageEls.keys()],
+  railItems: railEl.children.length,
+  statusSegments: statusbarEl.children.length,
+};
