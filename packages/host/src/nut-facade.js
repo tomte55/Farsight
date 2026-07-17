@@ -22,7 +22,16 @@ const KEY_MAP = {
 };
 
 export function createNutFacade({ log = noopLog() } = {}) {
+  // Both auto-delays MUST be zeroed. nut.js defaults keyboard.autoDelayMs to 300 and
+  // awaits sleep(autoDelayMs) BEFORE every pressKey/releaseKey and every char of type()
+  // — 300ms per printable char, 600ms per mapped key's down/up pair. The injector
+  // serializes all events through one promise chain, so under sustained typing those
+  // sleeps compound into an ever-growing backlog rather than a fixed lag. The mouse
+  // never showed this (MouseClass hardcodes setMouseDelay(0); setPosition never sleeps),
+  // which is why the symptom was "typing lags, mouse is snappy".
+  // Pinned by test/nut-facade.test.js.
   mouse.config.autoDelayMs = 0; // low latency
+  keyboard.config.autoDelayMs = 0; // low latency
   // Wraps a native op so a failure is logged (message only) and re-thrown — the
   // injector's own enqueue chain also logs an 'injection failed' breadcrumb at
   // its scope, so the failure is visible from both the 'nut' and 'injector' logs.
