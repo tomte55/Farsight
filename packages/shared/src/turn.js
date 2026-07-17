@@ -1,9 +1,9 @@
 // packages/shared/src/turn.js
 import { createHmac } from 'node:crypto';
 
-export function makeTurnCredential({ secret, ttlSeconds, now = () => Date.now() }) {
+export function makeTurnCredential({ secret, ttlSeconds, now = () => Date.now(), flowIndex }) {
   const expiry = Math.floor(now() / 1000) + ttlSeconds;
-  const username = String(expiry);
+  const username = Number.isInteger(flowIndex) && flowIndex >= 0 ? `${expiry}:${flowIndex}` : String(expiry);
   const credential = createHmac('sha1', secret).update(username).digest('base64');
   return { username, credential };
 }
