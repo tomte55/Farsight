@@ -170,13 +170,31 @@ function renderControlUi() {
   if (hostCredentialsEl) hostCredentialsEl.hidden = !controlAllowed;
 }
 
+// Positive-proof marker sync (test/host-capability.probe.mjs): the marker
+// object literal at the bottom of this file is set once, synchronously, on
+// module load — but controlAllowed and hostRegistering only become known
+// asynchronously (getControlAllowed() is an IPC round-trip, and registration
+// itself is gated on it). Rather than block the marker assignment, the async
+// registration path writes these two fields onto the already-published marker
+// every time either changes; the probe polls for them. Guarded by a presence
+// check because early calls (e.g. a stray stopHostRegistration before launch
+// eager-init runs) could in principle race the marker's own assignment —
+// in practice they can't (see the comment at the marker itself), but the
+// guard costs nothing and keeps this function safe to call from anywhere.
+function syncHostMarker() {
+  if (!window.__farsightShellReady) return;
+  window.__farsightShellReady.controlAllowed = controlAllowed;
+  window.__farsightShellReady.hostRegistering = !!hostSignal;
+}
+
 // Re-read the persisted setting and converge registration state to it. Called
 // on launch (once signalingUrl is known) and whenever signaling reconfigures.
 async function refreshHostRegistration() {
   controlAllowed = await window.farsightIpc.getControlAllowed();
   renderControlUi();
-  if (controlAllowed) startHostRegistration();
+  if (controlAllowed) await startHostRegistration();
   else stopHostRegistration();
+  syncHostMarker();
 }
 
 if (controlToggleEl) {
@@ -184,8 +202,9 @@ if (controlToggleEl) {
     controlAllowed = controlToggleEl.checked;
     await window.farsightIpc.setControlAllowed(controlAllowed);
     renderControlUi();
-    if (controlAllowed) startHostRegistration();
+    if (controlAllowed) await startHostRegistration();
     else stopHostRegistration();
+    syncHostMarker();
   });
 }
 document.getElementById('cred-regen')?.addEventListener('click', async () => {
@@ -1415,12 +1434,28 @@ renderRail();
 renderStatusBar();
 refreshSignalingUrl();
 
-// Positive-proof marker for test/shell-launch.probe.mjs. Set LAST, so its presence
+// Positive-proof marker for test/shell-launch.probe.mjs (extended by
+// test/host-capability.probe.mjs — unification step 3, Task 9 — to also prove
+// the shell wires up "this machine as a host"). Set LAST, so its presence
 // means every import above resolved AND the module ran to completion. CLAUDE.md:
 // Electron's console-message does not fire on an ES-module resolution failure, so
 // absence of errors proves nothing — only a value like this does.
+//
+// hasCredentialUi/hasConsentModal/hasControlToggle are synchronous DOM-presence
+// checks — cheap and correct to compute right here. controlAllowed and
+// hostRegistering are NOT known yet at this point (getControlAllowed() is an
+// async IPC round-trip that refreshSignalingUrl()/refreshHostRegistration()
+// above are still mid-flight on) — they start out null/false and syncHostMarker()
+// (see above) overwrites them on this same object once the async registration
+// path resolves and again on every later toggle. The probe polls for the
+// non-null value rather than trusting whatever is here at first read.
 window.__farsightShellReady = {
   pages: [...pageEls.keys()],
   railItems: railEl.children.length,
   statusSegments: statusbarEl.children.length,
+  hasCredentialUi: !!(credIdEl && credPwEl && hostCredentialsEl),
+  hasConsentModal: !!consentEl,
+  hasControlToggle: !!controlToggleEl,
+  controlAllowed: null,
+  hostRegistering: false,
 };
