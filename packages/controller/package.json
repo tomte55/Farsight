@@ -8,7 +8,8 @@
     "start": "electron .",
     "predist": "node ../../scripts/vendor-shared.mjs",
     "dist": "electron-builder --config electron-builder.yml --publish never",
-    "probe:shell": "node test/shell-launch.probe.mjs"
+    "probe:shell": "node test/shell-launch.probe.mjs",
+    "probe:session": "node test/session-launch.probe.mjs"
   },
   "dependencies": {
     "@farsight/shared": "*",
