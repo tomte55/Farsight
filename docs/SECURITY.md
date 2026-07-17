@@ -32,6 +32,43 @@ Optional high-assurance mitigation (deferred, non-blocking): derive a Short Auth
 String from each peer's DTLS certificate fingerprint, display it on both ends, and compare
 out-of-band to detect a MITM.
 
+## Unified-app control reachability (R-9)
+
+Before the unification, only the dedicated host app had an inbound control surface — a plain
+controller install could not be connected to at all. Merging host capability into the unified
+app (host + controller + file-share in one) changes that: **every unified install can register
+with signaling and be controlled**, not just machines the maintainer deliberately set up as hosts.
+
+The mitigation is a receiver-side, persisted setting, **"Allow this computer to be controlled"**
+(`controlAllowed` in `config.json`, **default on** when unset). When off, the app never creates the
+host-registration signaling client in the first place — it does not register with signaling at
+all, so there is nothing to connect to (fails closed, not merely UI-hidden). Toggling the setting
+off while a session is already active immediately ends that session
+(`endSessionByHost('control_disabled', …)`) rather than leaving it running unmanaged.
+
+Being registered and reachable does not by itself mean controllable — an inbound connect still has
+to clear the pre-existing layers, unchanged by unification:
+- **Ad-hoc (id + password):** the rotating 6-character session password (regenerated hourly and on
+  demand), signaling's password check with rate-limited lockout and per-IP DoS limits, and the
+  **attended consent prompt** on the receiving install (explicit "Allow" required; no auto-accept).
+- **Own-fleet linked:** no session password and no per-connect prompt — the account login on the
+  receiving machine is the standing consent (see "Connect-from-console" below) — but input stays
+  blocked until the mutual device-keypair handshake completes (`session.isActive() && (!linkedConnect
+  || peerAuthed)`). `conn-auth:is-account-key` checks only the signed-in owner's own enrolled fleet
+  (`isAccountPublicKey`) and is intentionally never widened to contacts: a file-transfer contact
+  cannot use that trust tier to remote-control a machine.
+- The **panic hotkey** (Ctrl+Alt+F12) ends any session from the receiving side regardless of path.
+
+The unified app now runs as a tray app (closing the window hides it to the tray instead of quitting)
+so it stays reachable for legitimate use — the same property that keeps the control surface live is
+what makes the "Allow this computer to be controlled" toggle the operative control, not app exit.
+
+**Accepted residual risk:** because the toggle defaults on, a freshly installed unified app is
+control-reachable out of the box, gated by the password + attended consent (ad-hoc) or the
+device-keypair handshake (own fleet) — never bare. The maintainer's practice is to turn the toggle
+off on machines that should never be driven (e.g., installs that only send/receive files or only
+act as a controller).
+
 ## Connect-from-console (account-linked device-keypair auth)
 
 For your own account-linked fleet, the console can connect **without a session password**. This does
