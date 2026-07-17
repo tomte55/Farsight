@@ -18,9 +18,28 @@
 /* Home page: this-computer credentials card + the "Allow this computer to be
    controlled" toggle (unification step 3, task 6). */
 #host-card { margin-top: 20px; }
-.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; cursor: pointer; }
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; cursor: pointer; }
 .toggle-row .lbl { margin-bottom: 0; }
 #host-credentials[hidden] { display: none; }
+
+/* Slate Console: the control-allowed checkbox rendered as a SQUARE teal switch
+   (matches the console preview — minimal radius, not a rounded pill). The native
+   checkbox is restyled, not replaced, so its checked state stays the source of
+   truth for control-toggle wiring. */
+#control-allowed-toggle {
+  appearance: none; -webkit-appearance: none; margin: 0; flex: 0 0 auto;
+  width: 38px; height: 21px; border-radius: 4px; cursor: pointer;
+  background: var(--panel2); border: 1px solid var(--line);
+  position: relative; transition: background .15s ease, border-color .15s ease;
+}
+#control-allowed-toggle::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 15px; height: 15px; border-radius: 3px; background: #c6c8d4;
+  transition: transform .15s ease, background .15s ease;
+}
+#control-allowed-toggle:checked { background: var(--go); border-color: var(--go); }
+#control-allowed-toggle:checked::after { transform: translateX(17px); background: #eafff8; }
+#control-allowed-toggle:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--go-bg); }
 
 /* Task 7 (inbound remote control): the panic-hotkey-unavailable warning is a
    flex child of #shell, sitting above the persistent status bar rather than a
@@ -35,7 +54,28 @@
 #hosted-session-bar[hidden] { display: none; }
 #hosted-session-disconnect { padding: 4px 12px; }
 
-/* The consent modal reuses .overlay/.veil/.card from farsight.css; only its
-   width is specific to this window (unconstrained, a .card would stretch to
-   fill the centering grid cell). */
-#consent .card { width: 360px; max-width: 92vw; }
+/* Both modals (control consent + incoming-transfer consent) reuse
+   .overlay/.veil/.card from farsight.css; only their width is specific here (an
+   unconstrained .card would stretch to fill the centering grid cell).
+   position:relative is LOAD-BEARING, not cosmetic: .veil is position:absolute,
+   so in CSS painting order it renders on top of a static in-flow sibling. A
+   static .card would sit UNDER the veil — blurred by its backdrop-filter and
+   with every button click swallowed by the veil. Making the card positioned
+   (same trick as .toast) lifts it above the veil. Guarded by
+   test/consent-overlay-css.test.js. */
+#consent .card, #transfer-consent .card { position: relative; width: 360px; max-width: 92vw; }
+
+/* Incoming-transfer consent modal (receive path). Wider than the yes/no control
+   prompt because it previews a file tree, which can be long — so cap its height
+   and let the tree scroll inside the card, never the page. Inline styles are
+   forbidden here (CSP style-src 'self'), so the host's inline rules are promoted
+   to real classes. */
+#transfer-consent .card { width: 460px; }
+.xfer-consent-strong { color: var(--ink); font-weight: 600; }
+.xfer-consent-dest { font-family: var(--mono); word-break: break-all; }
+.xfer-consent-actions { margin-top: 14px; }
+.xfer-tree-wrap { max-height: 260px; overflow-y: auto; background: var(--bg2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; margin-top: 4px; }
+.xfer-tree, .xfer-tree ul { list-style: none; margin: 0; padding-left: 16px; font-size: 12.5px; }
+.xfer-tree { padding-left: 0; }
+.xfer-tree-dir { font-weight: 600; margin: 5px 0; }
+.xfer-tree-file { color: var(--sub); margin: 3px 0; font-family: var(--mono); font-size: 11.5px; }

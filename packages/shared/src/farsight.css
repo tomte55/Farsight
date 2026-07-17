@@ -2,15 +2,29 @@
    Aurora design language — shared by the host and controller renderers.
    Vendored to packages/<app>/src/shared/ by scripts/vendor-shared.mjs and
    linked as ../shared/farsight.css. No web fonts / remote assets (CSP-safe). */
+/* Slate Console — the design language chosen 2026-07-17 (Direction B). A cool,
+   technical slate ground with a teal "go" accent for interactive controls;
+   violet/blue stays the BRAND + progress hue (glyph, progress bars) so the two
+   never compete. Monospace carries technical values (IDs, device names,
+   metrics); dense rows with hairline dividers; small uppercase text buttons. */
 :root {
-  --bg: #12121c;
-  --bg2: #0d0d16;
-  --panel: #1b1b2b;
-  --line: #2a2a40;
-  --ink: #f2eeff;
-  --sub: #a7a3c4;
-  --acc: #7c5cff;
-  --acc2: #4aa8ff;
+  --bg: #0c0d13;         /* app ground */
+  --bg2: #090a0f;        /* rails, status bar, deepest chrome */
+  --panel: #14161d;      /* cards, menus */
+  --panel2: #0f1116;     /* inset fields inside a panel (chips, inputs) */
+  --line: #23262f;       /* primary hairline / border */
+  --line2: #1b1d25;      /* quieter divider between list rows */
+  --ink: #eef0f7;        /* primary text */
+  --sub: #9a9db4;        /* secondary text */
+  --sub2: #6f7288;       /* tertiary / metadata */
+  --acc: #7c5cff;        /* BRAND + progress (kept) */
+  --acc2: #4aa8ff;       /* BRAND gradient partner + progress */
+  --go: #2c8a72;         /* interactive action ("go"): muted teal-green fill (matches Slate Console preview) */
+  --go-ink: #eafff8;     /* text on a filled --go surface */
+  --go-dim: #8fe3d6;     /* --go as text on a dark ground */
+  --go-bg: rgba(44, 138, 114, .16);
+  --ok: #43d19e;         /* online / success */
+  --warn: #f0b429;
   --danger-ink: #ff8fa3;
   --danger-bg: #3a1620;
   --danger-line: #5a2030;
@@ -37,20 +51,28 @@ body {
 .wm .name { font-weight: 700; font-size: 15px; letter-spacing: .01em; }
 
 /* Labels + credential chips */
-.lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .13em; color: var(--sub); margin-bottom: 5px; }
+.lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .14em; color: var(--sub2); margin-bottom: 6px; }
+/* The value takes all slack (flex:1 on the FIRST child) so every action button
+   clusters on the right — fixes the old space-between bug where a chip with one
+   button right-aligned it but a chip with two (Copy + ↻) stranded them apart. */
 .chip {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 10px 13px; border-radius: 9px;
-  background: var(--panel); border: 1px solid var(--line);
-  font-family: var(--mono); font-size: 18px; font-weight: 600; letter-spacing: .05em;
-  margin-bottom: 13px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 8px 7px 12px; border-radius: 6px;
+  background: var(--panel2); border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 16px; font-weight: 600; letter-spacing: .07em;
+  margin-bottom: 12px;
 }
+.chip > :first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chip .cbtn {
-  font-family: system-ui, sans-serif; font-size: 11px; font-weight: 600;
-  padding: 4px 9px; border-radius: 6px; border: none; cursor: pointer;
-  background: #272740; color: #b3a4ff; -webkit-user-select: none; user-select: none;
+  flex: 0 0 auto;
+  font-family: system-ui, sans-serif; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .05em;
+  padding: 5px 10px; border-radius: 5px; cursor: pointer;
+  background: transparent; border: 1px solid var(--line); color: var(--sub);
+  -webkit-user-select: none; user-select: none;
 }
-.chip .cbtn:active { background: #33335a; }
+.chip .cbtn:hover { color: var(--go-dim); border-color: var(--go); }
+.chip .cbtn:active { background: var(--go-bg); }
 
 /* Status pills */
 .pill { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 999px; }
@@ -60,25 +82,41 @@ body {
 .pill.active { background: rgba(74,168,255,.16); color: #9ccaff; }
 .pill.active .pd { background: var(--acc2); }
 
-/* Buttons */
-.btn { border: none; border-radius: 9px; padding: 10px 16px; font-family: system-ui, sans-serif; font-size: 13px; font-weight: 700; cursor: pointer; }
-.btn-primary { background: linear-gradient(135deg, var(--acc), var(--acc2)); color: #fff; }
-.btn-ghost { background: transparent; border: 1px solid var(--line); color: var(--sub); }
-.btn-danger { background: var(--danger-bg); color: var(--danger-ink); border: 1px solid var(--danger-line); }
+/* Buttons — flat, borderless, uppercase text that lights up on hover (Slate
+   Console). Secondary/ghost share the base; primary is teal text; danger goes
+   red on hover. The one exception is a full-width CTA (.u-full), which gets a
+   solid teal fill so a page's main action still reads as the main action. */
+.btn {
+  border: 1px solid transparent; border-radius: 5px; padding: 6px 11px;
+  font-family: system-ui, sans-serif; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .06em; cursor: pointer;
+  background: transparent; color: var(--sub);
+}
+.btn:hover { background: #1b1e27; color: var(--ink); }
+.btn-primary { background: transparent; color: var(--go-dim); }
+.btn-primary:hover { background: var(--go-bg); color: #a9f4ea; }
+.btn-ghost { background: transparent; color: var(--sub); }
+.btn-ghost:hover { background: #1b1e27; color: var(--ink); }
+.btn-danger { background: transparent; color: var(--sub); }
+.btn-danger:hover { background: rgba(255, 143, 163, .10); color: var(--danger-ink); }
+/* A page's primary CTA (Connect on Home, Sign in) is full-width and filled so it
+   stays unmistakably the main action; row-level primaries stay flat teal text. */
+.btn-primary.u-full { background: var(--go); color: var(--go-ink); padding: 10px 16px; font-size: 12px; }
+.btn-primary.u-full:hover { background: #35a086; color: var(--go-ink); }
 
 /* Inputs */
 .input {
-  width: 100%; padding: 11px 13px; border-radius: 9px;
-  background: var(--panel); border: 1px solid var(--line); color: var(--ink);
+  width: 100%; padding: 10px 12px; border-radius: 6px;
+  background: var(--panel2); border: 1px solid var(--line); color: var(--ink);
   font-family: var(--mono); font-size: 14px; margin-bottom: 11px;
   -webkit-user-select: text; user-select: text;
 }
-.input::placeholder { color: #6a6785; }
-.input:focus { outline: none; border-color: var(--acc); }
+.input::placeholder { color: #5f6278; }
+.input:focus { outline: none; border-color: var(--go); box-shadow: 0 0 0 3px var(--go-bg); }
 
 /* Cards (consent panel / connect card) */
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 16px; }
-.card.attn { border-color: var(--acc); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+.card.attn { border-color: var(--go); }
 
 /* Status text line */
 .statusline { font-size: 12.5px; color: var(--sub); margin-top: 10px; }
@@ -169,20 +207,21 @@ body.in-session .cog, body.in-session .menu { display: none; }
 /* Rail — primary navigation. Was a cogwheel dropdown that mixed the product's four
    features in with "Open logs folder". */
 .rail {
-  width: 148px; flex: 0 0 auto; padding: 10px 8px;
+  width: 172px; flex: 0 0 auto; padding: 10px 8px;
   background: var(--bg2); border-right: 1px solid var(--line);
   display: flex; flex-direction: column;
 }
 .rail-item {
-  display: flex; align-items: center; gap: 9px;
-  padding: 8px 10px; margin-bottom: 2px; border-radius: 7px;
+  display: flex; align-items: center; gap: 11px;
+  padding: 10px 12px; margin-bottom: 2px; border-radius: 7px;
   background: transparent; border: none; width: 100%;
-  font: inherit; font-size: 12.5px; color: var(--sub);
+  font: inherit; font-size: 14px; color: var(--sub);
   text-align: left; cursor: pointer;
 }
-.rail-item:hover { background: var(--line); color: var(--ink); }
-.rail-item.sel { background: var(--line); color: var(--ink); font-weight: 600; }
-.rail-icon { width: 14px; text-align: center; opacity: .85; flex: 0 0 auto; }
+.rail-item:hover { background: #1b1e27; color: var(--ink); }
+/* Selected: quiet fill + a teal edge marker (the "you are here" tick). */
+.rail-item.sel { background: #1b1e27; color: var(--ink); font-weight: 600; box-shadow: inset 2px 0 0 var(--go); }
+.rail-icon { width: 20px; font-size: 17px; text-align: center; opacity: .9; flex: 0 0 auto; }
 .rail-badge {
   margin-left: auto; flex: 0 0 auto;
   background: var(--acc); color: #fff;
@@ -229,23 +268,38 @@ body.in-session .cog, body.in-session .menu { display: none; }
 /* Panel primitives promoted out of both apps' inline <style> blocks, where they
    were copy-pasted and drifted (fleet rendered .host-dot without the .on class
    that contacts used; 'Online' vs 'online'). */
-.host-row { display: flex; align-items: center; gap: 13px; padding: 11px 2px; border-top: 1px solid var(--line); }
+/* The row wraps: when the name + all the action buttons can't fit on one line
+   (an online, out-of-date device can show Update/Connect/Files/Folder/Remove),
+   the button group drops to its own line, right-aligned, instead of overflowing
+   and clashing with a long device name. host-main keeps a flex-basis so the name
+   stays readable and the buttons wrap down before it gets crushed to nothing. */
+/* Fleet / contacts rows — dense, single-line. Name is monospace (a device
+   identifier), meta is a small uppercase status line, actions cluster right and
+   wrap under only when a device genuinely has many (Update/Connect/Files/Folder/
+   Remove) on a narrow window. Online is a small square "tick", not a round dot. */
+.host-row { display: flex; align-items: center; gap: 4px 10px; padding: 8px 10px; border-top: 1px solid var(--line2); flex-wrap: wrap; }
 .host-row:first-child { border-top: none; }
-.host-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: transparent; box-shadow: inset 0 0 0 2px #3a3a52; }
-.host-row.online .host-dot { background: var(--acc2); box-shadow: 0 0 9px rgba(74, 168, 255, .65); }
-.host-main { flex: 1; min-width: 0; }
-.host-name { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.host-meta { font-size: 11px; color: var(--sub); margin-top: 3px; font-family: var(--mono); }
-.host-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.host-status { font-size: 11px; color: var(--sub); }
-.host-row.online .host-status { color: #9ccaff; }
-.host-badge { font-size: 9.5px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: rgba(240, 180, 41, .14); color: var(--warn, #f0b429); text-transform: uppercase; letter-spacing: .06em; }
+.host-dot { width: 7px; height: 7px; border-radius: 2px; flex-shrink: 0; background: #3a3f4c; transform: rotate(45deg); }
+/* Colour the tick when online — driven either by the row (.host-row.online, fleet)
+   or by the dot's own .on class (contacts). Keep both so neither panel regresses. */
+.host-row.online .host-dot, .host-dot.on { background: var(--ok); box-shadow: 0 0 7px rgba(67, 209, 158, .8); }
+.host-main { flex: 1 1 120px; min-width: 0; }
+.host-name { font-family: var(--mono); font-weight: 600; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-meta { font-size: 10px; color: var(--sub2); margin-top: 2px; text-transform: uppercase; letter-spacing: .07em; }
+.host-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
+.host-status { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--sub2); }
+.host-row.online .host-status { color: var(--go-dim); }
+.host-badge { font-size: 9px; font-weight: 700; padding: 3px 7px; border-radius: 4px; background: rgba(240, 180, 41, .14); color: var(--warn); text-transform: uppercase; letter-spacing: .07em; }
 .fleet-empty { text-align: center; color: var(--sub); font-size: 12.5px; padding: 28px 12px; line-height: 1.65; }
-.xfer-row { flex-direction: column; align-items: stretch; gap: 6px; }
+
+/* Transfer rows — a compact single row: content (name / thin bar / status)
+   flexes, the one action button sits beside it, vertically centred. Replaces the
+   old tall column card whose lone button floated in empty space. */
+.xfer-row { flex-direction: row; align-items: center; flex-wrap: nowrap; gap: 12px; }
 .xfer-row .host-main { display: flex; flex-direction: column; gap: 5px; }
-.xfer-row .host-right { justify-content: flex-end; }
-.xfer-bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
-.xfer-bar-fill { height: 100%; background: linear-gradient(135deg, var(--acc), var(--acc2)); transition: width .2s ease; }
+.xfer-row .host-right { justify-content: flex-end; flex: 0 0 auto; }
+.xfer-bar { height: 3px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.xfer-bar-fill { height: 100%; background: linear-gradient(90deg, var(--acc), var(--acc2)); transition: width .2s ease; }
 
 /* Utilities replacing inline style="..." attributes — required to retire
    style-src 'unsafe-inline' (a CSP hash covers <style> elements, NOT style
@@ -258,7 +312,7 @@ body.in-session .cog, body.in-session .menu { display: none; }
 .u-tight { margin-top: 0; }
 .u-mb16 { margin-bottom: 16px; }
 .u-hidden { display: none; }
-.linkbtn { background: none; border: none; color: var(--acc2); font: inherit; font-size: 12.5px; cursor: pointer; padding: 0; }
+.linkbtn { background: none; border: none; color: var(--go-dim); font: inherit; font-size: 12.5px; cursor: pointer; padding: 0; }
 .linkbtn:hover { text-decoration: underline; }
 .acct-links { display: flex; justify-content: space-between; margin-top: 13px; }
 .acct-opt { color: var(--sub); font-weight: 400; text-transform: none; letter-spacing: 0; }
