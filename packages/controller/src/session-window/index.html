@@ -1,0 +1,55 @@
+<!-- packages/controller/src/session-window/index.html -->
+<!doctype html>
+<meta charset="utf-8" />
+<!--
+  Strict CSP, hash-pinned like the transfer worker: the only inline script is the
+  import map below, allowed by its exact sha256 (no 'unsafe-inline'). Change the
+  import map and the hash MUST be recomputed — session-window-importmap.test.js
+  fails loudly if you forget. Runtime CSSOM writes (el.style.display, etc.) are
+  unaffected by style-src.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'sha256-PLACEHOLDER'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
+<title>Farsight — Remote session</title>
+<link rel="stylesheet" href="../shared/farsight.css" />
+<link rel="stylesheet" href="./session.css" />
+<script type="importmap">
+{
+  "imports": {
+    "@farsight/shared/protocol": "../shared/protocol.js",
+    "@farsight/shared/control-events": "../shared/control-events.js",
+    "@farsight/shared/credentials-format": "../shared/credentials-format.js",
+    "@farsight/shared/host-id": "../shared/host-id.js",
+    "@farsight/shared/version": "../shared/version.js",
+    "@farsight/shared/connection-auth": "../shared/connection-auth.js",
+    "@farsight/shared/connect-transcript": "../shared/connect-transcript.js",
+    "@farsight/shared/signaling-url": "../shared/signaling-url.js"
+  }
+}
+</script>
+
+<div id="screen">
+  <div class="sessionbar">
+    <span>Remote session</span>
+    <span class="sessionbar-right">
+      <span id="host-version" class="qstat"></span>
+      <span id="quality" class="qstat"></span>
+      <select id="monitors" class="monitors-select"></select>
+      <button id="end" class="btn btn-danger">Disconnect</button>
+    </span>
+  </div>
+  <video id="video" autoplay playsinline></video>
+</div>
+
+<div id="status-line" hidden><span id="status"></span></div>
+
+<div id="overlay" class="overlay" hidden>
+  <div class="veil"></div>
+  <div class="toast">
+    <div id="ov-glyph" class="glyphc"></div>
+    <h2 id="ov-title"></h2>
+    <p id="ov-detail"></p>
+    <div id="ov-actions" class="row"></div>
+  </div>
+</div>
+<script type="module" src="./error-reporter.js"></script>
+<script type="module" src="./session.js"></script>

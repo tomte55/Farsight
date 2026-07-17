@@ -1,0 +1,28 @@
+/* packages/controller/src/session-window/session.css
+   Session-window layout. Shared Aurora primitives live in
+   packages/shared/src/farsight.css; this file holds only what is specific to this
+   window, moved verbatim (minus the shell-stacking z-index) from
+   packages/controller/src/renderer/shell.css — this window has no shell/rail
+   underneath, so #screen simply fills the whole window.
+
+   Video fills the window; the fixed .sessionbar (top:0, out of flow) would overlap
+   the top of the video, so reserve its height. #screen keeps style.display as its
+   visibility primitive — session.js READS `screenEl.style.display === 'block'` as
+   session state, so switching it to [hidden] would be a behaviour change.
+
+   No explicit z-index needed here (unlike the shell's #screen, which needed >= 20
+   to cover the shell behind it): this window has nothing else to stack above, and
+   farsight.css puts .overlay at z-index 20, so #screen (stacking context: auto)
+   still paints below it — the connection-lost / reconnect toast stays visible. */
+#screen { position: fixed; inset: 0; display: none; background: #000; box-sizing: border-box; padding-top: 46px; }
+#screen video { width: 100%; height: 100%; object-fit: contain; }
+.sessionbar-right { display: flex; gap: 10px; align-items: center; }
+.monitors-select {
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 7px; padding: 5px 8px; font-size: 12.5px; display: none;
+}
+#end { padding: 6px 12px; }
+
+/* Host-version note in the session bar: muted, amber when the host lags this build. */
+#host-version { opacity: .7; }
+#host-version.outdated { opacity: 1; color: var(--warn, #f0b429); }
