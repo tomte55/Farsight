@@ -243,6 +243,13 @@ export function createReceiver({
     if (settled) return;
     if (jobDoneSeen && pending.size === 0) {
       await saveRecord('done');
+      // abort() can race this in-flight save (it runs outside the run() serializer
+      // — see the module-level abort() below): if it settled us WHILE the save
+      // above was in flight, don't ack a delivery that was already canceled, and
+      // don't emit a stray 'completed' after the 'canceled' event already went out
+      // (review finding 2). resolveOnce() below is separately idempotent, but the
+      // sendCtrl/onEvent are not, so bail explicitly.
+      if (settled) return;
       // Acknowledge delivery so the SENDER can resolve/close (it waits for this —
       // without it the sender would tear the channel down mid-drain). Best effort:
       // if the ack is lost the sender falls back to its completion timeout.
@@ -268,6 +275,12 @@ export function createReceiver({
 
   async function saveRecord(jobState) {
     if (!store || !manifest) return;
+    // An abort() may have already settled the receive (e.g. while this call's
+    // caller was suspended on the human consent prompt, or racing a run()-queued
+    // handler that got past its own entry guard). transfer-service's cancel()
+    // owns the store record for this path — a write here must never resurrect/
+    // clobber the 'canceled' record it persists (review findings 1 & 2).
+    if (settled) return;
     await store.save({
       jobId, dir: 'recv', tier: getTier() || 'adhoc', peer, destRoot,
       manifest,
@@ -318,6 +331,15 @@ export function createReceiver({
   // chunked offer_begin→offer_entries*→offer_end). Validates, checks space, prompts
   // for consent, then accepts + seeds the byte-routing sequence.
   async function beginReceive({ offJobId, protoVer, entries }) {
+    // A cancel() can land at ANY point below — most notably while the human
+    // consent prompt is pending, which can stay open arbitrarily long. abort()
+    // runs synchronously and settles `finished` immediately, but this function
+    // keeps running (it's suspended on an await, not actually stopped). Every
+    // resumption point below re-checks `settled` before touching the store or
+    // the channel, mirroring createSender's pump() `canceled` discipline — so a
+    // stale resume can never send an accept on a torn-down channel or persist a
+    // record for a transfer that's already confirmed canceled (review finding 1).
+    if (settled) return;
     if (typeof protoVer === 'number' && protoVer > TRANSFER_PROTOCOL_VERSION) {
       channel.sendCtrl(rejectFrame({ jobId: offJobId, reason: 'proto' }));
       resolveOnce({ jobId: offJobId, ok: false, rejected: 'proto' });
@@ -330,7 +352,9 @@ export function createReceiver({
       return;
     }
     jobId = offJobId; manifest = m;
-    if (!(await hasFreeSpace(destRoot, m.totalBytes))) {
+    const freeSpace = await hasFreeSpace(destRoot, m.totalBytes);
+    if (settled) return;
+    if (!freeSpace) {
       channel.sendCtrl(rejectFrame({ jobId, reason: 'nospace' }));
       resolveOnce({ jobId, ok: false, rejected: 'nospace' });
       return;
@@ -341,13 +365,16 @@ export function createReceiver({
     // Tell the sender we're now prompting a human, so it stops its approval timeout
     // (deciding is not "no response"). Sent BEFORE the await so it goes out at once.
     channel.sendCtrl(promptingFrame({ jobId }));
-    if (!(await consent({ jobId, manifest: m }))) {
+    const consented = await consent({ jobId, manifest: m });
+    if (settled) return;
+    if (!consented) {
       channel.sendCtrl(rejectFrame({ jobId, reason: 'declined' }));
       resolveOnce({ jobId, ok: false, rejected: 'declined' });
       return;
     }
     const have = {};
     for (const e of m.entries) have[e.fileId] = await resumeOffsetFor(destRoot, e);
+    if (settled) return;
     job = createReceiveJob({ manifest: m, have });
     // Build the byte-routing sequence from the MANIFEST (the order the sender
     // streams files) so routing never depends on FILE_BEGIN timing. Part files
@@ -365,6 +392,7 @@ export function createReceiver({
         // Keep it in `seq` (onBulk's cursor skips expected<=0 items) but not in
         // `pending`; publish any full .part and mark it done.
         await publishFullyReceivedFile({ destRoot, relPath: e.path, mtime: e.mtime });
+        if (settled) return;
         doneIds.add(e.fileId);
         job.markVerified(e.fileId);
         onEvent({ type: 'file-done', fileId: e.fileId, progress: job.progress() });
@@ -374,7 +402,12 @@ export function createReceiver({
       pending.set(e.fileId, item);
       seq.push(item);
     }
+    if (settled) return;
     await saveRecord('active');
+    // saveRecord() itself no-ops once settled (see its own guard) — but even so,
+    // don't send an accept frame on what may already be a torn-down channel for
+    // a transfer that's already confirmed canceled.
+    if (settled) return;
     // Only send NON-ZERO resume offsets — the sender defaults any file missing from
     // `resume` to 0. This keeps the accept frame tiny for a fresh transfer (all
     // zeros) so it can't itself overrun the data-channel message limit on a huge

@@ -718,3 +718,102 @@ test('receiver abort after settling is a no-op', async () => {
   expect((await done).ok).toBe(true);
   expect(() => rx.abort('canceled')).not.toThrow(); // already resolved — must not re-settle
 });
+
+// Review findings on Task 5 (61bbc55): the abort-vs-clobber bug this task fixed
+// resurrected via the pre-accept path (beginReceive has no cancellation-awareness)
+// and via a run()-queued handler that's already past its own entry guard (abort()
+// runs outside the serializer). See docs/private .../task-5-report.md fix round 1.
+
+test('review fix (finding 1): a cancel while the consent prompt is still pending never persists an active record, and never sends accept once the stale consent later resolves', async () => {
+  const dest = tmp();
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 10, mtime: 1 }], totalBytes: 10, totalFiles: 1 };
+  let recvCtrl = () => {};
+  const sentToSender = [];
+  const ch = { sendCtrl(s) { sentToSender.push(parseCtrlFrame(s)); }, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk() {} };
+  const events = [];
+  const store = memStore();
+  let releaseConsent;
+  const rx = createReceiver({
+    channel: ch, destRoot: dest, store, onEvent: (ev) => events.push(ev),
+    // Never resolves on its own — models the human consent prompt sitting open
+    // (per the finding, this can stay pending arbitrarily long).
+    consent: () => new Promise((r) => { releaseConsent = r; }),
+  });
+  const settled = rx.start().catch((e) => e.message);
+  // Don't await — the offer handler parks on the (never-resolving until we
+  // release it) consent promise, so awaiting here would hang the test.
+  recvCtrl(offerFrame({ jobId: 'cp1', entries: manifest.entries, totalBytes: 10, totalFiles: 1 }));
+  await new Promise((r) => setTimeout(r, 20)); // let beginReceive reach (and park on) the consent await
+  expect(typeof releaseConsent).toBe('function');
+
+  // transfer-service's cancel() does exactly this while the offer is still
+  // awaiting a human decision.
+  rx.abort('canceled');
+  expect(await settled).toBe('canceled');
+  expect(events.some((e) => e.type === 'canceled')).toBe(true);
+
+  // The stale prompt (or an own-fleet auto-accept race) later resolves true.
+  // Before the fix, beginReceive would resume and unconditionally saveRecord
+  // ('active') — the FIRST AND ONLY store write for this jobId — then send accept
+  // on the already-torn-down channel.
+  releaseConsent(true);
+  await new Promise((r) => setTimeout(r, 20)); // let any (buggy) resumed work run to completion
+
+  expect(store.saved.length).toBe(0); // no record was ever persisted for this jobId
+  expect(sentToSender.some((f) => f.t === 'accept')).toBe(false); // no accept on a torn-down channel
+});
+
+// A jobs-store stand-in whose save() blocks on 'done' writes until released —
+// used to land an abort() precisely WHILE a run()-queued handler's saveRecord
+// call is already in flight (past its own `if (settled) return` entry guard),
+// per finding 2. Other jobState writes (e.g. 'active') resolve immediately.
+function gatedDoneStore() {
+  const saved = [];
+  let releaseDone;
+  const doneGate = new Promise((r) => { releaseDone = r; });
+  return {
+    saved,
+    async save(j) {
+      if (j.jobState === 'done') await doneGate;
+      saved.push(JSON.parse(JSON.stringify(j)));
+    },
+    async load() { return null; },
+    async list() { return saved; },
+    releaseDone: () => releaseDone(),
+  };
+}
+
+test('review fix (finding 2): an abort racing an in-flight saveRecord(done) does not emit a stray completed event or send a complete frame after canceled', async () => {
+  const dest = tmp();
+  const payload = Buffer.from('race-payload'.repeat(20));
+  const hash = createHash('sha256').update(payload).digest('hex');
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const sentToSender = [];
+  const ch = { sendCtrl(s) { sentToSender.push(parseCtrlFrame(s)); }, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; } };
+  const events = [];
+  const store = gatedDoneStore();
+  const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true, onEvent: (ev) => events.push(ev) });
+  const settled = rx.start().catch((e) => e.message);
+
+  await recvCtrl(offerFrame({ jobId: 'race1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  expect(sentToSender.some((f) => f.t === 'accept')).toBe(true); // consented + accepted -> 'active' saved (ungated)
+
+  await recvBulk(payload);
+  await recvCtrl(fileEndFrame({ jobId: 'race1', fileId: 0, hash })); // finalizes the only file -> pending empty
+
+  // job_done -> maybeComplete() -> saveRecord('done'), now blocked on doneGate —
+  // the exact "run()-queued handler already past its entry guard" window from
+  // finding 2. Deliberately NOT awaited yet: we need to abort while it's parked.
+  const jobDoneHandled = recvCtrl(jobDoneFrame({ jobId: 'race1' }));
+  await new Promise((r) => setTimeout(r, 20)); // let it reach (and block on) the gated save
+
+  rx.abort('canceled'); // races the in-flight saveRecord('done')
+  store.releaseDone();  // let the gated save proceed now that we're settled
+  await jobDoneHandled;
+
+  expect(await settled).toBe('canceled'); // the abort — not the completion — is what won
+  expect(events.some((e) => e.type === 'canceled')).toBe(true);
+  expect(events.some((e) => e.type === 'completed')).toBe(false); // no stray completed after canceled
+  expect(sentToSender.some((f) => f.t === 'complete')).toBe(false); // no delivery ack on a torn-down channel
+});

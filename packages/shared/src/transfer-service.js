@@ -266,6 +266,13 @@ export function createTransferService({ store, transferDir, consent, openChannel
       let currentJobId = null;
       let receiverRef = null;
       const tapped = tapJobId(channel, (id) => {
+        // Every ctrl frame carrying a jobId re-invokes this callback (file_begin,
+        // file_end, job_done, …), not just the OFFER — only register once per
+        // jobId, otherwise every inbound frame after the OFFER needlessly mints
+        // and re-sets a fresh { abort } closure into activeReceives (review
+        // finding 3; functionally harmless since the closure just reads
+        // receiverRef, but there's no reason to churn it on every frame).
+        if (currentJobId === id) return;
         currentJobId = id;
         activeReceives.set(id, { abort: (r) => { if (receiverRef) receiverRef.abort(r); } });
       });
