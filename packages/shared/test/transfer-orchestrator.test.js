@@ -901,7 +901,7 @@ test('review fix round 2: onBulk/tryFinalize have no settled guard — bulk/file
 // single-file receive until tryFinalize is genuinely parked awaiting it, abort
 // while parked, THEN release the gate — reproducing the exact race the
 // reviewer found.
-test('review fix round 3: a cancel landing while genuinely parked inside finalizeReceivedFile must not leave the file at its final destination or emit events after canceled', async () => {
+test('a cancel landing while genuinely parked inside finalizeReceivedFile emits no events after canceled', async () => {
   const dest = tmp();
   const payload = Buffer.from('round3-payload'.repeat(30));
   const hash = createHash('sha256').update(payload).digest('hex');

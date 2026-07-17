@@ -228,9 +228,7 @@ export function createReceiver({
   // error) while a file is still mid-flight — either still receiving bytes, or
   // byte-complete but awaiting FILE_END's hash — never reaches that close, so
   // its fd would otherwise sit open until Node's FileHandle finalizer gets
-  // around to it (non-deterministic, with a process warning). On Windows a
-  // leaked open handle on a `.part` can make a LATER resume's rename onto that
-  // same path fail (EBUSY/EPERM), breaking cancel->resume. Marking
+  // around to it (non-deterministic, with a process warning). Marking
   // `item.finalizing = true` before closing also prevents a late-queued
   // tryFinalize call for this same item from trying to finalize/close it too —
   // though in practice tryFinalize's own `if (settled) return` (its first line)
