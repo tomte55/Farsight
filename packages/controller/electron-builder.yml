@@ -1,14 +1,23 @@
 # packages/controller/electron-builder.yml
-appId: org.farsight.controller
-productName: Farsight Controller
+# The UNIFIED Farsight app (v2.0). This one package builds the single app that
+# controls, hosts, and transfers — the old separate "Farsight Host" is retired.
+# Identity is a deliberate CLEAN BREAK from v1's org.farsight.controller /
+# org.farsight.host: a new appId + a new `latest` channel means existing v1
+# installs do NOT auto-update into v2 (NSIS upgrades by appId; electron-updater
+# only polls the channel a build shipped from). v2 is a one-time manual reinstall.
+# (The package directory is still packages/controller for now — an internal,
+# user-invisible name; renaming it to packages/app is deferred to avoid churning
+# the release pipeline.)
+appId: org.farsight.app
+productName: Farsight
 # Pinned so electron-builder doesn't need to resolve the hoisted (workspace) electron.
 electronVersion: 33.4.11
-# Space-free artifact name (productName has a space). Without this, the on-disk
-# file, the feed url in latest-controller.yml, and the uploaded GitHub asset end up
-# with three different names (spaces / dashes / dots) — electron-updater 404s on
-# the download and the app shows "Couldn't check for updates." Guarded by
-# test/artifact-name.test.js.
-artifactName: Farsight-Controller-Setup-${version}.${ext}
+# Space-free artifact name so the on-disk file, the feed url in latest.yml, and the
+# uploaded GitHub asset all share one name (spaces would become dashes on disk / feed
+# and dots on upload → electron-updater 404s → "Couldn't check for updates").
+# productName "Farsight" is already space-free, but pin it explicitly anyway —
+# guarded by test/artifact-name.test.js.
+artifactName: Farsight-Setup-${version}.${ext}
 directories: { output: dist }
 win:
   target: nsis
@@ -21,4 +30,4 @@ publish:
   provider: github
   owner: tomte55
   repo: Farsight
-  channel: latest-controller
+  channel: latest

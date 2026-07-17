@@ -1,17 +1,30 @@
 # Farsight
 
 Self-hosted, TeamViewer-like remote desktop for Windows: view + control a remote machine over
-WebRTC (DTLS-SRTP), with a self-hosted WSS signaling server and a coturn TURN relay. Two Electron
-apps — **host** (the controlled machine) and **controller** (where you drive from). v1 is
-**Windows-only** and **attended-access only** (explicit consent required; no unattended mode).
+WebRTC (DTLS-SRTP), with a self-hosted WSS signaling server and a coturn TURN relay. Windows-only.
+
+> **v2.0 — UNIFIED APP (2026-07-17).** The two apps were merged into **one**: `packages/controller`
+> is now the single **Farsight** app (appId `org.farsight.app`, productName `Farsight`, update
+> channel `latest`) that **controls, hosts, and transfers**. It's a **tray app** (close hides to
+> tray; Quit from the tray) so it stays reachable to be controlled. Being controlled is gated by a
+> Home toggle **"Allow this computer to be controlled"** (default ON, receiver-side, fails closed —
+> SECURITY.md R-9). The old **`packages/host`** app is **RETIRED** — kept in the repo as history/port
+> reference but no longer built or released. v2 is a **clean-break** identity, so v1 installs do NOT
+> auto-update into it (one-time manual reinstall). Much of `packages/host`'s renderer/main logic was
+> ported verbatim into `packages/controller` (session machine, capture, nut.js injection, host peer,
+> auto-registering signaling client, tray/lifecycle). The package dir is still named `controller` (an
+> internal, user-invisible name); renaming it to `packages/app` is a deferred cleanup. Much of the
+> per-app guidance below that says "host does X / controller does Y" now describes **one app doing
+> both** — read it as capability, not separate binaries.
 
 ## Layout (npm workspaces)
 - `packages/shared` — runtime-agnostic logic, unit-tested in isolation: protocol, input/control
   event validation (security-critical), password, turn, host-id, credentials, signaling-url.
 - `packages/signaling-server` — Node `ws` WSS signaling (registry, password auth, rate-limit,
   per-IP DoS limits, structured JSON logging). The **only** internet-facing runtime.
-- `packages/host` / `packages/controller` — Electron apps: `src/main.js`, `src/preload.cjs`,
-  `src/renderer/` (sandboxed).
+- `packages/controller` — the unified **Farsight** Electron app (`src/main.js`, `src/preload.cjs`,
+  `src/renderer/` shell + `src/session-window/` for a controlling session). `packages/host` is the
+  **retired** v1 host app (frozen; not built).
 
 ## Commands
 - **Test:** `npx vitest run` (or `npm test`). This project is built strict-TDD, one commit per task.

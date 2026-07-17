@@ -32,27 +32,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Set app versions from tag
+      - name: Set app version from tag
         id: ver
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          npm pkg set version="$VERSION" -w @farsight/host -w @farsight/controller
+          # v2.0+: one unified app. The old @farsight/host is retired and no longer built.
+          npm pkg set version="$VERSION" -w @farsight/controller
 
       # To enable Windows code signing: add repo secrets CSC_LINK (base64 of your .pfx)
-      # and CSC_KEY_PASSWORD, then add an env: block with those two vars to the two build
-      # steps below. Do NOT wire the env unconditionally — electron-builder 24.x fails on an
+      # and CSC_KEY_PASSWORD, then add an env: block with those two vars to the build
+      # step below. Do NOT wire the env unconditionally — electron-builder 24.x fails on an
       # empty CSC_LINK, so the vars must only be present once the secrets actually exist.
-      - name: Build host installer
-        run: npm run dist -w @farsight/host
-
-      - name: Build controller installer
+      - name: Build Farsight installer
         run: npm run dist -w @farsight/controller
 
       - name: List built artifacts
         shell: bash
-        run: ls -la packages/host/dist packages/controller/dist || true
+        run: ls -la packages/controller/dist || true
 
       - name: Generate changelog
         shell: bash
@@ -74,9 +72,10 @@ jobs:
             echo
             echo "---"
             echo
-            echo "### Downloads"
-            echo "- **Farsight Host** — the machine to be controlled."
-            echo "- **Farsight Controller** — where you sit to control it."
+            echo "### Download"
+            echo "- **Farsight** — one app that controls other machines, lets you host (be controlled), and transfers files. Install it on every machine."
+            echo
+            echo '**Upgrading from v1?** v2 is a fresh install with a new identity, so it will not auto-update from the old Farsight Host / Farsight Controller — download and run the installer once. The old apps can be uninstalled.'
             echo
             echo 'Unsigned build: on first run Windows SmartScreen may warn ("More info" → "Run anyway").'
           } > RELEASE_BODY.md
@@ -89,10 +88,7 @@ jobs:
           name: Farsight ${{ github.ref_name }}
           body_path: RELEASE_BODY.md
           files: |
-            packages/host/dist/*.exe
-            packages/host/dist/latest-host.yml
-            packages/host/dist/*.blockmap
             packages/controller/dist/*.exe
-            packages/controller/dist/latest-controller.yml
+            packages/controller/dist/latest.yml
             packages/controller/dist/*.blockmap
           fail_on_unmatched_files: true
