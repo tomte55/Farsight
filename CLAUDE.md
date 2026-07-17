@@ -36,11 +36,51 @@ apps — **host** (the controlled machine) and **controller** (where you drive f
 - **Native addons run in MAIN, never the renderer.** nut.js (input injection) and argon2 load in the
   main process; the renderer forwards validated events over IPC. Keep shared modules imported by
   renderers runtime-agnostic (e.g. host-id uses Web Crypto).
+- **Every BrowserWindow needs `backgroundThrottling:false`** (both apps' MAIN windows + the hidden
+  transfer workers). The renderers own signaling, the peer connection and input — and Chromium drops
+  a minimized *or merely COVERED* window's renderer to Windows **Idle process priority**. An active
+  host saturates its own CPU (capture+encode), so the renderer starves: measured **4084ms avg input
+  latency / 10.9s max / 26% of input events LOST**, vs 4ms/none with the flag. Video survives (media
+  runs off the renderer main thread) — so the symptom is "stream fine, input dead", not an obvious
+  hang. It's a PRIORITY problem, not timer throttling (timer throttling is real — 4/s→1.1/s — but
+  datachannel delivery is unaffected by it). Guarded by `packages/*/test/window-throttling.test.js`.
+- **A hidden transfer-worker BrowserWindow keeps the app alive.** `window-all-closed` never fires
+  while a transfer runs, so the CONTROLLER's main window must explicitly `app.quit()` on `closed` —
+  otherwise closing it leaves an invisible process still moving bytes, holding the single-instance
+  lock so a relaunch silently does nothing. (The HOST is the opposite by design: it hides to tray.)
+- **Never gate a remote-management control on "no session is active."** A remote session is the ONLY
+  way to touch a remote host, so `!sessionActive` gating makes a remote machine un-manageable by
+  construction — it bit the console Update button AND the tray's "Restart to update". An explicit
+  human/owner request overrides the guard; only automatic/background work defers. Keep `overrideSession`
+  and `silent` as SEPARATE concerns — conflating them into one `force` flag caused three incidents.
+- **`updater.quitAndInstall(true)` is a TRAP** — electron-updater only substitutes
+  `autoRunAppAfterInstall` when `isSilent` is *false*, so the one-arg "silent" call leaves
+  `isForceRunAfter:false` and the app **installs and never relaunches** (it took a host offline three
+  times). The only correct silent call is `quitAndInstall(true, true)`. Both production call sites are
+  pinned by tests asserting the ARGUMENTS — every updater test used to assert call COUNT only, which
+  is exactly how this shipped.
+- **A send must be persisted BEFORE its first byte.** `runSend` saves `jobState:'active'` up front;
+  at launch a `dir:'send'` record still saying `'active'` is impossible (its process is gone) and is
+  swept — fleet/contact→`'interrupted'` (resumable), adhoc→`'error'`. Without the up-front save an
+  in-flight send lives only in an in-memory Map and dies with the process: nothing to list, nothing to
+  resume. (v1.12.0's "across-restart resume" never worked for this reason; first verified live in
+  v1.14.4.) Relatedly, **jobs-store writes are SERIALIZED per jobId** — concurrent saves corrupted
+  records (74/120), and unique tmp names alone don't fix it (Windows throws EPERM on concurrent
+  renames onto one target).
 - **electron-builder must be `^24.13.3`, NOT 25.x** — v25 pulls a broken `app-builder-bin@5-alpha`
   (`spawn app-builder.exe ENOENT`). Installer builds only succeed in CI (Windows runner); local
   builds fail on a winCodeSign symlink-privilege error — that's local-only, ignore it.
 - A packaged app window that opens and shows static text does NOT prove the renderer ran — check
-  DevTools console for `ERR_FILE_NOT_FOUND` / module-resolution errors.
+  DevTools console for `ERR_FILE_NOT_FOUND` / module-resolution errors. **But "no console errors" is
+  NOT proof either:** Electron's `console-message` event does **not** fire on an ES-module
+  import-resolution failure (confirmed with a deliberate broken import — the module silently never
+  executed, zero events). Require POSITIVE proof: read a value the renderer only sets *after* its
+  imports resolved and it ran to completion. A `show:false` BrowserWindow + `--remote-debugging-port`
+  + CDP `Runtime.evaluate` drives the real packaged renderer and is the fastest way to measure this.
+- **Mutation-test any test that guards an invariant.** Repeatedly on this project a test passed for
+  the WRONG reason — a different condition forced the expected outcome — including tests written
+  specifically to pin a guard. Change the guard, watch the test fail, change it back. A green suite is
+  not evidence a guard is pinned; count-only assertions (`toHaveBeenCalledTimes`) are the classic tell.
 - **SP3 file-transfer worker** (`packages/*/src/transfer-worker*`, `shared/transfer-*`): a hidden
   `BrowserWindow{show:false}` owns a dedicated RTCPeerConnection + signaling; main runs the
   orchestrator and forwards frames over IPC. Gotchas that all bit v1.9.0 (DOA) and were fixed by
