@@ -8,6 +8,7 @@ import { isValidHostId } from '@farsight/shared/host-id';
 import { normalizeHostId, passwordCandidates } from '@farsight/shared/credentials-format';
 import { isOlder } from '@farsight/shared/version';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
+import { createRateEstimator, etaSeconds, bytesDone, formatBytes, formatRate, formatDuration } from '@farsight/shared/transfer-rate';
 import { sessionOverlayFor } from '../session-overlay.js';
 import { extractStats, throughputKbps, formatQuality } from '../stats.js';
 import { createRendererLogger } from './rlog.js';
@@ -897,6 +898,14 @@ function openTransfersPanel() {
 // without a transfer-service/jobs-store schema change.
 const transferJobs = new Map();
 
+// Per-job rolling rate estimators — the event stream carries no timestamps, so
+// arrival time is stamped here as events land.
+const sendRateEstimators = new Map(); // jobId -> estimator
+function sendEstimatorFor(jobId) {
+  if (!sendRateEstimators.has(jobId)) sendRateEstimators.set(jobId, createRateEstimator({ windowMs: 5000 }));
+  return sendRateEstimators.get(jobId);
+}
+
 function fmtCount(manifest) {
   if (!manifest) return '';
   const n = manifest.totalFiles ?? 0;
@@ -929,9 +938,9 @@ function stateLabel(j) {
   const hasCount = Number.isFinite(total) && total > 0;
   switch (j.state) {
     case 'awaiting-approval': return 'Waiting for approval…';
-    case 'interrupted': return hasCount ? `Interrupted — will resume · ${sent} / ${total} files` : 'Interrupted — will resume';
+    case 'interrupted': return `Interrupted — will resume${sendDetailText(j) ? ` · ${sendDetailText(j)}` : ''}`;
     case 'reconnecting': return 'Reconnecting…';
-    case 'active': return hasCount ? `Transferring · ${sent} / ${total} files` : 'Transferring…';
+    case 'active': return sendDetailText(j) ? `Transferring · ${sendDetailText(j)}` : 'Transferring…';
     case 'finishing': return 'Finishing — verifying on host…';
     case 'done': return hasCount ? `Completed · ${total} file${total === 1 ? '' : 's'}` : 'Completed';
     case 'declined': return 'Declined by host';
@@ -942,13 +951,30 @@ function stateLabel(j) {
 }
 const TERMINAL_STATES = ['done', 'canceled', 'error', 'declined'];
 
-// Bar fraction: multi-file → files-sent/total (agrees with the "X / Y files"
-// text and tracks the receiver); single file → byte fraction for smoothness.
+// Byte fraction: the sender now reports absolute bytes over the full manifest
+// (transfer-engine), the same denominator the receiver uses — so this agrees with
+// the host's bar and keeps moving inside a single huge file.
 function sendFraction(j) {
   const p = j.progress;
-  if (p && Number.isFinite(p.filesTotal) && p.filesTotal > 1 && Number.isFinite(p.filesSent)) return p.filesSent / p.filesTotal;
-  if (p && typeof p.fraction === 'number') return p.fraction;
+  if (p && Number.isFinite(p.total) && p.total > 0) return bytesDone(p) / p.total;
   return j.state === 'done' ? 1 : 0;
+}
+
+// "1.2 GB of 100 GB · 24.0 MB/s · ~1h 8m left · 3 / 2974 files"
+function sendDetailText(j) {
+  const p = j.progress;
+  if (!p || !Number.isFinite(p.total) || p.total <= 0) return '';
+  const done = bytesDone(p);
+  const parts = [`${formatBytes(done)} of ${formatBytes(p.total)}`];
+  if (Number.isFinite(j.rate) && j.rate > 0) {
+    parts.push(formatRate(j.rate));
+    const eta = etaSeconds(p.total - done, j.rate);
+    if (eta !== null && j.state === 'active') parts.push(`~${formatDuration(eta)} left`);
+  }
+  if (Number.isFinite(p.filesTotal) && p.filesTotal > 1) {
+    parts.push(`${Number.isFinite(p.filesSent) ? p.filesSent : 0} / ${p.filesTotal} files`);
+  }
+  return parts.join(' · ');
 }
 
 function jobRow(j) {
@@ -1042,6 +1068,8 @@ window.farsightIpc.onTransferEvent((ev) => {
   } else if (ev.type === 'interrupted') {
     // Recoverable own-fleet drop — the resume watcher will retry (not terminal).
     existing.state = 'interrupted';
+    existing.rate = null;
+    sendEstimatorFor(ev.jobId).reset(); // a re-established run restarts the window
   } else if (ev.type === 'reconnecting') {
     existing.state = 'reconnecting';
   } else if (ev.type === 'all-sent') {
@@ -1062,6 +1090,7 @@ window.farsightIpc.onTransferEvent((ev) => {
     // "received") — so never flip to done here.
     existing.progress = ev.progress;
     if (existing.state !== 'finishing') existing.state = 'active';
+    existing.rate = sendEstimatorFor(ev.jobId).sample(bytesDone(ev.progress));
   }
   transferJobs.set(ev.jobId, existing);
   if (!transfersPanelEl.hidden) renderTransfers();

@@ -153,4 +153,16 @@ describe('renderer: Send… entry point + Transfers panel', () => {
     expect(renderer).toMatch(/ev\.type === 'declined'/);
     expect(renderer).toMatch(/case 'declined'/);
   });
+
+  test('controller renderer imports the rate helpers', () => {
+    const src = readFileSync(new URL('../src/renderer/renderer.js', import.meta.url), 'utf8');
+    expect(src).toMatch(/import \{[^}]*createRateEstimator[^}]*\} from '@farsight\/shared\/transfer-rate'/);
+  });
+
+  test('controller send bar is byte-based now that sender bytes are absolute', () => {
+    const src = readFileSync(new URL('../src/renderer/renderer.js', import.meta.url), 'utf8');
+    // The old files-sent/total bar existed only because the sender's byte progress
+    // was quantized + relative; transfer-engine now reports absolute continuous bytes.
+    expect(src).not.toContain('return p.filesSent / p.filesTotal;');
+  });
 });
