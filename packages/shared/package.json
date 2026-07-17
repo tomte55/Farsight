@@ -44,7 +44,8 @@
     "./log": "./src/log.js",
     "./log-file-sink": "./src/log-file-sink.js",
     "./app-log": "./src/app-log.js",
-    "./diagnostics-bundle": "./src/diagnostics-bundle.js"
+    "./diagnostics-bundle": "./src/diagnostics-bundle.js",
+    "./shell-nav": "./src/shell-nav.js"
   },
   "dependencies": {
     "argon2": "^0.41.1"
