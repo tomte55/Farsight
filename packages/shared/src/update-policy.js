@@ -18,16 +18,21 @@ export const UPDATE_STATUS = {
 };
 
 // Given the updater status + whether a session is active, decide what the UI
-// should show. A restart is only ever offered when an update is fully
-// downloaded AND no session is active.
+// should show. A restart is offered whenever an update is fully downloaded —
+// even during a live session. The host can't tell a remote operator's click
+// from someone at the keyboard, so hiding the control during a session makes
+// the machine un-updatable exactly when someone is trying to update it; an
+// explicit "Restart to update" click always overrides the session guard (see
+// canInstallNow / updater.js installNow). Automatic/background installs still
+// defer across a live session — that policy is unchanged.
 export function updateUiState({ status, sessionActive, version, downloaded } = {}) {
   const v = version ?? null;
   const ready = downloaded === true;            // sticky latch, survives a background re-check
-  const showRestartPrompt = ready && !sessionActive;
+  const showRestartPrompt = ready;
   let message;
   if (ready) {
     message = sessionActive
-      ? `Update ${v} will install after this session.`
+      ? `Update ${v} ready — restarting will end the current session.`
       : `Update ${v} ready to install.`;
   } else {
     switch (status) {

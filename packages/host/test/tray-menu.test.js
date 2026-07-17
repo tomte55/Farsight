@@ -48,6 +48,25 @@ test('adds a Restart-to-update item only when an update is ready', () => {
   expect(noUpdate.some(i => typeof i.label === 'string' && i.label.startsWith('Restart to update'))).toBe(false);
 });
 
+test('the Restart-to-update item is still shown and wired while a session is active', () => {
+  // main.js derives `updateReady` from updateUiState({...}).showRestartPrompt,
+  // which (per update-policy.js) is now true whenever a download is ready
+  // regardless of sessionActive — the tray menu itself doesn't know about
+  // sessions, but this pins the caller-visible contract: an active session
+  // must never cause `updateReady` to hide the item. Field bug: the owner was
+  // remote-controlling the host and the item was missing when they needed it.
+  const onRestartUpdate = vi.fn();
+  const t = buildTrayMenuTemplate({
+    id: '1', password: 'p', onShow(){}, onQuit(){},
+    updateReady: true, updateVersion: '1.14.1',
+    onRestartUpdate, onCheckUpdates(){},
+  });
+  const item = t.find(i => i.label === 'Restart to update (1.14.1)');
+  expect(item).toBeTruthy();
+  item.click();
+  expect(onRestartUpdate).toHaveBeenCalledOnce();
+});
+
 test('always offers a Check-for-updates item', () => {
   const t = buildTrayMenuTemplate({ id: '1', password: 'p', onShow(){}, onQuit(){}, updateReady: false, onRestartUpdate(){}, onCheckUpdates(){} });
   expect(t.some(i => i.label === 'Check for updates')).toBe(true);

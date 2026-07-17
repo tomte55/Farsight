@@ -38,29 +38,55 @@ test('events drive onStatus with policy-derived UI state', () => {
   expect(last).toMatchObject({ showRestartPrompt: true, version: '2.0.0', message: 'Update 2.0.0 ready to install.' });
 });
 
-test('setSessionActive suppresses the restart prompt for a downloaded update', () => {
+test('the restart prompt stays visible through an active session for a downloaded update', () => {
+  // Hiding the control during a session makes the host un-updatable exactly
+  // when someone (possibly the remote operator themself) is trying to update
+  // it. See update-policy.test.js for the message-text coverage.
   const u = fakeUpdater();
   const onStatus = vi.fn();
   const up = createUpdater({ updater: u, isPackaged: true, onStatus });
   up.start();
   up.setSessionActive(true);
   u.emit('update-downloaded', { version: '2.0.0' });
-  expect(onStatus.mock.calls.at(-1)[0].showRestartPrompt).toBe(false);
-  up.setSessionActive(false);           // session ended → prompt re-surfaces
+  expect(onStatus.mock.calls.at(-1)[0].showRestartPrompt).toBe(true);
+  up.setSessionActive(false);
   expect(onStatus.mock.calls.at(-1)[0].showRestartPrompt).toBe(true);
 });
 
-test('installNow gates on downloaded + no session', () => {
+test('installNow requires a download, but overrides an active session once one exists', () => {
   const u = fakeUpdater();
   const up = createUpdater({ updater: u, isPackaged: true, onStatus: vi.fn() });
   up.start();
   expect(up.installNow()).toEqual({ ok: false, reason: 'not-downloaded' });
   u.emit('update-downloaded', { version: '2.0.0' });
   up.setSessionActive(true);
-  expect(up.installNow()).toEqual({ ok: false, reason: 'session-active' });
-  up.setSessionActive(false);
+  // A human explicitly clicked "Restart to update" — that overrides the
+  // session guard now (see the field-bug test below), so it installs.
   expect(up.installNow()).toEqual({ ok: true });
   expect(u.quitAndInstall).toHaveBeenCalledTimes(1);
+  expect(u.quitAndInstall).toHaveBeenCalledWith(); // visible, not silent
+});
+
+test('the tray install works DURING a session (a human asked) and stays visible', () => {
+  // The host can't tell a remote operator's click from someone at the keyboard;
+  // an explicit "Restart to update" must not silently no-op. Field bug: the owner
+  // was remote-controlling the host, the item was hidden, they clicked Quit, and
+  // the on-quit fallback installed WITHOUT relaunching -> host offline.
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: true, onStatus: () => {} });
+  up.start();
+  up.setSessionActive(true);
+  u.emit('update-downloaded', { version: '1.14.1' });
+  expect(up.installNow()).toEqual({ ok: true });
+  expect(u.quitAndInstall).toHaveBeenCalledWith(); // visible + relaunches (no args)
+});
+
+test('the tray install still refuses when nothing is downloaded', () => {
+  const u = fakeUpdater();
+  const up = createUpdater({ updater: u, isPackaged: true, onStatus: () => {} });
+  up.start();
+  expect(up.installNow()).toEqual({ ok: false, reason: 'not-downloaded' });
+  expect(u.quitAndInstall).not.toHaveBeenCalled();
 });
 
 test('installWhenReady installs immediately when already downloaded (no session)', () => {

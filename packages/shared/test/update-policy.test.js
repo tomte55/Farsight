@@ -9,10 +9,14 @@ test('downloaded + idle → restart prompt', () => {
   expect(s.message).toBe('Update 1.2.0 ready to install.');
 });
 
-test('downloaded + active session → NO prompt, deferred message', () => {
+test('downloaded + active session → prompt STILL shown, with an honest end-the-session message', () => {
+  // A human clicking "Restart to update" overrides the session guard (see
+  // canInstallNow / updater.js installNow) — the control must not be hidden
+  // exactly when someone is trying to use it. The message must not promise a
+  // deferred install: clicking restart ends the session immediately.
   const s = updateUiState({ status: 'downloaded', sessionActive: true, version: '1.2.0', downloaded: true });
-  expect(s.showRestartPrompt).toBe(false);
-  expect(s.message).toBe('Update 1.2.0 will install after this session.');
+  expect(s.showRestartPrompt).toBe(true);
+  expect(s.message).toBe('Update 1.2.0 ready — restarting will end the current session.');
 });
 
 test('checking / downloading / idle produce status only, never a prompt', () => {

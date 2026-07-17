@@ -508,7 +508,10 @@ ipcMain.handle('clipboard-read', () => clipboard.readText());
 ipcMain.on('clipboard-write', (_e, text) => { if (typeof text === 'string' && text.length <= 100000) clipboard.writeText(text); });
 
 // Auto-update: the renderer can trigger a manual check/install, and reports
-// whether a remote-control session is active so we never install mid-session.
+// whether a remote-control session is active so BACKGROUND installs defer
+// across it. An explicit manual install (this handler / tray "Restart to
+// update") overrides that guard — the host can't tell a remote operator's
+// click from someone at the keyboard, so a human asking for it always wins.
 ipcMain.handle('updater:check', () => { if (hostUpdater) hostUpdater.checkNow(); return true; });
 ipcMain.handle('updater:install', () => hostUpdater ? hostUpdater.installNow() : { ok: false, reason: 'not-downloaded' });
 ipcMain.on('updater:set-session-active', (_e, active) => { if (hostUpdater) hostUpdater.setSessionActive(active); });
