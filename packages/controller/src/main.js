@@ -18,6 +18,7 @@ import { windowAttentionPlan } from './window-attention.js';
 import { createAppLogger } from '@farsight/shared/app-log';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
 import { createUpdater } from '@farsight/shared/updater';
+import { shouldConverge } from '@farsight/shared/update-policy';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from './account.js';
 import { revealWindow } from './reveal-window.js';
 import { createSessionWindow } from './session-window.js';
@@ -439,6 +440,7 @@ let tray = null;
 // close-guard and every quit path (tray Quit, auto-update install).
 const lifecycle = createLifecycle();
 let ctrlUpdater = null;
+let lastHandledTarget = null; // S2.7: the last remote-update target we acted on
 let latestUpdateUi = { showRestartPrompt: false, checking: false, message: '', version: null };
 let log = null;   // root logger; assigned on app ready, referenced as log?.*
 let logMinLevel = null; // createAppLogger's resolved level; used in diagnostics meta
@@ -730,6 +732,25 @@ app.whenReady().then(async () => {
     },
   });
   ctrlUpdater.start();
+
+  // Remote update (S2.7): act on a converge-to directive delivered via the account
+  // heartbeat. Only when the target is strictly newer than us, and only once per
+  // target. FORCED: the owner explicitly pressed Update, so it installs even during
+  // a live session (theirs, almost always) and silently — a remote host has nobody
+  // at the screen. It always relaunches, so the host is back in seconds. A
+  // background/automatic update still waits for the session to end.
+  // Installs ONLY the official feed release; the directive is just a version string.
+  // (This wiring was dropped in the v2.0 unification — remote update broke at 2.0.0
+  //  until it was ported back; guarded by test/updater-wiring.test.js.)
+  getAccountService().onUpdateDirective((data) => {
+    const target = data && typeof data.targetVersion === 'string' ? data.targetVersion : null;
+    if (target && target !== lastHandledTarget && shouldConverge({ currentVersion: app.getVersion(), targetVersion: target })) {
+      lastHandledTarget = target;
+      log?.child('updater').info(`remote update directive → converge to ${target} (forced)`);
+      if (ctrlUpdater) ctrlUpdater.installWhenReady({ force: true });
+    }
+  });
+
   ipcMain.handle('updater:check', () => { ctrlUpdater.checkNow(); return true; });
   ipcMain.handle('updater:install', () => ctrlUpdater.installNow());
   ipcMain.on('updater:set-session-active', (_e, active) => ctrlUpdater.setSessionActive(active));
