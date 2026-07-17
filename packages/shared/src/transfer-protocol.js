@@ -6,6 +6,15 @@ export const TRANSFER_PROTOCOL_VERSION = 1;
 
 function isStr(x) { return typeof x === 'string' && x.length > 0; }
 function nn(x) { return Number.isInteger(x) && x >= 0; }
+// Every legitimate jobId is minted by newJobId() (transfer-queue.js):
+// randomUUID().replace(/-/g, '') -> exactly 32 lowercase hex chars. jobId is
+// sender-chosen on the wire and the RECEIVER ends up path-joining it into the
+// jobs-store filename (jobs-store.js) after the human consents to the transfer
+// -- a jobId that isn't this exact shape can never have come from a genuine
+// peer, so reject it here at the protocol boundary like any other malformed
+// frame (review finding: sender-chosen jobId used unsanitized in a fs path).
+const JOB_ID_RE = /^[0-9a-f]{32}$/;
+function isJobId(x) { return typeof x === 'string' && JOB_ID_RE.test(x); }
 
 export function offerFrame({ jobId, entries, totalBytes, totalFiles, protoVer = TRANSFER_PROTOCOL_VERSION }) {
   return JSON.stringify({ t: 'offer', jobId, protoVer, entries, totalBytes, totalFiles });
@@ -50,41 +59,41 @@ export function parseCtrlFrame(str) {
   if (!o || typeof o !== 'object') return null;
   switch (o.t) {
     case 'offer':
-      if (!isStr(o.jobId) || !Array.isArray(o.entries) || !nn(o.totalBytes) || !nn(o.totalFiles)) return null;
+      if (!isJobId(o.jobId) || !Array.isArray(o.entries) || !nn(o.totalBytes) || !nn(o.totalFiles)) return null;
       return { t: 'offer', jobId: o.jobId, protoVer: o.protoVer, entries: o.entries, totalBytes: o.totalBytes, totalFiles: o.totalFiles };
     case 'offer_begin':
-      if (!isStr(o.jobId) || !nn(o.totalBytes) || !nn(o.totalFiles)) return null;
+      if (!isJobId(o.jobId) || !nn(o.totalBytes) || !nn(o.totalFiles)) return null;
       return { t: 'offer_begin', jobId: o.jobId, protoVer: o.protoVer, totalBytes: o.totalBytes, totalFiles: o.totalFiles };
     case 'offer_entries':
-      if (!isStr(o.jobId) || !Array.isArray(o.entries)) return null;
+      if (!isJobId(o.jobId) || !Array.isArray(o.entries)) return null;
       return { t: 'offer_entries', jobId: o.jobId, entries: o.entries };
     case 'offer_end':
-      if (!isStr(o.jobId)) return null;
+      if (!isJobId(o.jobId)) return null;
       return { t: 'offer_end', jobId: o.jobId };
     case 'accept':
-      if (!isStr(o.jobId) || !Array.isArray(o.resume)) return null;
+      if (!isJobId(o.jobId) || !Array.isArray(o.resume)) return null;
       for (const r of o.resume) { if (!r || !nn(r.fileId) || !nn(r.haveBytes)) return null; }
       return { t: 'accept', jobId: o.jobId, resume: o.resume };
     case 'reject':
-      if (!isStr(o.jobId)) return null;
+      if (!isJobId(o.jobId)) return null;
       return { t: 'reject', jobId: o.jobId, reason: typeof o.reason === 'string' ? o.reason : '' };
     case 'file_begin':
-      if (!isStr(o.jobId) || !nn(o.fileId) || !nn(o.offset)) return null;
+      if (!isJobId(o.jobId) || !nn(o.fileId) || !nn(o.offset)) return null;
       return { t: 'file_begin', jobId: o.jobId, fileId: o.fileId, offset: o.offset };
     case 'file_end':
-      if (!isStr(o.jobId) || !nn(o.fileId) || !isStr(o.hash)) return null;
+      if (!isJobId(o.jobId) || !nn(o.fileId) || !isStr(o.hash)) return null;
       return { t: 'file_end', jobId: o.jobId, fileId: o.fileId, hash: o.hash };
     case 'job_done':
-      if (!isStr(o.jobId)) return null;
+      if (!isJobId(o.jobId)) return null;
       return { t: 'job_done', jobId: o.jobId };
     case 'complete':
-      if (!isStr(o.jobId)) return null;
+      if (!isJobId(o.jobId)) return null;
       return { t: 'complete', jobId: o.jobId, ok: o.ok === true };
     case 'prompting': case 'pause': case 'resume': case 'cancel':
-      if (!isStr(o.jobId)) return null;
+      if (!isJobId(o.jobId)) return null;
       return { t: o.t, jobId: o.jobId };
     case 'error':
-      if (!isStr(o.jobId) || !isStr(o.code)) return null;
+      if (!isJobId(o.jobId) || !isStr(o.code)) return null;
       return { t: 'error', jobId: o.jobId, code: o.code };
     case 'fs_req':
       if (!nn(o.reqId) || !isStr(o.op) || !o.args || typeof o.args !== 'object') return null;

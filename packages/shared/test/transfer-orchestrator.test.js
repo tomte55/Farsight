@@ -46,16 +46,16 @@ test('createSender offers, then streams a file and finishes on accept', async ()
   const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: data.length, mtime: 5 }], totalBytes: data.length, totalFiles: 1 };
   const sources = new Map([[0, f]]);
   const ch = fakeChannel();
-  const sender = createSender({ channel: ch, jobId: 'j1', manifest, sources, chunkSize: 64 });
+  const sender = createSender({ channel: ch, jobId: 'a51018c10dbd79259ed899eebf9fed43', manifest, sources, chunkSize: 64 });
   const finished = sender.start();
 
   // First emitted frame is the OFFER.
   expect(ch.ctrlOut[0].t).toBe('offer');
-  expect(ch.ctrlOut[0].jobId).toBe('j1');
+  expect(ch.ctrlOut[0].jobId).toBe('a51018c10dbd79259ed899eebf9fed43');
   // Accept everything from 0.
-  await ch.feedCtrl(acceptFrame({ jobId: 'j1', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await ch.feedCtrl(acceptFrame({ jobId: 'a51018c10dbd79259ed899eebf9fed43', resume: [{ fileId: 0, haveBytes: 0 }] }));
   await until(() => ch.ctrlOut.some((f) => f.t === 'job_done')); // pump finished sending
-  await ch.feedCtrl(completeFrame({ jobId: 'j1', ok: true }));    // receiver acks delivery
+  await ch.feedCtrl(completeFrame({ jobId: 'a51018c10dbd79259ed899eebf9fed43', ok: true }));    // receiver acks delivery
   await finished;
 
   // It emitted FILE_BEGIN, bulk bytes, FILE_END(hash), JOB_DONE.
@@ -74,15 +74,15 @@ test('createSender emits an "accepted" lifecycle event on accept, before any byt
   const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: data.length, mtime: 5 }], totalBytes: data.length, totalFiles: 1 };
   const events = [];
   const ch = fakeChannel();
-  const sender = createSender({ channel: ch, jobId: 'j1', manifest, sources: new Map([[0, f]]), chunkSize: 64, onEvent: (ev) => events.push(ev) });
+  const sender = createSender({ channel: ch, jobId: 'a51018c10dbd79259ed899eebf9fed43', manifest, sources: new Map([[0, f]]), chunkSize: 64, onEvent: (ev) => events.push(ev) });
   const finished = sender.start();
 
   // The OFFER is out but the peer hasn't accepted: NO 'accepted' event yet.
   expect(events.some((e) => e.type === 'accepted')).toBe(false);
 
-  await ch.feedCtrl(acceptFrame({ jobId: 'j1', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await ch.feedCtrl(acceptFrame({ jobId: 'a51018c10dbd79259ed899eebf9fed43', resume: [{ fileId: 0, haveBytes: 0 }] }));
   await until(() => ch.ctrlOut.some((f) => f.t === 'job_done'));
-  await ch.feedCtrl(completeFrame({ jobId: 'j1', ok: true }));
+  await ch.feedCtrl(completeFrame({ jobId: 'a51018c10dbd79259ed899eebf9fed43', ok: true }));
   await finished;
 
   const iAcc = events.findIndex((e) => e.type === 'accepted');
@@ -98,9 +98,9 @@ test('createSender emits a "declined" event (and rejects) when the receiver reje
   const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 1, mtime: 5 }], totalBytes: 1, totalFiles: 1 };
   const events = [];
   const ch = fakeChannel();
-  const sender = createSender({ channel: ch, jobId: 'j1', manifest, sources: new Map([[0, f]]), onEvent: (ev) => events.push(ev) });
+  const sender = createSender({ channel: ch, jobId: 'a51018c10dbd79259ed899eebf9fed43', manifest, sources: new Map([[0, f]]), onEvent: (ev) => events.push(ev) });
   const finished = sender.start();
-  await ch.feedCtrl(rejectFrame({ jobId: 'j1', reason: 'declined' }));
+  await ch.feedCtrl(rejectFrame({ jobId: 'a51018c10dbd79259ed899eebf9fed43', reason: 'declined' }));
   await expect(finished).rejects.toThrow(/rejected/);
   const declined = events.find((e) => e.type === 'declined');
   expect(declined).toBeTruthy();
@@ -122,11 +122,11 @@ test('createSender emits a "canceled" event (and rejects) when the receiver canc
   const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: data.length, mtime: 5 }], totalBytes: data.length, totalFiles: 1 };
   const events = [];
   const ch = fakeChannel();
-  const sender = createSender({ channel: ch, jobId: 'j1', manifest, sources: new Map([[0, f]]), chunkSize: 64, onEvent: (ev) => events.push(ev) });
+  const sender = createSender({ channel: ch, jobId: 'a51018c10dbd79259ed899eebf9fed43', manifest, sources: new Map([[0, f]]), chunkSize: 64, onEvent: (ev) => events.push(ev) });
   const finished = sender.start();
-  await ch.feedCtrl(acceptFrame({ jobId: 'j1', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await ch.feedCtrl(acceptFrame({ jobId: 'a51018c10dbd79259ed899eebf9fed43', resume: [{ fileId: 0, haveBytes: 0 }] }));
   await until(() => events.some((e) => e.type === 'accepted')); // transfer is genuinely under way
-  await ch.feedCtrl(cancelFrame('j1')); // the receiver cancels mid-transfer
+  await ch.feedCtrl(cancelFrame('a51018c10dbd79259ed899eebf9fed43')); // the receiver cancels mid-transfer
   await expect(finished).rejects.toThrow(/canceled/);
   const canceled = events.find((e) => e.type === 'canceled');
   expect(canceled).toBeTruthy();
@@ -139,11 +139,11 @@ test('createSender skips a file the receiver already has fully', async () => {
   writeFileSync(f, data);
   const manifest = { entries: [{ fileId: 0, path: 'b.bin', size: 500, mtime: 1 }], totalBytes: 500, totalFiles: 1 };
   const ch = fakeChannel();
-  const sender = createSender({ channel: ch, jobId: 'j2', manifest, sources: new Map([[0, f]]), chunkSize: 128 });
+  const sender = createSender({ channel: ch, jobId: '53b453cdbbe986643998ece8365efd69', manifest, sources: new Map([[0, f]]), chunkSize: 128 });
   const finished = sender.start();
-  await ch.feedCtrl(acceptFrame({ jobId: 'j2', resume: [{ fileId: 0, haveBytes: 500 }] })); // already complete
+  await ch.feedCtrl(acceptFrame({ jobId: '53b453cdbbe986643998ece8365efd69', resume: [{ fileId: 0, haveBytes: 500 }] })); // already complete
   await until(() => ch.ctrlOut.some((f) => f.t === 'job_done'));
-  await ch.feedCtrl(completeFrame({ jobId: 'j2', ok: true }));
+  await ch.feedCtrl(completeFrame({ jobId: '53b453cdbbe986643998ece8365efd69', ok: true }));
   await finished;
   expect(ch.bulkOut.length).toBe(0); // nothing streamed
   expect(ch.ctrlOut.map((f) => f.t)).toEqual(['offer', 'job_done']);
@@ -156,17 +156,17 @@ test('createSender waits for the receiver\'s complete ack before resolving (deli
   const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 200, mtime: 5 }], totalBytes: 200, totalFiles: 1 };
   const events = [];
   const ch = fakeChannel();
-  const sender = createSender({ channel: ch, jobId: 'w1', manifest, sources: new Map([[0, f]]), chunkSize: 64, onEvent: (ev) => events.push(ev) });
+  const sender = createSender({ channel: ch, jobId: '416f667587b57972f06299b824840f79', manifest, sources: new Map([[0, f]]), chunkSize: 64, onEvent: (ev) => events.push(ev) });
   let resolved = false;
   const finished = sender.start().then(() => { resolved = true; });
-  await ch.feedCtrl(acceptFrame({ jobId: 'w1', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await ch.feedCtrl(acceptFrame({ jobId: '416f667587b57972f06299b824840f79', resume: [{ fileId: 0, haveBytes: 0 }] }));
   await until(() => ch.ctrlOut.some((f) => f.t === 'job_done'));
   await new Promise((r) => setTimeout(r, 20));
   // All bytes are SENT (all-sent emitted) but NOT yet acked — must NOT resolve.
   expect(events.some((e) => e.type === 'all-sent')).toBe(true);
   expect(resolved).toBe(false);
   // The receiver confirms every file received + hash-verified -> resolve.
-  await ch.feedCtrl(completeFrame({ jobId: 'w1', ok: true }));
+  await ch.feedCtrl(completeFrame({ jobId: '416f667587b57972f06299b824840f79', ok: true }));
   await finished;
   expect(resolved).toBe(true);
   expect(events.some((e) => e.type === 'completed')).toBe(true);
@@ -178,11 +178,11 @@ test('createSender fails when the receiver reports incomplete (complete ok:false
   writeFileSync(f, Buffer.from('x'.repeat(80)));
   const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: 80, mtime: 5 }], totalBytes: 80, totalFiles: 1 };
   const ch = fakeChannel();
-  const sender = createSender({ channel: ch, jobId: 'w2', manifest, sources: new Map([[0, f]]), chunkSize: 64 });
+  const sender = createSender({ channel: ch, jobId: '8aa24ac558777bf58b86476111c60a8f', manifest, sources: new Map([[0, f]]), chunkSize: 64 });
   const finished = sender.start();
-  await ch.feedCtrl(acceptFrame({ jobId: 'w2', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await ch.feedCtrl(acceptFrame({ jobId: '8aa24ac558777bf58b86476111c60a8f', resume: [{ fileId: 0, haveBytes: 0 }] }));
   await until(() => ch.ctrlOut.some((f) => f.t === 'job_done'));
-  await ch.feedCtrl(completeFrame({ jobId: 'w2', ok: false }));
+  await ch.feedCtrl(completeFrame({ jobId: '8aa24ac558777bf58b86476111c60a8f', ok: false }));
   await expect(finished).rejects.toThrow(/receiver_incomplete/);
 });
 
@@ -194,9 +194,9 @@ test('createSender fails with no_confirmation if the complete ack never arrives 
   let fire = null;
   const setTimer = (fn) => { fire = fn; return { unref() {} }; };
   const ch = fakeChannel();
-  const sender = createSender({ channel: ch, jobId: 'w3', manifest, sources: new Map([[0, f]]), chunkSize: 64, completionTimeoutMs: 100, setTimer, clearTimer: () => {} });
+  const sender = createSender({ channel: ch, jobId: 'e1d3958a157da17a3c43c818e023a6d0', manifest, sources: new Map([[0, f]]), chunkSize: 64, completionTimeoutMs: 100, setTimer, clearTimer: () => {} });
   const finished = sender.start();
-  await ch.feedCtrl(acceptFrame({ jobId: 'w3', resume: [{ fileId: 0, haveBytes: 0 }] }));
+  await ch.feedCtrl(acceptFrame({ jobId: 'e1d3958a157da17a3c43c818e023a6d0', resume: [{ fileId: 0, haveBytes: 0 }] }));
   await until(() => ch.ctrlOut.some((f) => f.t === 'job_done'));
   await until(() => typeof fire === 'function'); // completion backstop timer armed
   fire(); // the ack never came
@@ -226,17 +226,17 @@ test('createReceiver validates the offer, accepts, writes bytes, verifies and fi
   const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true });
   const done = rx.start();
 
-  await recvCtrl(offerFrame({ jobId: 'r1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(offerFrame({ jobId: '63292d1c0c61110e0410e8e4970182f6', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   const accept = sentToSender.find((f) => f.t === 'accept');
   expect(accept).toBeTruthy();
   // Fresh transfer → no non-zero resume offsets, so the accept omits them (keeps
   // the frame tiny; the sender defaults any missing file to offset 0).
   expect(accept.resume).toEqual([]);
 
-  await recvCtrl(fileBeginFrame({ jobId: 'r1', fileId: 0, offset: 0 }));
+  await recvCtrl(fileBeginFrame({ jobId: '63292d1c0c61110e0410e8e4970182f6', fileId: 0, offset: 0 }));
   await recvBulk(payload);
-  await recvCtrl(fileEndFrame({ jobId: 'r1', fileId: 0, hash }));
-  await recvCtrl(jobDoneFrame({ jobId: 'r1' }));
+  await recvCtrl(fileEndFrame({ jobId: '63292d1c0c61110e0410e8e4970182f6', fileId: 0, hash }));
+  await recvCtrl(jobDoneFrame({ jobId: '63292d1c0c61110e0410e8e4970182f6' }));
   const res = await done;
 
   expect(res.ok).toBe(true);
@@ -260,7 +260,7 @@ test('createReceiver sends a prompting frame BEFORE awaiting consent (lets the s
     consent: async () => { promptingSeenAtConsent = sent.some((f) => f && f.t === 'prompting'); return false; },
   });
   const done = rx.start();
-  await recvCtrl(offerFrame({ jobId: 'p1', entries: manifest.entries, totalBytes: 10, totalFiles: 1 }));
+  await recvCtrl(offerFrame({ jobId: '32dc1412c296d3db96522ca92e0c376d', entries: manifest.entries, totalBytes: 10, totalFiles: 1 }));
   await done;
   expect(promptingSeenAtConsent).toBe(true); // prompting was already on the wire when consent ran
 });
@@ -282,7 +282,7 @@ test('createReceiver fails an accepted-but-stalled receive after inactivity (per
     onEvent: (ev) => events.push(ev), inactivityMs: 50, setTimer, clearTimer,
   });
   const done = rx.start();
-  await recvCtrl(offerFrame({ jobId: 's1', entries: manifest.entries, totalBytes: 1000, totalFiles: 1 }));
+  await recvCtrl(offerFrame({ jobId: '2c25fa95a4919b629beddd44195324d5', entries: manifest.entries, totalBytes: 1000, totalFiles: 1 }));
   expect(sent.some((f) => f.t === 'accept')).toBe(true); // accepted -> watchdog armed
   expect(typeof fire).toBe('function');
   fire(); // no bytes ever arrived -> inactivity fires
@@ -305,7 +305,7 @@ test('createReceiver does NOT arm the inactivity watchdog before accept (a slow 
   });
   rx.start();
   // Don't await — the offer handler parks on the (never-resolving) consent.
-  recvCtrl(offerFrame({ jobId: 'h1', entries: manifest.entries, totalBytes: 10, totalFiles: 1 }));
+  recvCtrl(offerFrame({ jobId: '33f8f3b62d75f5c0bc9ad3c0ec48bc2c', entries: manifest.entries, totalBytes: 10, totalFiles: 1 }));
   await new Promise((r) => setTimeout(r, 20)); // let it reach the consent await
   expect(armed).toBe(false); // still waiting on the human — watchdog not armed yet
   release(false); // decline to clean up
@@ -319,7 +319,7 @@ test('createReceiver rejects a manifest with a traversal path', async () => {
   const rx = createReceiver({ channel: ch, destRoot: dest, store: memStore(), consent: async () => true });
   rx.start();
   // A hostile entry that Phase-1 buildManifest rejects.
-  await recvCtrl(offerFrame({ jobId: 'bad', entries: [{ fileId: 0, path: '../escape', size: 1, mtime: 1 }], totalBytes: 1, totalFiles: 1 }));
+  await recvCtrl(offerFrame({ jobId: '5c35d2f984afdf6e6e934510391e955e', entries: [{ fileId: 0, path: '../escape', size: 1, mtime: 1 }], totalBytes: 1, totalFiles: 1 }));
   expect(sent.some((f) => f.t === 'reject')).toBe(true);
   expect(sent.some((f) => f.t === 'accept')).toBe(false);
 });
@@ -339,9 +339,9 @@ test('createReceiver passes the real jobId to consent alongside the manifest', a
     consent: async (arg) => { seen.push(arg); return false; },
   });
   rx.start();
-  await recvCtrl(offerFrame({ jobId: 'consent-jid', entries, totalBytes: 1, totalFiles: 1 }));
+  await recvCtrl(offerFrame({ jobId: '272221ba2f884a023debc6467b898f10', entries, totalBytes: 1, totalFiles: 1 }));
   expect(seen.length).toBe(1);
-  expect(seen[0].jobId).toBe('consent-jid');
+  expect(seen[0].jobId).toBe('272221ba2f884a023debc6467b898f10');
   expect(seen[0].manifest.totalFiles).toBe(1);
   expect(sent.some((f) => f.t === 'reject' && f.reason === 'declined')).toBe(true);
 });
@@ -390,7 +390,7 @@ test('multi-chunk files survive ctrl/bulk cross-channel skew (FILE_BEGIN arrivin
   };
   const rx = createReceiver({ channel: skewed, destRoot: dest, store: memStore(), consent: async () => true });
   const rxDone = rx.start();
-  const tx = createSender({ channel: sCh, jobId: 'skew1', manifest, sources, chunkSize: 1000 });
+  const tx = createSender({ channel: sCh, jobId: '4f27bb99ae68d65df6f31cde5f23f6cb', manifest, sources, chunkSize: 1000 });
   tx.start().catch(() => {});
   const res = await rxDone;
 
@@ -415,7 +415,7 @@ test('loopback: a multi-file folder transfers, verifies, and finalizes every fil
   const { sender: sCh, receiver: rCh } = loopback();
   const rx = createReceiver({ channel: rCh, destRoot: dest, store: memStore(), consent: async () => true });
   const rxDone = rx.start();
-  const tx = createSender({ channel: sCh, jobId: 'loop1', manifest, sources, chunkSize: 1000 });
+  const tx = createSender({ channel: sCh, jobId: '17056d9d2247fe323248a5ee2544b02b', manifest, sources, chunkSize: 1000 });
   await tx.start();
   const res = await rxDone;
 
@@ -446,11 +446,11 @@ test('createReceiver does not resolve on job_done until the last file finishes d
   let settled = false;
   done.then(() => { settled = true; });
 
-  await recvCtrl(offerFrame({ jobId: 'g1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
-  await recvCtrl(fileBeginFrame({ jobId: 'g1', fileId: 0, offset: 0 }));
+  await recvCtrl(offerFrame({ jobId: 'cc854676f78dbba2d22fb8176bb19bb1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(fileBeginFrame({ jobId: 'cc854676f78dbba2d22fb8176bb19bb1', fileId: 0, offset: 0 }));
   // job_done arrives BEFORE the file's bulk bytes and FILE_END (ft-ctrl and
   // ft-bulk are independently ordered) — the receiver must NOT resolve yet.
-  await recvCtrl(jobDoneFrame({ jobId: 'g1' }));
+  await recvCtrl(jobDoneFrame({ jobId: 'cc854676f78dbba2d22fb8176bb19bb1' }));
   await new Promise((r) => setImmediate(r));
   expect(settled).toBe(false);
 
@@ -458,7 +458,7 @@ test('createReceiver does not resolve on job_done until the last file finishes d
   await new Promise((r) => setImmediate(r));
   expect(settled).toBe(false); // bytes landed, but FILE_END's hash hasn't arrived yet
 
-  await recvCtrl(fileEndFrame({ jobId: 'g1', fileId: 0, hash }));
+  await recvCtrl(fileEndFrame({ jobId: 'cc854676f78dbba2d22fb8176bb19bb1', fileId: 0, hash }));
   const res = await done;
 
   expect(res.ok).toBe(true);
@@ -473,7 +473,7 @@ test('createReceiver resolves (does not hang) with ok:false when it declines an 
   const rx = createReceiver({ channel: ch, destRoot: dest, store: memStore(), consent: async () => true });
   const done = rx.start();
 
-  await recvCtrl(offerFrame({ jobId: 'bad2', entries: [{ fileId: 0, path: '../escape', size: 1, mtime: 1 }], totalBytes: 1, totalFiles: 1 }));
+  await recvCtrl(offerFrame({ jobId: '24d224fce38f0021aa412de6fc978414', entries: [{ fileId: 0, path: '../escape', size: 1, mtime: 1 }], totalBytes: 1, totalFiles: 1 }));
   expect(sent.some((f) => f.t === 'reject')).toBe(true);
 
   const res = await done; // must settle, not hang
@@ -494,11 +494,11 @@ test('createReceiver resolves ok:false (does not hang) on a hash mismatch, and d
   const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true });
   const done = rx.start();
 
-  await recvCtrl(offerFrame({ jobId: 'm1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
-  await recvCtrl(fileBeginFrame({ jobId: 'm1', fileId: 0, offset: 0 }));
+  await recvCtrl(offerFrame({ jobId: 'd398f15d6757fd3cbb5b3726d87f2ca4', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(fileBeginFrame({ jobId: 'd398f15d6757fd3cbb5b3726d87f2ca4', fileId: 0, offset: 0 }));
   await recvBulk(payload);
-  await recvCtrl(fileEndFrame({ jobId: 'm1', fileId: 0, hash: 'deadbeef'.repeat(8) })); // wrong hash (64 hex chars)
-  await recvCtrl(jobDoneFrame({ jobId: 'm1' }));
+  await recvCtrl(fileEndFrame({ jobId: 'd398f15d6757fd3cbb5b3726d87f2ca4', fileId: 0, hash: 'deadbeef'.repeat(8) })); // wrong hash (64 hex chars)
+  await recvCtrl(jobDoneFrame({ jobId: 'd398f15d6757fd3cbb5b3726d87f2ca4' }));
   const res = await done; // must settle, not hang
 
   expect(res.ok).toBe(false);
@@ -532,7 +532,7 @@ test('loopback: an interrupted single file resumes and still verifies (restart c
     const { sender: sCh, receiver: rCh } = loopback();
     const rx = createReceiver({ channel: rCh, destRoot: dest, store: memStore(), consent: async () => true });
     const rxDone = rx.start();
-    const tx = createSender({ channel: sCh, jobId: 'r1', manifest, sources, chunkSize: 500 });
+    const tx = createSender({ channel: sCh, jobId: '63292d1c0c61110e0410e8e4970182f6', manifest, sources, chunkSize: 500 });
     await tx.start();
     const res = await rxDone;
     expect(res.ok).toBe(true);
@@ -554,11 +554,11 @@ test('receiver emits throttled progress events as bulk bytes arrive — not just
     progressIntervalMs: 100, now: () => clock, onEvent: (ev) => events.push(ev),
   });
   const done = rx.start();
-  await recvCtrl(offerFrame({ jobId: 'p1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(offerFrame({ jobId: '32dc1412c296d3db96522ca92e0c376d', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   // Four 1000-byte chunks of ONE file, each a throttle-interval apart.
   for (let i = 0; i < 4; i += 1) { clock += 100; await recvBulk(payload.subarray(i * 1000, (i + 1) * 1000)); }
-  await recvCtrl(fileEndFrame({ jobId: 'p1', fileId: 0, hash }));
-  await recvCtrl(jobDoneFrame({ jobId: 'p1' }));
+  await recvCtrl(fileEndFrame({ jobId: '32dc1412c296d3db96522ca92e0c376d', fileId: 0, hash }));
+  await recvCtrl(jobDoneFrame({ jobId: '32dc1412c296d3db96522ca92e0c376d' }));
   await done;
   const prog = events.filter((e) => e.type === 'progress');
   expect(prog.length).toBeGreaterThan(1); // NOT one snapshot at the end — a 100GB file needs movement
@@ -581,10 +581,10 @@ test('receiver progress emission is throttled by progressIntervalMs', async () =
     onEvent: (ev) => events.push(ev),
   });
   const done = rx.start();
-  await recvCtrl(offerFrame({ jobId: 'p2', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(offerFrame({ jobId: '49facfbed6628633109cc6f6a159c94b', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   for (let i = 0; i < 4; i += 1) await recvBulk(payload.subarray(i * 1000, (i + 1) * 1000));
-  await recvCtrl(fileEndFrame({ jobId: 'p2', fileId: 0, hash }));
-  await recvCtrl(jobDoneFrame({ jobId: 'p2' }));
+  await recvCtrl(fileEndFrame({ jobId: '49facfbed6628633109cc6f6a159c94b', fileId: 0, hash }));
+  await recvCtrl(jobDoneFrame({ jobId: '49facfbed6628633109cc6f6a159c94b' }));
   await done;
   // Every chunk pokes emitProgress; the throttle admits at most one. (Per-chunk
   // IPC on a 100GB send would be ~800k messages.)
@@ -604,13 +604,13 @@ test('sender emits throttled progress events as chunks go out', async () => {
   const origSendBulk = ch.sendBulk.bind(ch);
   ch.sendBulk = async (b) => { clock += 100; return origSendBulk(b); };
   const sender = createSender({
-    channel: ch, jobId: 'sp1', manifest, sources: new Map([[0, f]]), chunkSize: 1000,
+    channel: ch, jobId: '00af63b378a338da93dd0d44332d3bfa', manifest, sources: new Map([[0, f]]), chunkSize: 1000,
     progressIntervalMs: 100, now: () => clock, onEvent: (ev) => events.push(ev),
   });
   const finished = sender.start();
-  await ch.feedCtrl(acceptFrame({ jobId: 'sp1', resume: [] }));
+  await ch.feedCtrl(acceptFrame({ jobId: '00af63b378a338da93dd0d44332d3bfa', resume: [] }));
   await until(() => ch.ctrlOut.some((fr) => fr.t === 'job_done'));
-  await ch.feedCtrl(completeFrame({ jobId: 'sp1', ok: true }));
+  await ch.feedCtrl(completeFrame({ jobId: '00af63b378a338da93dd0d44332d3bfa', ok: true }));
   await finished;
   const prog = events.filter((e) => e.type === 'progress');
   expect(prog.length).toBeGreaterThan(1);
@@ -629,10 +629,10 @@ test('receiver emits a real completed event when it acks delivery', async () => 
   const events = [];
   const rx = createReceiver({ channel: ch, destRoot: dest, store: memStore(), consent: async () => true, onEvent: (ev) => events.push(ev) });
   const done = rx.start();
-  await recvCtrl(offerFrame({ jobId: 'c1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(offerFrame({ jobId: '301992e28f533467226d3f67cf0919cf', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   await recvBulk(payload);
-  await recvCtrl(fileEndFrame({ jobId: 'c1', fileId: 0, hash }));
-  await recvCtrl(jobDoneFrame({ jobId: 'c1' }));
+  await recvCtrl(fileEndFrame({ jobId: '301992e28f533467226d3f67cf0919cf', fileId: 0, hash }));
+  await recvCtrl(jobDoneFrame({ jobId: '301992e28f533467226d3f67cf0919cf' }));
   await done;
   const completed = events.filter((e) => e.type === 'completed');
   expect(completed.length).toBe(1); // the UI no longer has to infer this from fraction >= 1
@@ -650,10 +650,10 @@ test('receiver persists the REAL tier, not a hardcoded adhoc', async () => {
   const store = memStore();
   const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true, getTier: () => 'contact' });
   const done = rx.start();
-  await recvCtrl(offerFrame({ jobId: 't1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(offerFrame({ jobId: 'c8055eac1419fbd9e0ba555cfdd5d41f', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   await recvBulk(payload);
-  await recvCtrl(fileEndFrame({ jobId: 't1', fileId: 0, hash }));
-  await recvCtrl(jobDoneFrame({ jobId: 't1' }));
+  await recvCtrl(fileEndFrame({ jobId: 'c8055eac1419fbd9e0ba555cfdd5d41f', fileId: 0, hash }));
+  await recvCtrl(jobDoneFrame({ jobId: 'c8055eac1419fbd9e0ba555cfdd5d41f' }));
   await done;
   expect(store.saved.length).toBeGreaterThan(0);
   expect(store.saved.every((r) => r.tier === 'contact')).toBe(true);
@@ -676,7 +676,7 @@ test('a stalled fleet receive persists interrupted (resumable), not a permanent 
     onEvent: (ev) => events.push(ev),
   });
   const settled = rx.start().catch((e) => e.message);
-  await recvCtrl(offerFrame({ jobId: 'i1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(offerFrame({ jobId: '18bb190462182b8f32894bfa7232083b', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   await until(() => typeof fire === 'function'); // watchdog armed at accept
   fire(); // the sender went silent
   expect(await settled).toBe('stalled');
@@ -700,7 +700,7 @@ test('a stalled adhoc receive stays a terminal error (nothing will resume it)', 
     onEvent: (ev) => events.push(ev),
   });
   const settled = rx.start().catch((e) => e.message);
-  await recvCtrl(offerFrame({ jobId: 'i2', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(offerFrame({ jobId: 'd851f2fa80537f2a409200a870ebe85e', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   await until(() => typeof fire === 'function');
   fire();
   expect(await settled).toBe('stalled');
@@ -717,12 +717,12 @@ test('receiver abort sends a cancel frame the sender honors, and rejects', async
   const events = [];
   const rx = createReceiver({ channel: ch, destRoot: dest, store: memStore(), consent: async () => true, onEvent: (ev) => events.push(ev) });
   const settled = rx.start().catch((e) => e.message);
-  await recvCtrl(offerFrame({ jobId: 'x1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(offerFrame({ jobId: '63eb8d40467a939d683e7292fe98597d', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   rx.abort('canceled');
   expect(await settled).toBe('canceled');
   const cancel = sentToSender.find((f) => f.t === 'cancel');
   expect(cancel).toBeTruthy();
-  expect(cancel.jobId).toBe('x1'); // the sender's inbound-cancel branch (:103) reads exactly this
+  expect(cancel.jobId).toBe('63eb8d40467a939d683e7292fe98597d'); // the sender's inbound-cancel branch (:103) reads exactly this
   expect(events.find((e) => e.type === 'canceled')).toBeTruthy();
 });
 
@@ -744,10 +744,10 @@ test('receiver abort after settling is a no-op', async () => {
   const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; } };
   const rx = createReceiver({ channel: ch, destRoot: dest, store: memStore(), consent: async () => true });
   const done = rx.start();
-  await recvCtrl(offerFrame({ jobId: 'n1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(offerFrame({ jobId: '6029707323b18d4218f3ebdc82ae3921', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   await recvBulk(payload);
-  await recvCtrl(fileEndFrame({ jobId: 'n1', fileId: 0, hash }));
-  await recvCtrl(jobDoneFrame({ jobId: 'n1' }));
+  await recvCtrl(fileEndFrame({ jobId: '6029707323b18d4218f3ebdc82ae3921', fileId: 0, hash }));
+  await recvCtrl(jobDoneFrame({ jobId: '6029707323b18d4218f3ebdc82ae3921' }));
   expect((await done).ok).toBe(true);
   expect(() => rx.abort('canceled')).not.toThrow(); // already resolved — must not re-settle
 });
@@ -775,7 +775,7 @@ test('review fix (finding 1): a cancel while the consent prompt is still pending
   const settled = rx.start().catch((e) => e.message);
   // Don't await — the offer handler parks on the (never-resolving until we
   // release it) consent promise, so awaiting here would hang the test.
-  recvCtrl(offerFrame({ jobId: 'cp1', entries: manifest.entries, totalBytes: 10, totalFiles: 1 }));
+  recvCtrl(offerFrame({ jobId: '52bef53f477206f741be3ea195f7b1bb', entries: manifest.entries, totalBytes: 10, totalFiles: 1 }));
   await new Promise((r) => setTimeout(r, 20)); // let beginReceive reach (and park on) the consent await
   expect(typeof releaseConsent).toBe('function');
 
@@ -829,16 +829,16 @@ test('review fix (finding 2): an abort racing an in-flight saveRecord(done) does
   const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true, onEvent: (ev) => events.push(ev) });
   const settled = rx.start().catch((e) => e.message);
 
-  await recvCtrl(offerFrame({ jobId: 'race1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(offerFrame({ jobId: '28561c7bb873ede4b40db82f44215a5d', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   expect(sentToSender.some((f) => f.t === 'accept')).toBe(true); // consented + accepted -> 'active' saved (ungated)
 
   await recvBulk(payload);
-  await recvCtrl(fileEndFrame({ jobId: 'race1', fileId: 0, hash })); // finalizes the only file -> pending empty
+  await recvCtrl(fileEndFrame({ jobId: '28561c7bb873ede4b40db82f44215a5d', fileId: 0, hash })); // finalizes the only file -> pending empty
 
   // job_done -> maybeComplete() -> saveRecord('done'), now blocked on doneGate —
   // the exact "run()-queued handler already past its entry guard" window from
   // finding 2. Deliberately NOT awaited yet: we need to abort while it's parked.
-  const jobDoneHandled = recvCtrl(jobDoneFrame({ jobId: 'race1' }));
+  const jobDoneHandled = recvCtrl(jobDoneFrame({ jobId: '28561c7bb873ede4b40db82f44215a5d' }));
   await new Promise((r) => setTimeout(r, 20)); // let it reach (and block on) the gated save
 
   rx.abort('canceled'); // races the in-flight saveRecord('done')
@@ -873,7 +873,7 @@ test('review fix round 2: onBulk/tryFinalize have no settled guard — bulk/file
   const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true, onEvent: (ev) => events.push(ev) });
   const settled = rx.start().catch((e) => e.message);
 
-  await recvCtrl(offerFrame({ jobId: 'r2', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  await recvCtrl(offerFrame({ jobId: 'b7c28bfd10140aa3d74345054a39cb6d', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
   expect(sentToSender.some((f) => f.t === 'accept')).toBe(true); // accepted normally, watchdog armed
 
   // NOT awaited: each call only enqueues its handler onto the shared serializer
@@ -881,8 +881,8 @@ test('review fix round 2: onBulk/tryFinalize have no settled guard — bulk/file
   // settling the receiver BEFORE the JS engine drains the microtask queue, so all
   // three queued handlers see `settled === true` the moment they finally run.
   const p1 = recvBulk(payload);
-  const p2 = recvCtrl(fileEndFrame({ jobId: 'r2', fileId: 0, hash }));
-  const p3 = recvCtrl(jobDoneFrame({ jobId: 'r2' }));
+  const p2 = recvCtrl(fileEndFrame({ jobId: 'b7c28bfd10140aa3d74345054a39cb6d', fileId: 0, hash }));
+  const p3 = recvCtrl(jobDoneFrame({ jobId: 'b7c28bfd10140aa3d74345054a39cb6d' }));
   rx.abort('canceled');
   await Promise.all([p1, p2, p3]); // let the (now no-op) queued handlers actually run
 
@@ -953,12 +953,12 @@ test('a cancel landing while genuinely parked inside finalizeReceivedFile emits 
     const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true, onEvent: (ev) => events.push(ev) });
     const settled = rx.start().catch((e) => e.message);
 
-    await recvCtrl(offerFrame({ jobId: 'r3', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+    await recvCtrl(offerFrame({ jobId: '2422cd1f1ba7536846f622581c392fd7', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
     await recvBulk(payload); // bytes land; FILE_END hasn't arrived yet so tryFinalize just defers (hash == null)
 
     // NOT awaited: file_end's handler drives into tryFinalize -> the gated
     // finalizeReceivedFile and parks there until we release it.
-    const fileEndHandled = recvCtrl(fileEndFrame({ jobId: 'r3', fileId: 0, hash }));
+    const fileEndHandled = recvCtrl(fileEndFrame({ jobId: '2422cd1f1ba7536846f622581c392fd7', fileId: 0, hash }));
     await until(() => gateEntered); // genuinely parked INSIDE finalizeReceivedFile, not just queued behind it
 
     rx.abort('canceled'); // lands while the real hash+rename is in flight
@@ -1017,7 +1017,7 @@ test('review fix round 4: aborting mid-file closes the open .part file handle (n
     const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true });
     const settled = rx.start().catch((e) => e.message);
 
-    await recvCtrl(offerFrame({ jobId: 'r4', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+    await recvCtrl(offerFrame({ jobId: '0396a0b6759a6e0deee64a2ab6cfc9f0', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
     await recvBulk(half); // byte-incomplete: no FILE_END, tryFinalize never runs for this item
 
     rx.abort('canceled');
@@ -1064,10 +1064,10 @@ test('review fix round 4: a normal completed receive closes the .part handle exa
     const rx = createReceiver({ channel: ch, destRoot: dest, store, consent: async () => true });
     const settled = rx.start();
 
-    await recvCtrl(offerFrame({ jobId: 'r4ok', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+    await recvCtrl(offerFrame({ jobId: '4757de73394aa11ee517466bab356e10', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
     await recvBulk(payload);
-    await recvCtrl(fileEndFrame({ jobId: 'r4ok', fileId: 0, hash }));
-    await recvCtrl(jobDoneFrame({ jobId: 'r4ok' }));
+    await recvCtrl(fileEndFrame({ jobId: '4757de73394aa11ee517466bab356e10', fileId: 0, hash }));
+    await recvCtrl(jobDoneFrame({ jobId: '4757de73394aa11ee517466bab356e10' }));
     await settled;
 
     expect(closeCalls).toBe(1); // fd-leak fix's closeOpenPartFiles() found nothing to do

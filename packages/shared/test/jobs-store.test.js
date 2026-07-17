@@ -1,8 +1,8 @@
 // SP3 jobs-store (spec §6.5): durable per-job JSON records. Temp-dir tests.
 import { expect, test, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { createJobsStore, JOB_STATES } from '../src/jobs-store.js';
 import { nextJobState } from '../src/transfer-engine.js';
 
@@ -69,6 +69,52 @@ test('remove deletes a job and is a no-op if it is already gone', async () => {
   await store.remove('gone');
   expect(await store.load('gone')).toBeNull();
   await store.remove('gone'); // no throw
+});
+
+// Review finding (security, pre-existing): jobId is sender-chosen (the wire
+// OFFER carries it) and jobPath() used to path-join it into a filename with no
+// sanitization. A peer whose transfer the human accepts (they approve "let dad
+// send photo.jpg", never seeing the jobId) could send jobId '../victim' and
+// get an arbitrary-path .json write/overwrite primitive on the receiver's
+// disk. transfer-protocol.js now rejects a malformed jobId at the wire
+// boundary, but this store must be safe even if a caller (a bug elsewhere, a
+// future code path) hands it an unvalidated id directly -- defense in depth.
+test('save/load never escape the store dir for a traversal-shaped, absolute, or separator-bearing jobId', async () => {
+  const dir = tmp();
+  const store = createJobsStore({ dir });
+  const outsideDir = tmp(); // sibling tmp dir -- would be the escape target
+  const victimInOutside = join(outsideDir, 'victim.json');
+  const victimAboveDir = join(dir, '..', 'victim.json');
+
+  const attempts = [
+    '../victim',            // classic relative traversal
+    '..\\victim',           // Windows-style traversal
+    join(outsideDir, 'victim'), // absolute path as the "id"
+    'sub/victim',           // forward-slash separator
+    'sub\\victim',          // backslash separator
+  ];
+
+  for (const jobId of attempts) {
+    await expect(store.save({ ...sample(), jobId })).rejects.toThrow();
+    expect(await store.load(jobId)).toBeNull();
+  }
+
+  // Nothing landed outside `dir` from any attempt.
+  expect(existsSync(victimAboveDir)).toBe(false);
+  expect(existsSync(victimInOutside)).toBe(false);
+  expect(existsSync(join(outsideDir, 'victim.json'))).toBe(false);
+  // And `dir` itself only ever got legitimately-named files, if any at all.
+  expect(readdirSync(dir).every((n) => !n.includes('/') && !n.includes('\\'))).toBe(true);
+});
+
+test('remove never escapes the store dir for a traversal-shaped jobId (no-op, does not throw)', async () => {
+  const dir = tmp();
+  const store = createJobsStore({ dir });
+  const outsideDir = tmp();
+  writeFileSync(join(outsideDir, 'victim.json'), JSON.stringify({ untouched: true }));
+
+  await store.remove('../' + basename(outsideDir) + '/victim');
+  expect(existsSync(join(outsideDir, 'victim.json'))).toBe(true); // untouched
 });
 
 test('JOB_STATES covers every state the engine reducer can reach', () => {

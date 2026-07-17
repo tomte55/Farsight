@@ -85,7 +85,7 @@ test('SP3 bugfix: a large-manifest OFFER is chunked so it fits the data-channel 
   const MAX = 4096; // pretend data-channel message limit (legacy single OFFER > this)
   const { sideA, sideB, stats } = sizedLoopback(MAX);
   const rx = createReceiver({ channel: sideB, destRoot: dest, store: memStore(), consent: async () => true, inactivityMs: 1500 });
-  const sender = createSender({ channel: sideA, jobId: 'jbig', manifest, sources, chunkSize: 512, offerBatchBytes: 1024, completionTimeoutMs: 5000 });
+  const sender = createSender({ channel: sideA, jobId: '3343755fbfe467755d81fb251260178b', manifest, sources, chunkSize: 512, offerBatchBytes: 1024, completionTimeoutMs: 5000 });
   const rxP = rx.start();
   const sndP = sender.start();
 
@@ -188,11 +188,11 @@ test('a contact send records tier:contact and still passes linked:true to openCh
     getFleet: async () => [],
     rendezvousTimeoutMs: 60,
   });
-  await svc.startSend({ jobId: 'jc', manifest, sources,
+  await svc.startSend({ jobId: 'ed2b14384fd3e7803dbae854395cbfe3', manifest, sources,
     target: { id: 'sig-1', deviceId: 'devC', linked: true, contact: true }, sourceRoots: [] })
     .catch(() => {}); // deadChannel → send fails; we only assert the recorded tier + openChannel args
   expect(sendOpenArgs.target).toMatchObject({ id: 'sig-1', linked: true, contact: true });
-  const rec = sendStore.saved.find((s) => s.jobId === 'jc');
+  const rec = sendStore.saved.find((s) => s.jobId === 'ed2b14384fd3e7803dbae854395cbfe3');
   expect(rec.tier).toBe('contact');
   expect(rec.peer).toEqual({ id: 'sig-1', deviceId: 'devC' });
 });
@@ -740,13 +740,13 @@ test('SP3 P4: the resume watcher re-walks sourceRoots and re-sends an interrupte
   });
   svc.startResumeWatcher();
 
-  await svc.startSend({ jobId: 'jr', manifest, sources, target: { id: 'sig-OLD', deviceId: 'dev-1', linked: true }, sourceRoots: [srcFile] });
-  expect((await sendStore.list()).find((j) => j.jobId === 'jr').jobState).toBe('interrupted');
+  await svc.startSend({ jobId: '13529414aa9f2a245a526dd4158c1844', manifest, sources, target: { id: 'sig-OLD', deviceId: 'dev-1', linked: true }, sourceRoots: [srcFile] });
+  expect((await sendStore.list()).find((j) => j.jobId === '13529414aa9f2a245a526dd4158c1844').jobState).toBe('interrupted');
 
   await svc.resumeSweepNow();                       // re-walk + re-send; resolves after it settles
   await liveReceiver;
 
-  const rec = (await sendStore.list()).find((j) => j.jobId === 'jr');
+  const rec = (await sendStore.list()).find((j) => j.jobId === '13529414aa9f2a245a526dd4158c1844');
   expect(rec.jobState).toBe('done');                // re-established send completed
   expect(readFileSync(join(dest, 'resume-me.txt'))).toEqual(readFileSync(srcFile));
   svc.stopResumeWatcher();
@@ -761,7 +761,7 @@ test('SP3 P4: the resume watcher preserves contact:true when re-sending an inter
   // Seed the store directly with an already-interrupted CONTACT send record
   // (as if a prior send dropped) rather than driving it through a real send.
   await sendStore.save({
-    jobId: 'jc-resume',
+    jobId: '859ba6db949abb6f420555e8c98e88c1',
     dir: 'send',
     tier: 'contact',
     peer: { id: 'sig-OLD', deviceId: 'devC' },
@@ -858,12 +858,12 @@ test('SP3 bugfix: a file the receiver ALREADY HAS (skip-existing) completes inst
 
   const { sideA, sideB } = loopback();
   const rx = createReceiver({ channel: sideB, destRoot: dest, store: memStore(), consent: async () => true, inactivityMs: 800 });
-  const sender = createSender({ channel: sideA, jobId: 'jdup', manifest, sources, chunkSize: 64, completionTimeoutMs: 3000 });
+  const sender = createSender({ channel: sideA, jobId: '23bcd9bb42b365395b23d495259546cb', manifest, sources, chunkSize: 64, completionTimeoutMs: 3000 });
   const rxP = rx.start();
   const sndP = sender.start();
 
   const rxRes = await rxP;                 // must RESOLVE (not reject 'stalled')
-  expect(rxRes).toEqual({ jobId: 'jdup', ok: true });
+  expect(rxRes).toEqual({ jobId: '23bcd9bb42b365395b23d495259546cb', ok: true });
   await sndP;                              // sender resolves only on the complete ack
   expect(existsSync(join(dest, entry.path + '.part'))).toBe(false); // no orphan .part
   expect(readFileSync(join(dest, entry.path))).toEqual(readFileSync(srcFile));
@@ -891,7 +891,7 @@ test('a send that is never accepted fails after the rendezvous timeout and surfa
     onEvent: (ev) => events.push(ev),
     rendezvousTimeoutMs: 80,
   });
-  const res = await svc.startSend({ jobId: 'jt', manifest, sources, target: { id: 'off' } });
+  const res = await svc.startSend({ jobId: 'ee3043437287d1fe0a34def689ff837d', manifest, sources, target: { id: 'off' } });
   expect(res.ok).toBe(false);
   expect(res.error).toMatch(/no_response/);
   expect(events.some((e) => e.type === 'error' && e.reason === 'no_response')).toBe(true);
@@ -910,7 +910,7 @@ test('a rendezvous error from the channel (e.g. bad_password) fails the send wit
     onEvent: (ev) => events.push(ev),
     rendezvousTimeoutMs: 60000, // long — the error path must fire well before this
   });
-  const p = svc.startSend({ jobId: 'jb', manifest, sources, target: { id: 'x', password: 'wrong' } });
+  const p = svc.startSend({ jobId: 'cd7c3ca72b3101abedd99574934830a1', manifest, sources, target: { id: 'x', password: 'wrong' } });
   await new Promise((r) => setTimeout(r, 20)); // let openChannel register the callback
   expect(typeof fireError).toBe('function');
   fireError('bad_password'); // signaling rejected the password
@@ -940,12 +940,12 @@ test('a prompting frame cancels the approval timeout — a slow human decision i
     onEvent: (ev) => events.push(ev), rendezvousTimeoutMs: 50,
   });
   let settled = null;
-  svc.startSend({ jobId: 'jp', manifest, sources, target: { id: 'x' } }).then((r) => { settled = r; });
+  svc.startSend({ jobId: '2eecd64657af5dbc02abc82fa8681e16', manifest, sources, target: { id: 'x' } }).then((r) => { settled = r; });
   await new Promise((r) => setTimeout(r, 160)); // well past the 50ms approval timeout
   expect(events.some((e) => e.type === 'prompting')).toBe(true);
   expect(events.some((e) => e.type === 'error' && e.reason === 'no_response')).toBe(false);
   expect(settled).toBe(null); // still awaiting the (never-coming) accept — NOT failed
-  await svc.cancel('jp'); // clean up the in-flight send
+  await svc.cancel('2eecd64657af5dbc02abc82fa8681e16'); // clean up the in-flight send
 });
 
 test('serial queue: two enqueued sends never have more than one active channel at once, both complete', async () => {
@@ -981,8 +981,8 @@ test('serial queue: two enqueued sends never have more than one active channel a
   const w2 = await walkSource([{ path: join(src2, 'y.bin') }]);
   const m2 = buildManifestReal(w2.entries);
 
-  const p1 = svc.startSend({ jobId: 'jobA', manifest: m1, sources: w1.sources, target: 't1' });
-  const p2 = svc.startSend({ jobId: 'jobB', manifest: m2, sources: w2.sources, target: 't2' });
+  const p1 = svc.startSend({ jobId: '3ec96fa65719335dae4f1d3c79d679c3', manifest: m1, sources: w1.sources, target: 't1' });
+  const p2 = svc.startSend({ jobId: 'b4cbde03074b15af24fffad840e43d7a', manifest: m2, sources: w2.sources, target: 't2' });
 
   const [r1, r2] = await Promise.all([p1, p2]);
   await Promise.all(rxDone); // don't assert on-disk state until the receivers actually finalize
@@ -1058,25 +1058,25 @@ test('cancel() on a waiting (not-yet-active) send removes it from the queue with
     },
   });
 
-  const pA = svc.startSend({ jobId: 'jobA', manifest: m1, sources: w1.sources, target: { id: 'devA' } });
-  const pB = svc.startSend({ jobId: 'jobB', manifest: m2, sources: w2.sources, target: { id: 'devB' } });
+  const pA = svc.startSend({ jobId: '3ec96fa65719335dae4f1d3c79d679c3', manifest: m1, sources: w1.sources, target: { id: 'devA' } });
+  const pB = svc.startSend({ jobId: 'b4cbde03074b15af24fffad840e43d7a', manifest: m2, sources: w2.sources, target: { id: 'devB' } });
   await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
 
   expect(opens.map((t) => t.id)).toEqual(['devA']); // sanity: only jobA's channel opened so far
 
-  const c = await svc.cancel('jobB');
+  const c = await svc.cancel('b4cbde03074b15af24fffad840e43d7a');
   expect(c.ok).toBe(true);
   const resultB = await pB;
   expect(resultB.ok).toBe(false);
   expect(resultB.canceled).toBe(true);
 
   const jobs = await sendStore.list();
-  const recB = jobs.find((j) => j.jobId === 'jobB');
+  const recB = jobs.find((j) => j.jobId === 'b4cbde03074b15af24fffad840e43d7a');
   expect(recB.jobState).toBe('canceled');
   expect(recB.peer).toEqual({ id: 'devB' });
   expect(opens.length).toBe(1); // jobB's channel was never opened
 
-  await svc.cancel('jobA'); // cleanup so the test doesn't leave a dangling promise
+  await svc.cancel('3ec96fa65719335dae4f1d3c79d679c3'); // cleanup so the test doesn't leave a dangling promise
   await pA.catch(() => {});
 });
 
@@ -1122,11 +1122,11 @@ test('receiver declining consent resolves ok:false with no file written, and set
 test('resumable() returns only jobs whose persisted state is active/paused/interrupted', async () => {
   const store = createJobsStore({ dir: tmp() });
   const blankManifest = { entries: [], totalBytes: 0, totalFiles: 0 };
-  await store.save({ jobId: 'j-active', dir: 'send', manifest: blankManifest, perFile: [], jobState: 'active', createdAt: 1 });
-  await store.save({ jobId: 'j-paused', dir: 'send', manifest: blankManifest, perFile: [], jobState: 'paused', createdAt: 2 });
-  await store.save({ jobId: 'j-interrupted', dir: 'recv', manifest: blankManifest, perFile: [], jobState: 'interrupted', createdAt: 3 });
-  await store.save({ jobId: 'j-done', dir: 'send', manifest: blankManifest, perFile: [], jobState: 'done', createdAt: 4 });
-  await store.save({ jobId: 'j-error', dir: 'send', manifest: blankManifest, perFile: [], jobState: 'error', createdAt: 5 });
+  await store.save({ jobId: 'aac8231049e59938ae1c69f143056eca', dir: 'send', manifest: blankManifest, perFile: [], jobState: 'active', createdAt: 1 });
+  await store.save({ jobId: '87980ed5ce4e06f3c98aa7b920d815f5', dir: 'send', manifest: blankManifest, perFile: [], jobState: 'paused', createdAt: 2 });
+  await store.save({ jobId: '75e2972602176f337268ddff0cd8807b', dir: 'recv', manifest: blankManifest, perFile: [], jobState: 'interrupted', createdAt: 3 });
+  await store.save({ jobId: 'ac03b26da742da0f01abad0f9d94339a', dir: 'send', manifest: blankManifest, perFile: [], jobState: 'done', createdAt: 4 });
+  await store.save({ jobId: 'dbac6e9e1ebe79b3437195becd581db7', dir: 'send', manifest: blankManifest, perFile: [], jobState: 'error', createdAt: 5 });
 
   const svc = createTransferService({
     store, transferDir: tmp(), consent: async () => true,
@@ -1137,7 +1137,7 @@ test('resumable() returns only jobs whose persisted state is active/paused/inter
   expect(all.length).toBe(5);
 
   const resumable = await svc.resumable();
-  expect(resumable.map((j) => j.jobId).sort()).toEqual(['j-active', 'j-interrupted', 'j-paused']);
+  expect(resumable.map((j) => j.jobId).sort()).toEqual(['aac8231049e59938ae1c69f143056eca', '75e2972602176f337268ddff0cd8807b', '87980ed5ce4e06f3c98aa7b920d815f5'].sort());
 });
 
 test('SP3 P4: cancel aborts a LIVE receive, not just the store record', async () => {
