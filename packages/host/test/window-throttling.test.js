@@ -1,25 +1,25 @@
-// The host's main window must NOT be background-throttled.
+// Both apps' main windows must NOT be background-throttled.
 //
 // Field bug (2026-07-17): the owner minimized the host while remote-controlling
-// it — input died, the screen stream kept flowing, and reconnecting then reported
-// "host is offline". Root cause: the signaling client, the peer connection and the
-// input datachannel handler ALL live in the host RENDERER (renderer.js:2-3,280),
-// and the host spends its life minimized or hidden to the tray. Chromium throttles
-// a background renderer's timers — MEASURED against the packaged app over CDP:
-// 4.00 ticks/s visible -> 1.10 ticks/s the moment the window was minimized
-// (document.visibilityState flipped to "hidden"), degrading to ~1/MINUTE once
-// intensive throttling kicks in after ~5 min. That stalls the signaling client's
-// setTimeout-driven auto-reconnect, so a dropped socket can't self-heal — while
-// the account heartbeat, which runs in MAIN and is never throttled, keeps
-// reporting presence. Net effect is exactly what signaling-client.js's own header
-// warns about: "the host keeps heartbeating presence (looks Online) while being
-// unreachable → CONNECT returns host_offline".
+// it and input stopped working, while the screen stream kept flowing.
 //
-// With backgroundThrottling:false the same probe measured 4.00/s while minimized
-// (visibilityState stayed "visible" — the flag also gates the Page Visibility API).
+// Root cause is renderer PROCESS PRIORITY, not timer throttling. The input
+// datachannel handler lives in the host renderer (renderer.js:280); Chromium
+// drops a minimized — or merely COVERED — window's renderer to Windows Idle
+// priority, and an active host saturates its own CPU (desktopCapturer + video
+// encode), so the renderer starves. Measured on the real topology (sender ->
+// input datachannel -> minimized receiver -> IPC to main), CPU contended:
+//   Idle priority (default): 4084ms avg input latency, 10879ms max, 26% lost
+//   Normal (this flag):      4ms avg, 29ms max, none lost
+// The video survives because media runs off the renderer main thread — exactly
+// the reported symptom. transfer-worker.js:55-58 already documents this same
+// mechanism for the hidden workers; the main windows were missed.
 //
-// The hidden transfer workers already set this for the same reason
-// (transfer-worker.js); the main windows were missed.
+// Timer throttling IS observable (4/s -> 1.1/s minimized) but is NOT the cause:
+// datachannel delivery measured identical with and without the flag on an idle
+// machine. Nor does it explain the separate "host is offline" report — a real
+// socket drop reconnected in 1853ms even after 7.5 min minimized, so the
+// signaling client's auto-reconnect self-heals fine. That bug is still open.
 import { readFileSync } from 'node:fs';
 import { expect, test } from 'vitest';
 
@@ -46,12 +46,16 @@ function mainWindowPrefs(src) {
   throw new Error('unbalanced webPreferences block');
 }
 
-test('the prefs extractor really captures the whole block (guards the test itself)', () => {
-  // It silently cut the flag off once; pin that it reaches the last property.
+test('the prefs extractor captures the whole block and nothing past it', () => {
+  // Guards the TEST: a fixed-length slice once truncated the block and cut the
+  // flag off, producing a false failure. `startsWith`/`endsWith('}')` assertions
+  // are tautologies of the extractor's construction and pass even when truncated
+  // — so assert the two things truncation/bleed would actually break: it reaches
+  // the LAST property, and it stops before the code that follows the object.
   const prefs = mainWindowPrefs(hostMain);
-  expect(prefs).toMatch(/^webPreferences/);
-  expect(prefs.endsWith('}')).toBe(true);
-  expect(prefs).toContain('preload'); // first property
+  expect(prefs).toContain('preload');              // reaches the first property
+  expect(prefs).toContain('backgroundThrottling'); // ...and the last one
+  expect(prefs).not.toContain('loadFile');         // ...without bleeding past the block
 });
 
 test('the host main window disables background throttling', () => {

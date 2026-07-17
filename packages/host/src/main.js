@@ -293,16 +293,25 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true, // R-7: defense in depth
-      // The host's SIGNALING CLIENT, peer connection and input datachannel all
-      // live in this renderer — and the host spends its life minimized or hidden
-      // to the tray. Chromium throttles a background renderer's timers (measured:
-      // 4/s -> 1.1/s the moment the window is minimized, and ~1/MINUTE once
-      // "intensive throttling" kicks in after ~5 min), so the signaling client's
-      // setTimeout-driven auto-reconnect can't self-heal a dropped socket. The
-      // account heartbeat runs in MAIN and keeps reporting presence, so the
-      // console shows the host Online while CONNECT returns host_offline —
-      // exactly the failure signaling-client.js's header warns about. Same reason
-      // the hidden transfer workers set this (transfer-worker.js).
+      // The input datachannel handler lives in this renderer (renderer.js:280),
+      // and the host spends its life minimized, hidden to the tray, or simply
+      // COVERED by another window. Chromium drops such a renderer's process to
+      // Windows Idle priority, and an active host saturates its own CPU
+      // (desktopCapturer + video encode) — so the renderer starves. Measured on
+      // the real topology (sender -> input datachannel -> minimized receiver ->
+      // IPC to main), minimized + CPU contended:
+      //   Idle priority (default): 4084ms AVG input latency, 10879ms max, 26% of
+      //                            events never arrived
+      //   Normal (this flag):      4ms avg, 29ms max, none lost
+      // That is "input stopped working". The video stream survives regardless,
+      // because media runs off the renderer's main thread — which is exactly the
+      // reported symptom. Same reasoning the hidden transfer workers already
+      // document (transfer-worker.js:55-58): Chromium lowers the priority of
+      // hidden renderers, so they starve under contention.
+      // NOTE: this is a PRIORITY fix, not a timer-throttling one. Timer
+      // throttling is real (4/s -> 1.1/s when minimized) but does NOT affect
+      // datachannel delivery — measured identical with and without this flag on
+      // an idle machine.
       backgroundThrottling: false,
     },
   });

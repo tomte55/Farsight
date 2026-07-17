@@ -283,11 +283,12 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true, // R-7: defense in depth
-      // Mirrors the host (see its main.js for the measured numbers): this
-      // renderer owns the signaling client, the peer connection and input
-      // capture, so a throttled background renderer stalls the session's
-      // timer-driven reconnect/keepalive work. A minimized controller must not
-      // quietly degrade the session it is driving.
+      // Mirrors the host (see its main.js for the measured numbers and the real
+      // mechanism: a background renderer drops to Idle process priority and
+      // starves under CPU contention). This renderer owns input capture and the
+      // peer connection, so a covered/minimized controller would degrade the
+      // session it is driving. Cheap — an idle renderer schedules no work, so
+      // the flag costs ~0.01% CPU; what it buys is Normal priority.
       backgroundThrottling: false,
     },
   });
