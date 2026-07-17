@@ -1,44 +1,63 @@
+// packages/shared/src/transfer-send-pool.js
 // Pure dynamic dispatcher: pulls self-addressed chunks from an async iterable and
-// hands each to whichever flow is free and alive. Fast flows naturally pull more;
-// a dead/rejecting flow's chunk is requeued onto a live flow. Backpressure is the
-// flow's own sendBulk() promise (resolves on per-flow credit). No fs/DOM/WebRTC.
+// keeps every live flow busy — each chunk goes to whichever live flow is currently
+// IDLE (not mid-send), so fast flows take more and slow flows take fewer. A flow
+// that dies (isAlive() false) or whose sendBulk rejects hands its chunk back for a
+// surviving flow, and a rejecting flow is retired so it can't spin. Backpressure is
+// each flow's own sendBulk() promise (resolves on per-flow credit). Throws
+// no_live_flows if a chunk remains and no flow is usable. No fs/DOM/WebRTC.
 import { encodeBulkFrame } from './transfer-chunk.js';
 
 export function createSendPool({ flows, encodeFrame = encodeBulkFrame }) {
-  function liveFlows() { return flows.filter((f) => f.isAlive()); }
-
-  async function sendOne(chunk) {
-    // Try live flows until one accepts the chunk. Requeue on rejection/death.
-    for (;;) {
-      const live = liveFlows();
-      if (live.length === 0) throw new Error('no_live_flows');
-      const flow = live[0];
-      try {
-        await flow.sendBulk(encodeFrame(chunk));
-        return;
-      } catch {
-        // this flow failed; loop picks another live flow (or throws no_live_flows)
-      }
-    }
-  }
+  const failed = new Set(); // flows whose sendBulk rejected — retired as unusable
+  function usableFlows() { return flows.filter((f) => f.isAlive() && !failed.has(f)); }
 
   return {
-    aliveCount: () => liveFlows().length,
+    aliveCount: () => usableFlows().length,
     async run(chunkIterable) {
-      // One worker per flow slot; each worker pulls the next chunk and sends it,
-      // so concurrency == live flow count and fast flows drain the iterable faster.
       const it = chunkIterable[Symbol.asyncIterator]();
-      let done = false;
-      async function worker() {
-        for (;;) {
-          if (done) return;
-          const { value, done: d } = await it.next();
-          if (d) { done = true; return; }
-          await sendOne(value);
+      const inflight = new Map(); // flow -> Promise settling when its current send completes
+      const requeue = [];         // chunks handed back by a died/rejecting flow
+      let sourceDone = false;
+
+      // Dispatch chunk on an idle usable flow. Returns true if dispatched.
+      function tryDispatch(chunk) {
+        const flow = usableFlows().find((f) => !inflight.has(f));
+        if (!flow) return false;
+        // Promise.resolve().then(...) so a SYNCHRONOUS throw from sendBulk becomes a
+        // rejection (handled), never an escaped throw.
+        const p = Promise.resolve()
+          .then(() => flow.sendBulk(encodeFrame(chunk)))
+          .then(
+            () => { inflight.delete(flow); },
+            () => { inflight.delete(flow); failed.add(flow); requeue.push(chunk); },
+          );
+        inflight.set(flow, p);
+        return true;
+      }
+
+      for (;;) {
+        // Next chunk: retries first, then the source.
+        let chunk = null;
+        if (requeue.length) chunk = requeue.shift();
+        else if (!sourceDone) {
+          const { value, done } = await it.next();
+          if (done) { sourceDone = true; continue; }
+          chunk = value;
+        }
+
+        if (chunk === null) {
+          if (inflight.size === 0) return;         // fully drained -> done
+          await Promise.race(inflight.values());   // a flow will free up (maybe requeue)
+          continue;
+        }
+
+        if (!tryDispatch(chunk)) {
+          if (inflight.size === 0) throw new Error('no_live_flows'); // nothing usable at all
+          requeue.unshift(chunk);                  // hold it; wait for a flow to free
+          await Promise.race(inflight.values());
         }
       }
-      const workerCount = Math.max(1, flows.length);
-      await Promise.all([...Array(workerCount)].map(() => worker()));
     },
   };
 }
