@@ -1,5 +1,5 @@
 // packages/controller/src/main.js
-import { app, BrowserWindow, desktopCapturer, screen, ipcMain, clipboard, dialog, shell, safeStorage } from 'electron';
+import { app, BrowserWindow, desktopCapturer, screen, ipcMain, clipboard, dialog, shell, safeStorage, globalShortcut } from 'electron';
 // electron-updater is CommonJS: a named ESM import fails in the packaged app's
 // ESM loader, so use the default import + destructure interop.
 import electronUpdater from 'electron-updater';
@@ -11,7 +11,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import * as nodeFs from 'node:fs';
 import { createInjector } from './input-injector.js';
 import { createNutFacade } from './nut-facade.js';
+import { registerPanicKey } from './panic.js';
 import { listDisplays } from './capture.js';
+import { generateSessionPassword } from '@farsight/shared/password';
+import { windowAttentionPlan } from './window-attention.js';
 import { createAppLogger } from '@farsight/shared/app-log';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
 import { createUpdater } from '@farsight/shared/updater';
@@ -313,6 +316,11 @@ let mainWindow = null;
 let ctrlUpdater = null;
 let log = null;   // root logger; assigned on app ready, referenced as log?.*
 let logMinLevel = null; // createAppLogger's resolved level; used in diagnostics meta
+let hostId = '';
+
+// Per-launch session password. Generated in the trusted main process (node:crypto)
+// and handed to the renderer via IPC — the sandboxed renderer can't run node:crypto.
+let sessionPassword = generateSessionPassword();
 
 // Input injection uses nut.js, a native Node addon that cannot load in the
 // sandboxed renderer. The renderer forwards validated-shape input events over
@@ -335,6 +343,46 @@ function getInjector() {
   }
   return injector;
 }
+
+// Bring the window to attention when a controller (or a transfer offer) asks
+// for it. The renderer forwards a control CONNECT via IPC 'request-attention';
+// we apply the pure windowAttentionPlan. (Ported from the host — no tray here
+// yet, so unlike the host this has no refreshTrayMenu() call; Task 3 adds the
+// tray and will wire attention/panic into it.)
+function bringWindowToAttention() {
+  log?.child('session').info('attention requested by incoming connection');
+  const win = mainWindow;
+  if (!win) return;
+  const plan = windowAttentionPlan({
+    isMinimized: win.isMinimized(),
+    isVisible: win.isVisible(),
+    isFocused: win.isFocused(),
+  });
+  if (plan.show) win.show();
+  if (plan.restore) win.restore();
+  if (plan.raiseTemporarily) { win.setAlwaysOnTop(true); setTimeout(() => win.setAlwaysOnTop(false), 1500); }
+  if (plan.focus) { win.moveTop(); win.focus(); }
+  if (plan.flash) win.flashFrame(true);
+}
+ipcMain.on('request-attention', () => bringWindowToAttention());
+
+// The renderer reports its registered id so the account service can publish
+// the host's current signaling id (connect-from-console rendezvous). No tray
+// yet on the controller (Task 3), so unlike the host this does not call
+// refreshTrayMenu().
+ipcMain.on('set-host-id', (_e, id) => { hostId = String(id || ''); getAccountService().setSignalingId(hostId); log?.child('session').info('host id registered'); });
+
+// The renderer displays the session password and sends it on REGISTER.
+ipcMain.handle('get-session-password', () => sessionPassword);
+
+// Rotate the session password on demand (renderer's manual button or idle
+// timer). Regenerate in the trusted main process and return the new value so
+// the renderer can display it and push UPDATE_PASSWORD. No tray yet on the
+// controller (Task 3), so unlike the host this does not refresh a tray label.
+ipcMain.handle('regenerate-session-password', () => {
+  sessionPassword = generateSessionPassword();
+  return sessionPassword;
+});
 
 // Verbose diagnostic logging (§ SECURITY.md): consent-gated, account-authenticated
 // upload of a redaction-safe log bundle for support triage.
@@ -449,6 +497,28 @@ app.whenReady().then(async () => {
   });
 
   createWindow();
+  mainWindow.on('focus', () => mainWindow.flashFrame(false));
+  // Panic hotkey: a physical override that instantly kills any session.
+  // globalShortcut.register fails silently if another app already owns the
+  // accelerator, leaving the documented instant-kill override inactive — warn
+  // in the console and surface it visibly in the renderer. did-finish-load is
+  // attached synchronously here (before the async loadFile navigation
+  // triggered in createWindow can complete), so it cannot fire before this
+  // listener is registered; the renderer's own onPanicUnavailable listener is
+  // wired up before its first await, so it is guaranteed to be registered by
+  // the time did-finish-load fires. (Ported from the host — no tray here yet,
+  // so unlike the host this does not refresh a tray menu.)
+  const panicOk = registerPanicKey(globalShortcut, 'CommandOrControl+Alt+F12', () => {
+    log?.child('session').warn('panic hotkey fired — killing session');
+    if (mainWindow) mainWindow.webContents.send('panic');
+  });
+  if (!panicOk) {
+    console.warn('[panic] Failed to register Ctrl+Alt+F12 — another app may own it. The instant-kill override is NOT active.');
+    log?.child('session').warn('panic hotkey unavailable — another app owns Ctrl+Alt+F12');
+    mainWindow.webContents.on('did-finish-load', () => {
+      if (mainWindow) mainWindow.webContents.send('panic-unavailable');
+    });
+  }
   // BUG 1 (field-diagnosed): a dir:'send' record still saying 'active' at
   // process START is impossible-by-definition — the process that owned it is
   // gone (this app just launched). Sweep those to 'interrupted' (fleet/contact,
@@ -479,4 +549,5 @@ app.whenReady().then(async () => {
   ipcMain.on('updater:set-session-active', (_e, active) => ctrlUpdater.setSessionActive(active));
   ipcMain.handle('open-logs', () => shell.openPath(path.join(app.getPath('userData'), 'logs')));
 });
+app.on('will-quit', () => { globalShortcut.unregisterAll(); });
 app.on('window-all-closed', () => { log?.info('controller quitting'); if (process.platform !== 'darwin') app.quit(); });
