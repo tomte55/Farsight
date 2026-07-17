@@ -927,10 +927,14 @@ const XFER_ERROR_LABELS = {
 // here — NOT "active" — until the host actually accepts (the sender's 'accepted'
 // lifecycle event). Terminal states carry any error/decline reason.
 function stateLabel(j) {
-  // File-count is the intuitive progress signal — the byte bar is dominated by
-  // any large file, so it can read very differently from the receiver's bar even
-  // when both are nearly done. Showing "X / Y files" keeps the two sides legible
-  // and close.
+  // The file count is still worth showing (it's the intuitive "how far along"
+  // signal, and it's what the 'done' label reads), but it is no longer the
+  // PRIMARY one: sendDetailText leads with bytes/speed/ETA. A byte bar used to
+  // read very differently from the receiver's — the sender counted only
+  // remaining bytes and jumped a whole file at a time — so file-count was the
+  // only honest common ground. transfer-engine now reports absolute, continuous
+  // bytes on both sides, so bytes agree end-to-end AND keep moving inside one
+  // huge file, which a file count cannot do.
   const p = j.progress;
   const total = p && Number.isFinite(p.filesTotal) ? p.filesTotal
     : (j.manifest && (j.manifest.totalFiles ?? (j.manifest.entries || []).length));
@@ -1052,10 +1056,11 @@ async function refreshTransfersList() {
 }
 
 // Live progress push from main (transfer-service's onEvent, forwarded per
-// transfer-orchestrator's { type:'file-sent', fileId, progress } shape plus
-// jobId/direction). There is currently no distinct "job done"/"job failed"
-// event — completion is inferred here from progress.fraction reaching 1 (see
-// the NEEDS-LIVE-VERIFICATION note in the report); refreshTransfersList()'s
+// transfer-orchestrator's event shape plus jobId/direction). Completion comes
+// from the real 'completed' event — the receiver's delivery ACK, sent only once
+// every file is hash-verified on disk — NEVER from progress.fraction reaching 1,
+// which means "all bytes pushed into the local send buffer", not "received"
+// (declaring done on that lost the tail of a transfer). refreshTransfersList()'s
 // jobState read is the fallback source of truth for terminal states.
 window.farsightIpc.onTransferEvent((ev) => {
   if (!ev || typeof ev.jobId !== 'string') return;

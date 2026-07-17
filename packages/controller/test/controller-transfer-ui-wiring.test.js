@@ -121,9 +121,13 @@ describe('renderer: Send… entry point + Transfers panel', () => {
     expect(renderer).toMatch(/window\.farsightIpc\.transferList\(\)/);
   });
 
-  test('renderer.js renders progress as a fraction-based bar width', () => {
-    expect(renderer).toMatch(/progress\.fraction/);
+  test('renderer.js sizes the bar from the BYTE fraction of the full manifest', () => {
+    // Was `toMatch(/progress\.fraction/)`, which by the end only matched a stale
+    // COMMENT — sendFraction stopped reading p.fraction when the bar went
+    // byte-based, so the test passed while asserting nothing executable.
+    expect(renderer).toMatch(/bytesDone\(p\)\s*\/\s*p\.total/);
     expect(renderer).toMatch(/xfer-bar-fill/);
+    expect(renderer).toMatch(/barFill\.style\.width/);
   });
 
   test('renderer.js wires a per-job cancel button to transferCancel', () => {
