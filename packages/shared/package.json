@@ -30,6 +30,8 @@
     "./remote-fs-protocol": "./src/remote-fs-protocol.js",
     "./transfer-engine": "./src/transfer-engine.js",
     "./transfer-channel": "./src/transfer-channel.js",
+    "./transfer-chunk": "./src/transfer-chunk.js",
+    "./transfer-ranges": "./src/transfer-ranges.js",
     "./transfer-io": "./src/transfer-io.js",
     "./jobs-store": "./src/jobs-store.js",
     "./transfer-orchestrator": "./src/transfer-orchestrator.js",
