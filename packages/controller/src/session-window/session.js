@@ -138,6 +138,40 @@ function showOverlay(connState, reason) {
   overlayEl.hidden = false;
 }
 
+// Immediate, visible "establishing…" feedback (no buttons). The session window's
+// #status element is hidden, so without this a connect/reconnect attempt showed
+// nothing on screen while it was in flight.
+function showConnecting(title) {
+  document.getElementById('ov-glyph').textContent = '…';
+  document.getElementById('ov-glyph').style.background = 'rgba(124,92,255,.15)';
+  document.getElementById('ov-title').textContent = title || 'Connecting…';
+  document.getElementById('ov-detail').textContent = 'Establishing a secure connection…';
+  document.getElementById('ov-actions').innerHTML = '';
+  overlayEl.hidden = false;
+}
+
+// A VISIBLE, retryable connect/reconnect failure. Because #status is hidden in
+// this window, a signaling-stage error (e.g. host_offline) used to write to an
+// invisible element while doReconnect had already dismissed the overlay — so the
+// Reconnect button looked like it did nothing. Surface it on the overlay with a
+// retry instead.
+function showConnectError(message) {
+  document.getElementById('ov-glyph').textContent = '⚠';
+  document.getElementById('ov-glyph').style.background = 'rgba(255,143,163,.15)';
+  document.getElementById('ov-title').textContent = 'Couldn’t connect';
+  document.getElementById('ov-detail').textContent = message || 'The connection could not be established.';
+  const actions = document.getElementById('ov-actions');
+  actions.innerHTML = '';
+  for (const a of [{ id: 'reconnect', label: 'Try again' }, { id: 'close', label: 'Close session' }]) {
+    const b = document.createElement('button');
+    b.className = a.id === 'reconnect' ? 'btn btn-primary' : 'btn btn-ghost';
+    b.textContent = a.label;
+    b.onclick = a.id === 'reconnect' ? doReconnect : doClose;
+    actions.appendChild(b);
+  }
+  overlayEl.hidden = false;
+}
+
 function doClose() {
   clog.info('session teardown');
   stopStatsPoll();
@@ -157,7 +191,9 @@ function doReconnect() {
   stopClipboardSync();
   if (peer) { peer.close(); peer = null; }
   if (signal) { signal.close && signal.close(); signal = null; }
-  overlayEl.hidden = true;
+  // Immediate feedback (the button used to just dismiss the overlay; if the
+  // retry then failed at signaling, nothing ever came back on screen).
+  showConnecting('Reconnecting…');
   // Reconnect with the same creds this window launched with. lastCreds.candidates
   // holds the password retry set (linked sessions carry an empty set).
   connectTo({ targetId: lastCreds.targetId, candidates: lastCreds.candidates || [], linked: lastCreds.linked });
@@ -182,6 +218,7 @@ let pendingStream = null;
 // the linked path can defer it until the device handshake succeeds.
 function revealSession(stream) {
   video.srcObject = stream;
+  overlayEl.hidden = true; // clear any lingering connecting/error overlay on success
   setActive(true);
   window.farsightSession.status({ peer: lastCreds.targetId || null });
   screenEl.style.display = 'block';
@@ -278,6 +315,7 @@ async function connectTo({ targetId, candidates, linked }) {
   lastCreds.candidates = candidates; lastCreds.linked = linked;
   if (hostVersionEl) hostVersionEl.textContent = ''; // clear any stale note
   statusEl.textContent = linked ? 'Connecting to your device…' : 'Connecting…';
+  showConnecting(linked ? 'Connecting to your device…' : 'Connecting…');
   // SP1: announce our app version so the host (and server) learn who's connecting.
   const sendConnect = () => signal.send(MSG.CONNECT, linked
     ? { targetId, linked: true, version: appVersion || undefined }
@@ -366,10 +404,14 @@ async function connectTo({ targetId, candidates, linked }) {
       // password-free connects (e.g. it predates this feature) — not a real
       // password error; give an actionable message instead of "Wrong password".
       if (linked && m.reason === 'bad_password') {
-        statusEl.textContent = 'This device isn’t reachable for password-free connect yet — update it to the latest version.';
+        const msg = 'This device isn’t reachable for password-free connect yet — update it to the latest version.';
+        statusEl.textContent = msg;
+        showConnectError(msg);
         return;
       }
-      statusEl.textContent = ERROR_TEXT[m.reason] || `Error: ${m.reason}`;
+      const msg = ERROR_TEXT[m.reason] || `Error: ${m.reason}`;
+      statusEl.textContent = msg;
+      showConnectError(msg); // #status is hidden here — the overlay is the only visible surface
     },
     [MSG.PEER_DISCONNECTED]: () => {
       clog.info('peer disconnected');
@@ -379,7 +421,7 @@ async function connectTo({ targetId, candidates, linked }) {
       stopClipboardSync();
       if (sessionClosing) return; // host already told us it ended — keep that overlay
       if (screenEl.style.display === 'block') showOverlay(null, 'peer_disconnected');
-      else { statusEl.textContent = 'Host disconnected.'; }
+      else { statusEl.textContent = 'Host disconnected.'; showConnectError('The host disconnected.'); }
     },
   }, { log: clog.child('signaling') });
 
