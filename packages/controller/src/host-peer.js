@@ -1,0 +1,136 @@
+// packages/controller/src/host-peer.js
+import { MSG } from '@farsight/shared/protocol';
+import { parseDtlsFingerprint } from '@farsight/shared/connect-transcript';
+
+// P-1: protect resolution/text legibility under bandwidth pressure (screen
+// content), rather than Chromium's default 'balanced' which drops resolution
+// first. Fire-and-forget, fully guarded — must never throw into the caller.
+async function tuneVideoSender(sender) {
+  if (!sender || !sender.getParameters) return;
+  try {
+    const params = sender.getParameters();
+    params.degradationPreference = 'maintain-resolution';
+    await sender.setParameters(params);
+  } catch { /* API unavailable — leave defaults */ }
+}
+
+// P-3: prefer VP8 then H264 (broad hardware-encoder coverage, low encode
+// latency) by REORDERING (never excluding) the codec list on the video
+// transceiver.
+function preferVideoCodecs(transceiver) {
+  try {
+    if (!transceiver || !transceiver.setCodecPreferences) return;
+    const caps = (RTCRtpReceiver.getCapabilities && RTCRtpReceiver.getCapabilities('video'))
+      || (RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('video'));
+    if (!caps || !caps.codecs) return;
+    const rank = (c) => {
+      const m = c.mimeType.toLowerCase();
+      if (m === 'video/vp8') return 0;
+      if (m === 'video/h264') return 1;
+      return 2; // keep everything else, just after the preferred two
+    };
+    const ordered = [...caps.codecs].sort((a, b) => rank(a) - rank(b));
+    transceiver.setCodecPreferences(ordered);
+  } catch { /* leave default negotiation */ }
+}
+
+// Verbose diagnostic logging (see docs/private/superpowers): never log SDP or
+// candidate strings — states/types/counts only.
+function noopLog() { const n = { debug() {}, info() {}, warn() {}, error() {}, child: () => n }; return n; }
+
+async function logSelectedPair(pc, log) {
+  try {
+    const stats = await pc.getStats();
+    let pair = null;
+    stats.forEach((r) => { if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r; });
+    if (!pair) return;
+    const local = stats.get(pair.localCandidateId);
+    const remote = stats.get(pair.remoteCandidateId);
+    log.info(`selected pair local=${local?.candidateType || '?'} remote=${remote?.candidateType || '?'} proto=${local?.protocol || '?'}`);
+  } catch { /* stats unavailable */ }
+}
+
+export function attachPeerLogging(pc, log) {
+  pc.addEventListener('iceconnectionstatechange', () => log.info(`ice ${pc.iceConnectionState}`));
+  pc.addEventListener('connectionstatechange', () => {
+    const s = pc.connectionState;
+    (s === 'failed' ? log.warn : log.info).call(log, `conn ${s}`);
+    if (s === 'connected') logSelectedPair(pc, log);
+  });
+  pc.addEventListener('signalingstatechange', () => log.debug(`signaling ${pc.signalingState}`));
+  pc.addEventListener('icegatheringstatechange', () => log.debug(`gathering ${pc.iceGatheringState}`));
+  pc.addEventListener('icecandidateerror', (e) => log.warn(`ice candidate error code=${e?.errorCode ?? '?'}`));
+}
+
+export function createHostPeer({ stream, sendSignal, iceServers = [], onInput = () => {}, onControl = () => {}, onAuthChannel = () => {}, log = noopLog() }) {
+  const pc = new RTCPeerConnection({ iceServers });
+  attachPeerLogging(pc, log);
+  let videoSender = null;
+  for (const track of stream.getTracks()) {
+    if (track.kind === 'video') { try { track.contentHint = 'detail'; } catch {} }
+    videoSender = pc.addTrack(track, stream);
+  }
+  tuneVideoSender(videoSender);
+  try {
+    const vtx = pc.getTransceivers().find((t) => t.sender === videoSender);
+    if (vtx) preferVideoCodecs(vtx);
+  } catch { /* leave default negotiation */ }
+
+  let hostControlChannel = null;
+  pc.addEventListener('datachannel', (e) => {
+    const ch = e.channel;
+    ch.addEventListener('open', () => log.info(`datachannel open label=${ch.label}`));
+    ch.addEventListener('close', () => log.info(`datachannel close label=${ch.label}`));
+    if (ch.label === 'auth') {
+      // Connect-from-console (SP2 §4.4): surface the E2E keypair-handshake channel
+      // so the renderer can authenticate the peer BEFORE showing consent/capturing.
+      onAuthChannel(ch);
+      return;
+    }
+    ch.addEventListener('message', (m) => {
+      // R-7 (defense in depth): bound the payload before parsing so a hostile
+      // controller cannot send a huge string to the JSON parser. The control
+      // channel gets a higher 256 KB bound (input stays at 8 KB) because
+      // CLIPBOARD frames carry up to 100000 chars of validated text and need
+      // headroom for JSON-string escaping around that payload.
+      const bound = ch.label === 'control' ? 262144 : 8192;
+      if (typeof m.data === 'string' && m.data.length > bound) return;
+      let parsed; try { parsed = JSON.parse(m.data); } catch { return; }
+      if (ch.label === 'input') onInput(parsed);
+      else if (ch.label === 'control') onControl(parsed);
+    });
+    if (ch.label === 'control') hostControlChannel = ch;
+  });
+
+  pc.addEventListener('icecandidate', (e) => {
+    if (e.candidate) sendSignal(MSG.CANDIDATE, { candidate: e.candidate });
+  });
+
+  return {
+    async handleOffer(sdp) {
+      await pc.setRemoteDescription({ type: 'offer', sdp });
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      sendSignal(MSG.ANSWER, { sdp: answer.sdp });
+    },
+    async handleCandidate(candidate) { try { await pc.addIceCandidate(candidate); } catch {} },
+    // Swap the streamed video track when the controller selects another monitor,
+    // without renegotiating the peer connection.
+    async replaceVideoTrack(track) {
+      if (!videoSender) return;
+      if (track && track.kind === 'video') { try { track.contentHint = 'detail'; } catch {} }
+      await videoSender.replaceTrack(track);
+      tuneVideoSender(videoSender);
+    },
+    sendControl(evt) {
+      if (hostControlChannel && hostControlChannel.readyState === 'open') hostControlChannel.send(JSON.stringify(evt));
+    },
+    // Connect-from-console: DTLS fingerprints (from the exchanged SDP) the
+    // handshake binds to. Available after handleOffer() sets both descriptions.
+    getFingerprints: () => ({
+      local: parseDtlsFingerprint(pc.localDescription?.sdp || ''),
+      remote: parseDtlsFingerprint(pc.remoteDescription?.sdp || ''),
+    }),
+    close: () => pc.close(),
+  };
+}
