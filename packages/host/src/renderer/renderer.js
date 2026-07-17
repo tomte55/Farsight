@@ -9,6 +9,7 @@ import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
 import { formatHostId } from '@farsight/shared/credentials-format';
 import { createIdleRotator } from '@farsight/shared/idle-rotator';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
+import { createRateEstimator, etaSeconds, bytesDone, formatBytes, formatRate, formatDuration } from '@farsight/shared/transfer-rate';
 import { createRendererLogger } from './rlog.js';
 
 // Root renderer logger (forwards to the main-process file log over IPC — see
@@ -596,33 +597,68 @@ function respondToTransferConsent(accept) {
 document.getElementById('transfer-consent-accept').addEventListener('click', () => respondToTransferConsent(true));
 document.getElementById('transfer-consent-reject').addEventListener('click', () => respondToTransferConsent(false));
 
-// Compact transfers status list: jobId -> { jobId, manifest, state, progress,
 // createdAt }, seeded from transfer:list (persisted jobs-store records) and
 // kept live via transfer:event while a receive is actively running.
 const transferJobs = new Map();
-// File-count is the intuitive progress signal (the byte bar is dominated by any
-// large file — 60/61 small files done can read as 5% while one big file arrives,
-// which looks stuck/out-of-sync with the sender). Surface "X / Y files" so the
-// receive tracks the send closely and completion is obvious.
-// Bar fraction: for MULTI-file transfers use files-done/total so the bar agrees
-// with the "X / Y files" text and tracks the sender (a byte bar is dominated by
-// one large file and reads as ~5% with 60/61 files done). For a single file,
-// keep the byte fraction so a big file still shows smooth progress.
+// Per-job rolling rate estimators. The event stream carries NO timestamps, so
+// arrival time is stamped here, in the renderer, as events land.
+const rateEstimators = new Map(); // jobId -> estimator
+
+function estimatorFor(jobId) {
+  if (!rateEstimators.has(jobId)) rateEstimators.set(jobId, createRateEstimator({ windowMs: 5000 }));
+  return rateEstimators.get(jobId);
+}
+
+// 'interrupted'/'reconnecting' are deliberately NOT terminal: a fleet/contact send
+// auto-resumes with the SAME jobId, so the row must stay live to receive the
+// resumed transfer's events. Freezing it here is what made a working resume read
+// as a permanent "Failed".
+const RECV_TERMINAL_STATES = ['done', 'error', 'canceled'];
+
 function receiveFraction(j) {
   const p = j.progress;
-  if (p && Number.isFinite(p.filesTotal) && p.filesTotal > 1 && Number.isFinite(p.filesDone)) return p.filesDone / p.filesTotal;
-  if (p && typeof p.fraction === 'number') return p.fraction;
+  // Byte fraction: both sides now report absolute bytes over the full manifest
+  // (transfer-engine), so this agrees with the sender AND keeps moving during a
+  // single huge file — which a files-done bar cannot do.
+  if (p && Number.isFinite(p.total) && p.total > 0) return bytesDone(p) / p.total;
   return j.state === 'done' ? 1 : 0;
 }
-function receiveMetaText(j) {
+
+// "1.2 GB of 100 GB · 24.0 MB/s · ~1h 8m left · 3 / 2974 files"
+function receiveDetailText(j) {
   const p = j.progress;
-  const total = p && Number.isFinite(p.filesTotal) ? p.filesTotal
-    : (j.manifest && (j.manifest.totalFiles ?? (j.manifest.entries || []).length));
-  const done = p && Number.isFinite(p.filesDone) ? p.filesDone : (j.state === 'done' ? total : 0);
-  const label = j.state === 'done' ? 'Completed' : j.state === 'error' ? 'Failed'
-    : j.state === 'canceled' ? 'Canceled' : 'Receiving';
-  return Number.isFinite(total) && total > 0 ? `${label} · ${done} / ${total} files` : (label);
+  if (!p || !Number.isFinite(p.total) || p.total <= 0) return '';
+  const done = bytesDone(p);
+  const parts = [`${formatBytes(done)} of ${formatBytes(p.total)}`];
+  const rate = j.rate;
+  if (Number.isFinite(rate) && rate > 0) {
+    parts.push(formatRate(rate));
+    const eta = etaSeconds(p.total - done, rate);
+    if (eta !== null && j.state === 'active') parts.push(`~${formatDuration(eta)} left`);
+  }
+  if (Number.isFinite(p.filesTotal) && p.filesTotal > 1) {
+    parts.push(`${Number.isFinite(p.filesDone) ? p.filesDone : 0} / ${p.filesTotal} files`);
+  }
+  return parts.join(' · ');
 }
+
+function receiveStateLabel(j) {
+  switch (j.state) {
+    case 'interrupted': return 'Interrupted — reconnecting…';
+    case 'verifying': return 'Verifying…';
+    case 'done': return 'Completed';
+    case 'error': return 'Failed';
+    case 'canceled': return 'Canceled';
+    default: return 'Receiving';
+  }
+}
+
+function receiveMetaText(j) {
+  const detail = receiveDetailText(j);
+  const label = receiveStateLabel(j);
+  return detail ? `${label} · ${detail}` : label;
+}
+
 function transferJobRow(j) {
   const row = document.createElement('div');
   row.className = 'host-row xfer-row';
@@ -643,15 +679,35 @@ function transferJobRow(j) {
   meta.className = 'host-meta';
   meta.textContent = receiveMetaText(j);
   main.append(title, barWrap, meta);
-  row.appendChild(main);
+
+  // Cancel: dad must be able to stop an incoming transfer. Mirrors the
+  // controller's send-side row (controller/renderer.js:980-994) — optimistic
+  // local state + fire-and-forget IPC.
+  const right = document.createElement('div');
+  right.className = 'host-right';
+  if (!RECV_TERMINAL_STATES.includes(j.state)) {
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn btn-ghost';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.onclick = async () => {
+      cancelBtn.disabled = true;
+      try { await window.farsightIpc.transferCancel(j.jobId); } catch { /* best effort */ }
+      j.state = 'canceled';
+      renderTransfersList();
+    };
+    right.appendChild(cancelBtn);
+  }
+  row.append(main, right);
   return row;
 }
+
 function renderTransfersList() {
   const jobs = [...transferJobs.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   transfersListEl.replaceChildren();
   transfersEmptyEl.hidden = jobs.length > 0;
   for (const j of jobs) transfersListEl.appendChild(transferJobRow(j));
 }
+
 async function refreshTransfersList() {
   let records = [];
   try { records = await window.farsightIpc.transferList(); } catch { /* ignore — panel just stays empty */ }
@@ -661,29 +717,45 @@ async function refreshTransfersList() {
       ...existing,
       jobId: r.jobId,
       manifest: existing.manifest || r.manifest,
-      state: existing.state === 'active' ? existing.state : (r.jobState || existing.state),
+      // A live row wins over the persisted record; 'interrupted' is live-ish too
+      // (the sender may be re-establishing), so don't let a stale read clobber it.
+      state: ['active', 'verifying', 'interrupted'].includes(existing.state) ? existing.state : (r.jobState || existing.state),
       createdAt: r.createdAt || existing.createdAt,
     });
   }
   renderTransfersList();
 }
-// Live progress push from main (transfer-service's onEvent, forwarded per
-// transfer-orchestrator's { type:'file-done'|'file-failed', fileId, progress }
-// shape plus jobId/direction). There is no distinct terminal event yet, so
-// completion is inferred from progress.fraction reaching 1, same caveat as the
-// controller's send-side panel — refreshTransfersList()'s jobState read is the
-// fallback source of truth for terminal states.
+
+// Live progress push from main (transfer-service's onEvent). Terminal state now
+// comes from the receiver's REAL 'completed' event — never inferred from
+// fraction >= 1, which fired before the receiver had actually settled (and fired
+// instantly for a fully-resumed job).
 window.farsightIpc.onTransferEvent((ev) => {
   if (!ev || typeof ev.jobId !== 'string') return;
   const existing = transferJobs.get(ev.jobId) || { jobId: ev.jobId, createdAt: Date.now() };
-  if (['done', 'error', 'canceled'].includes(existing.state)) { transferJobs.set(ev.jobId, existing); return; }
-  if (ev.type === 'interrupted' || ev.type === 'error') {
-    // A consented receive that stalled (sender vanished / connection dropped) —
-    // mark it failed so it stops showing "Receiving …" forever.
+  if (RECV_TERMINAL_STATES.includes(existing.state)) { transferJobs.set(ev.jobId, existing); return; }
+  if (ev.type === 'interrupted') {
+    // Non-terminal when the sender will auto-resume (fleet/contact); a plain
+    // adhoc drop has nothing to resume it, so that's a real failure.
+    existing.state = ev.resumable ? 'interrupted' : 'error';
+    existing.rate = null;
+    estimatorFor(ev.jobId).reset(); // the next run's bytes restart the window
+  } else if (ev.type === 'error') {
     existing.state = 'error';
+  } else if (ev.type === 'canceled') {
+    existing.state = 'canceled';
+  } else if (ev.type === 'verifying') {
+    if (ev.progress) existing.progress = ev.progress;
+    existing.state = 'verifying';
+  } else if (ev.type === 'completed') {
+    if (ev.progress) existing.progress = ev.progress;
+    existing.state = ev.ok === false ? 'error' : 'done';
+    existing.rate = null;
   } else if (ev.progress) {
     existing.progress = ev.progress;
-    existing.state = ev.progress.fraction >= 1 ? 'done' : 'active';
+    if (existing.state !== 'verifying') existing.state = 'active';
+    // Stamp arrival time here — the event stream carries no timestamps.
+    existing.rate = estimatorFor(ev.jobId).sample(bytesDone(ev.progress));
   }
   transferJobs.set(ev.jobId, existing);
   if (!transfersPanelEl.hidden) renderTransfersList();
