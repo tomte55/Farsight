@@ -12,6 +12,10 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 const main = readFileSync(path.join(dir, '../src/main.js'), 'utf8');
 const preload = readFileSync(path.join(dir, '../src/preload.cjs'), 'utf8');
 const renderer = readFileSync(path.join(dir, '../src/renderer/renderer.js'), 'utf8');
+// Unification step 2: the actual E2E device-keypair handshake (runConnectionAuth)
+// moved with the rest of the connection logic into the session window's own
+// renderer. The shell's fleet Connect button now only launches that window.
+const session = readFileSync(path.join(dir, '../src/session-window/session.js'), 'utf8');
 
 describe('controller connect-from-console wiring', () => {
   test('main constructs the account service with a device-key file path', () => {
@@ -30,18 +34,22 @@ describe('controller connect-from-console wiring', () => {
     }
   });
 
-  test('the console renders a Connect action that dials signalingId over the linked path', () => {
+  test('the console renders a Connect action that dials signalingId over the linked path by launching the session window', () => {
     expect(renderer).toMatch(/host-connect/);
     expect(renderer).toMatch(/signalingId/);
     expect(renderer).toMatch(/linked:\s*true/);
-    expect(renderer).toMatch(/runConnectionAuth/);
+    expect(renderer).toMatch(/openSession\(/);
+    // The shell itself no longer runs the handshake — that lives in the session window.
+    expect(renderer).not.toContain('runConnectionAuth');
   });
 
   // Regression guard (v1.7.2 bug): runConnectionAuth was USED but not IMPORTED →
   // ReferenceError at runtime → the controller crashed before sending hello and the
   // host timed out. Assert the actual import binding, not merely the identifier.
-  test('the renderer IMPORTS runConnectionAuth (not just references it)', () => {
-    expect(renderer).toMatch(/import\s*\{[^}]*\brunConnectionAuth\b[^}]*\}\s*from\s*['"]@farsight\/shared\/connection-auth['"]/);
+  // Unification step 2 moved the handshake into the session window, so this now
+  // guards session.js instead of the shell's renderer.js.
+  test('the session window IMPORTS runConnectionAuth (not just references it)', () => {
+    expect(session).toMatch(/import\s*\{[^}]*\brunConnectionAuth\b[^}]*\}\s*from\s*['"]@farsight\/shared\/connection-auth['"]/);
   });
 
   test('remote-update wiring: IPC + preload + console Update button (S2.7)', () => {

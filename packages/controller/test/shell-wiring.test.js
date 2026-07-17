@@ -104,6 +104,24 @@ describe('no inline styling', () => {
   });
 });
 
+describe('the session moved out of the shell (unification step 2)', () => {
+  test('the shell no longer owns the session markup', () => {
+    expect(html).not.toContain('id="screen"');
+    expect(html).not.toContain('id="video"');
+    expect(html).not.toContain('id="overlay"');
+  });
+
+  test('the shell no longer imports or builds the peer/signaling connection', () => {
+    expect(js).not.toContain('createControllerPeer');
+    expect(js).not.toContain('createSignalingClient');
+  });
+
+  test('the shell launches and focuses the session window instead', () => {
+    expect(js).toContain('openSession(');
+    expect(js).toContain('focusSession(');
+  });
+});
+
 describe('status bar', () => {
   test('renderer builds the bar from the shared pure model', () => {
     expect(js).toContain("from '@farsight/shared/status-bar'");

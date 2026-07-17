@@ -8,30 +8,9 @@
 
 #shell[hidden] { display: none; }
 
-/* Video fills the window; the fixed .sessionbar (top:0, out of flow) would overlap
-   the top of the video, so reserve its height. #screen keeps style.display as its
-   visibility primitive — renderer.js READS `screenEl.style.display === 'block'` as
-   session state (see its onConnectionState / onControl / PEER_DISCONNECTED paths),
-   so switching it to [hidden] would be a behaviour change.
-
-   z-index 15 is LOAD-BEARING and must stay between the shell and the overlay:
-   the shell is in normal flow (z-index auto), and farsight.css puts .overlay at
-   20 — the connection-lost / reconnect toast. #screen previously had NO z-index
-   (nothing to stack above), but it must now cover the shell. Give it anything
-   >= 20 and the video paints OVER the overlay, so the toast — and its Reconnect
-   button — silently vanish mid-session. .sessionbar's z-index 10 is relative to
-   #screen's own stacking context and is unaffected. */
-#screen { position: fixed; inset: 0; display: none; background: #000; box-sizing: border-box; padding-top: 46px; z-index: 15; }
-#screen video { width: 100%; height: 100%; object-fit: contain; }
-.sessionbar-right { display: flex; gap: 10px; align-items: center; }
-.monitors-select {
-  background: var(--panel); color: var(--ink); border: 1px solid var(--line);
-  border-radius: 7px; padding: 5px 8px; font-size: 12.5px; display: none;
-}
-#end, #fleet-refresh, #acct-signout, #contacts-refresh, #transfers-refresh { padding: 6px 12px; }
+/* The session view (video, sessionbar, quality readout, host-version note,
+   overlay) moved to its own window (session-window/session.css) — unification
+   step 2. Only the shell's own chrome remains here. */
+#fleet-refresh, #acct-signout, #contacts-refresh, #transfers-refresh { padding: 6px 12px; }
 .settings-actions { margin-top: 10px; }
 #settings-signaling { word-break: break-all; }
-
-/* Host-version note in the session bar: muted, amber when the host lags this build. */
-#host-version { opacity: .7; }
-#host-version.outdated { opacity: 1; color: var(--warn, #f0b429); }
