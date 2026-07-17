@@ -1,5 +1,5 @@
 // packages/controller/src/main.js
-import { app, BrowserWindow, ipcMain, clipboard, dialog, shell, safeStorage } from 'electron';
+import { app, BrowserWindow, desktopCapturer, screen, ipcMain, clipboard, dialog, shell, safeStorage } from 'electron';
 // electron-updater is CommonJS: a named ESM import fails in the packaged app's
 // ESM loader, so use the default import + destructure interop.
 import electronUpdater from 'electron-updater';
@@ -9,6 +9,9 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { readFileSync, writeFileSync } from 'node:fs';
 import * as nodeFs from 'node:fs';
+import { createInjector } from './input-injector.js';
+import { createNutFacade } from './nut-facade.js';
+import { listDisplays } from './capture.js';
 import { createAppLogger } from '@farsight/shared/app-log';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
 import { createUpdater } from '@farsight/shared/updater';
@@ -231,6 +234,52 @@ ipcMain.handle('set-signaling-url', (_e, url) => {
   }
 });
 
+// Provide the primary screen source id to the renderer on request.
+ipcMain.handle('get-screen-source', async () => {
+  try {
+    const sources = await desktopCapturer.getSources({ types: ['screen'] });
+    const primaryId = screen.getPrimaryDisplay().id;
+    const src = sources.find((s) => String(s.display_id) === String(primaryId)) ?? sources[0];
+    return src ? src.id : null;
+  } catch (err) {
+    log?.child('ipc').warn(`screen-source failed: ${err.message}`);
+    return null;
+  }
+});
+
+ipcMain.handle('get-screen-size', () => {
+  const { width, height } = screen.getPrimaryDisplay().size;
+  return { width, height };
+});
+
+// Enumerate all monitors so the renderer can offer a picker and capture a
+// specific display.
+ipcMain.handle('list-displays', () => listDisplays(screen));
+
+// Resolve the desktopCapturer source id for a given display id (monitor switch).
+ipcMain.handle('get-screen-source-for', async (_e, displayId) => {
+  try {
+    const sources = await desktopCapturer.getSources({ types: ['screen'] });
+    const s = sources.find((x) => String(x.display_id) === String(displayId));
+    return s ? s.id : (sources[0] ? sources[0].id : null);
+  } catch (err) {
+    log?.child('ipc').warn(`screen-source failed: ${err.message}`);
+    return null;
+  }
+});
+
+// Point the main-process injector at the selected monitor's DIP bounds so
+// input maps into that display's region.
+ipcMain.handle('select-injector-display', (_e, index) => {
+  const d = listDisplays(screen)[index];
+  if (d) getInjector().setDisplay(d);
+});
+
+// Inject an input event received over the WebRTC data channel. Fire-and-forget
+// (ipcRenderer.send) so high-frequency mouse moves don't await a round trip.
+// The injector validates every event before it reaches nut.js.
+ipcMain.on('inject-input', (_e, evt) => { getInjector().inject(evt); });
+
 // Clipboard sync: the renderer polls/writes the OS clipboard via these handlers.
 // Build version for the subtle bottom-left label; app.getVersion() reads the
 // packaged package.json version (set from the git tag by the release CI).
@@ -264,6 +313,28 @@ let mainWindow = null;
 let ctrlUpdater = null;
 let log = null;   // root logger; assigned on app ready, referenced as log?.*
 let logMinLevel = null; // createAppLogger's resolved level; used in diagnostics meta
+
+// Input injection uses nut.js, a native Node addon that cannot load in the
+// sandboxed renderer. The renderer forwards validated-shape input events over
+// IPC; we validate (inside the injector) and inject here in the main process.
+// The injector is display-aware: fractional [0,1] coords map into the selected
+// display's DIP bounds, then through screen.dipToScreenPoint to physical pixels
+// (correct on scaled/secondary monitors). It starts on the primary display and
+// follows the controller's monitor selection via 'select-injector-display'.
+let injector = null;
+function getInjector() {
+  if (!injector) {
+    const displays = listDisplays(screen);
+    const primary = displays.find((d) => d.primary) ?? displays[0];
+    injector = createInjector({
+      nut: createNutFacade({ log: log?.child('nut') }),
+      display: primary,
+      dipToScreen: (p) => screen.dipToScreenPoint(p),
+      log: log?.child('injector'),
+    });
+  }
+  return injector;
+}
 
 // Verbose diagnostic logging (§ SECURITY.md): consent-gated, account-authenticated
 // upload of a redaction-safe log bundle for support triage.

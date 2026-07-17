@@ -2,6 +2,12 @@
 // CommonJS because the renderer runs with sandbox: true (R-7).
 const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('farsightIpc', {
+  getScreenSource: () => ipcRenderer.invoke('get-screen-source'),
+  getScreenSize: () => ipcRenderer.invoke('get-screen-size'),
+  listDisplays: () => ipcRenderer.invoke('list-displays'),
+  getScreenSourceFor: (displayId) => ipcRenderer.invoke('get-screen-source-for', displayId),
+  selectInjectorDisplay: (index) => ipcRenderer.invoke('select-injector-display', index),
+  injectInput: (evt) => ipcRenderer.send('inject-input', evt),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   getSignalingUrl: () => ipcRenderer.invoke('get-signaling-url'),
   setSignalingUrl: (url) => ipcRenderer.invoke('set-signaling-url', url),
