@@ -177,7 +177,10 @@ function getTransferService() {
           let tier = null;
           try { tier = await getAccountService().classifyPublicKey(publicKey); } catch { tier = null; }
           lastConsentSender = { tier, publicKey };
-          resolvePeerAuth({ tier });
+          // publicKey rides along so transfer-service can bind a remembered
+          // contact consent to the VERIFIED device — a sender-chosen jobId alone
+          // must never unlock a skipped prompt.
+          resolvePeerAuth({ tier, publicKey });
         });
         const stored = readStoredConfig();
         const signalingUrl = resolveSignalingUrl({

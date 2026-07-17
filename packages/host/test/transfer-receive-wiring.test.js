@@ -88,6 +88,12 @@ describe('main.js: consent round-trip', () => {
   test('brings the window to attention when a consent prompt is shown (mirrors CONNECT)', () => {
     expect(main).toMatch(/bringWindowToAttention/);
   });
+
+  test('host peerAuth carries the verified publicKey, not just the tier', () => {
+    // The service binds a remembered contact consent to the VERIFIED peer key; a
+    // tier alone can't distinguish two contacts.
+    expect(main).toMatch(/resolvePeerAuth\(\{\s*tier,\s*publicKey\s*\}\)/);
+  });
 });
 
 describe('preload.cjs: exposes the receive-path bridge', () => {

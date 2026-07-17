@@ -268,6 +268,170 @@ test('SP3 P5 Task 6: consent branches on the verified peer tier — fleet auto-a
   expect(await runWithTier(null)).toBe(true); // ad-hoc / unverified → prompted
 });
 
+test('SP3: a contact resuming the SAME job is not re-prompted (same verified peer)', async () => {
+  // An auto-resumed transfer re-sends its OFFER with the same jobId. Re-prompting
+  // on every network drop makes an overnight 100GB contact transfer hands-on.
+  const dest = tmp();
+  const recvStore = createJobsStore({ dir: tmp() });
+  let prompts = 0;
+  let lastSenderSide = null;
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: dest,
+    consent: async () => { prompts += 1; return true; },
+    openChannel: async () => {
+      const { sideA, sideB } = loopback();
+      // Each receive gets a fresh channel pair, as a real re-establish does.
+      lastSenderSide = sideA;
+      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
+    },
+    receiveCloseGraceMs: 0,
+  });
+  const jobId = newJobId();
+  const { manifest, sources } = await oneFileSource();
+
+  // First run: prompts once, dad accepts.
+  let recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } });
+  let senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+  });
+  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true, contact: true } });
+  await recvPromise;
+  expect(prompts).toBe(1);
+
+  // The SAME job re-offered (a resume) → must NOT prompt again.
+  recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } });
+  senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+  });
+  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true, contact: true } });
+  await recvPromise;
+  expect(prompts).toBe(1); // still 1 — the resume rode the remembered consent
+});
+
+test('SECURITY: a DIFFERENT contact cannot reuse an accepted jobId to skip the prompt', async () => {
+  // jobId is chosen by the SENDER. Binding the memory to the VERIFIED peer key is
+  // what stops contact B replaying a jobId that contact A got approved.
+  const dest = tmp();
+  const recvStore = createJobsStore({ dir: tmp() });
+  let prompts = 0;
+  let lastSenderSide = null;
+  let peerAuthToUse = { tier: 'contact', publicKey: 'PK-DAD' };
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: dest,
+    consent: async () => { prompts += 1; return true; },
+    openChannel: async () => {
+      const { sideA, sideB } = loopback();
+      lastSenderSide = sideA;
+      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve(peerAuthToUse) };
+    },
+    receiveCloseGraceMs: 0,
+  });
+  const jobId = newJobId();
+  const { manifest, sources } = await oneFileSource();
+
+  // First peer (contact A / "dad"): prompts once, accepts.
+  let recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } });
+  let senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+  });
+  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true, contact: true } });
+  await recvPromise;
+  expect(prompts).toBe(1);
+
+  // A DIFFERENT verified contact replays the SAME jobId — must still be prompted.
+  peerAuthToUse = { tier: 'contact', publicKey: 'PK-SOMEONE-ELSE' };
+  recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } });
+  senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+  });
+  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true, contact: true } });
+  await recvPromise;
+  expect(prompts).toBe(2); // the second peer IS prompted — jobId replay does not skip consent
+});
+
+test('SECURITY: an ad-hoc/unverified peer is always prompted, even for a repeated jobId', async () => {
+  // peerAuth resolves { tier: null } (no verified identity to bind to) — the same
+  // jobId twice must prompt twice.
+  const dest = tmp();
+  const recvStore = createJobsStore({ dir: tmp() });
+  let prompts = 0;
+  let lastSenderSide = null;
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: dest,
+    consent: async () => { prompts += 1; return true; },
+    openChannel: async () => {
+      const { sideA, sideB } = loopback();
+      lastSenderSide = sideA;
+      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: null }) };
+    },
+    receiveCloseGraceMs: 0,
+  });
+  const jobId = newJobId();
+  const { manifest, sources } = await oneFileSource();
+
+  let recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } });
+  let senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+  });
+  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
+  await recvPromise;
+  expect(prompts).toBe(1);
+
+  // Same jobId again, still ad-hoc/unverified → must prompt again.
+  recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } });
+  senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+  });
+  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
+  await recvPromise;
+  expect(prompts).toBe(2);
+});
+
+test('own-fleet still auto-accepts and never prompts', async () => {
+  // peerAuth { tier:'fleet' } — regression guard: the new memory must not
+  // disturb the fleet branch, which returns before it.
+  const dest = tmp();
+  const recvStore = createJobsStore({ dir: tmp() });
+  let prompts = 0;
+  let lastSenderSide = null;
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: dest,
+    consent: async () => { prompts += 1; return true; },
+    openChannel: async () => {
+      const { sideA, sideB } = loopback();
+      lastSenderSide = sideA;
+      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'fleet' }) };
+    },
+    receiveCloseGraceMs: 0,
+  });
+  const jobId = newJobId();
+  const { manifest, sources } = await oneFileSource();
+
+  let recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } });
+  let senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+  });
+  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
+  await recvPromise;
+  expect(prompts).toBe(0);
+
+  recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } });
+  senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+  });
+  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
+  await recvPromise;
+  expect(prompts).toBe(0);
+});
+
 test('review fix: a peerAuth that never resolves (classifyPublicKey stuck) times out and falls through to the consent prompt, never auto-accepts', async () => {
   // peerAuth only resolves after openChannel's main-process classifyPublicKey
   // network call. If that call hangs (auth server slow/down), awaiting it

@@ -64,6 +64,14 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // so several can be in flight — this must be a map, not a single slot.
   const activeReceives = new Map(); // jobId -> { abort }
 
+  // Contact consents already granted, keyed by VERIFIED-peer-key + jobId. An
+  // auto-resumed transfer re-offers the same jobId; re-prompting on every network
+  // drop makes an overnight transfer hands-on. Keyed by the device-keypair-verified
+  // public key because jobId is chosen by the SENDER — binding to jobId alone would
+  // let another contact replay an accepted id. In-memory only: a restart re-prompts
+  // once, which is fine (and safer than persisting a consent).
+  const acceptedContactJobs = new Set(); // `${publicKey}::${jobId}`
+
   function emit(jobId, direction, ev) {
     onEvent({ ...ev, jobId, direction });
   }
@@ -298,20 +306,30 @@ export function createTransferService({ store, transferDir, consent, openChannel
       let resolvedTier = null; // set by the consent classify below; read lazily by the receiver
       const receiveConsent = async ({ jobId, manifest }) => {
         let tier = null;
+        let publicKey = null;
         try {
           if (peerAuth) {
             let timerId = null;
             const timed = new Promise((res) => { timerId = setTimeout(() => res({ tier: null }), consentClassifyTimeoutMs); });
             try {
-              tier = (await Promise.race([peerAuth, timed])).tier;
+              const a = await Promise.race([peerAuth, timed]);
+              tier = a.tier;
+              publicKey = a.publicKey || null;
             } finally {
               clearTimeout(timerId);
             }
           }
-        } catch { tier = null; }
+        } catch { tier = null; publicKey = null; }
         resolvedTier = tier;
         if (tier === 'fleet') return true;   // own-fleet auto-accepts; contact/adhoc/timeout → prompt
-        return consent({ jobId, manifest });
+        // Only a VERIFIED contact's consent is remembered. Ad-hoc/unverified (tier
+        // null, no key) always prompts — there's no authenticated identity to bind
+        // to, so a replayed jobId must not skip the prompt. Fail-closed intact.
+        const memo = tier === 'contact' && publicKey ? `${publicKey}::${jobId}` : null;
+        if (memo && acceptedContactJobs.has(memo)) return true; // a resume of a job this peer already got approved
+        const ok = await consent({ jobId, manifest });
+        if (ok && memo) acceptedContactJobs.add(memo);
+        return ok;
       };
       const receiver = createReceiver({
         channel: tapped, destRoot: transferDir, store, consent: receiveConsent,
