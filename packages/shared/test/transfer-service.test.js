@@ -1019,19 +1019,26 @@ test('cancel() on the active send closes its channel and marks the record cancel
   const sendStore = createJobsStore({ dir: tmp() });
 
   let closed = false;
+  let opened = false;
   const svc = createTransferService({
     store: sendStore, transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({
-      // A channel nobody drives further (no receiver ACKs the OFFER) — the
-      // send is genuinely stuck "active" until canceled.
-      channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} },
-      close: async () => { closed = true; },
-    }),
+    openChannel: async () => {
+      opened = true;
+      return {
+        // A channel nobody drives further (no receiver ACKs the OFFER) — the
+        // send is genuinely stuck "active" until canceled.
+        channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} },
+        close: async () => { closed = true; },
+      };
+    },
   });
 
   const jobId = newJobId();
   const p = svc.startSend({ jobId, manifest, sources, target: { id: 'device-9' } });
-  await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); // let runSend open the channel and go active
+  // The start-of-send saveSendRecord() (BUGFIX above) is a real async fs write
+  // before openChannel is even called, so a fixed tick count no longer bounds
+  // "runSend has opened the channel and gone active" — poll for it instead.
+  await until(() => opened);
 
   const c = await svc.cancel(jobId);
   expect(c.ok).toBe(true);
@@ -1072,7 +1079,10 @@ test('cancel() on a waiting (not-yet-active) send removes it from the queue with
 
   const pA = svc.startSend({ jobId: '3ec96fa65719335dae4f1d3c79d679c3', manifest: m1, sources: w1.sources, target: { id: 'devA' } });
   const pB = svc.startSend({ jobId: 'b4cbde03074b15af24fffad840e43d7a', manifest: m2, sources: w2.sources, target: { id: 'devB' } });
-  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  // The start-of-send saveSendRecord() (BUGFIX above) is a real async fs write
+  // before openChannel is even called, so a fixed tick count no longer bounds
+  // "jobA's channel has opened" — poll for it instead.
+  await until(() => opens.length > 0);
 
   expect(opens.map((t) => t.id)).toEqual(['devA']); // sanity: only jobA's channel opened so far
 
@@ -1191,4 +1201,131 @@ test('SP3 P4: cancel on an unknown jobId still falls back to the store-only bran
     openChannel: async () => ({ channel: loopback().sideA, close: async () => {} }),
   });
   expect(await svc.cancel('never-existed')).toEqual({ ok: false });
+});
+
+// --- Field bug: a send was never persisted until it SETTLED --------------
+// packages/shared/src/transfer-service.js's saveSendRecord used to be called
+// only from the 'done'/terminal/'canceled' paths — an in-flight send lived
+// ONLY in the in-memory pendingSends Map. If the process died (kill, crash, or
+// even a normal quit whose async settle-save never completed), the job left
+// NO record at all: absent from the Transfers list, and invisible to the
+// resume watcher's listInterrupted (which reads store.list()). This is why
+// "resume across an app restart" never actually worked (real controller log,
+// v1.14.3: a 436MB/6-file send, restarted mid-transfer, vanished with no trace).
+
+test('BUGFIX: a send is persisted as active BEFORE it settles, with the right dir/manifest/sourceRoots/tier — so a killed process leaves a durable record', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const store = createJobsStore({ dir: tmp() });
+  // A hand-controlled channel that never answers (never delivers an ACCEPT) —
+  // models "the process is killed mid-rendezvous" and proves the record lands
+  // purely from runSend's start-of-send save, never from any settle path
+  // (rendezvousTimeoutMs:0 disables the "no_response" timer, so this send
+  // truly never settles on its own).
+  const svc = createTransferService({
+    store, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: deadChannel(), close: async () => {} }),
+    rendezvousTimeoutMs: 0,
+  });
+  const jobId = newJobId();
+  const sourceRoots = ['/src/root'];
+  svc.startSend({ jobId, manifest, sources, target: { id: 'sig-1', deviceId: 'dev-1', linked: true }, sourceRoots }).catch(() => {});
+
+  // Pre-fix: saveSendRecord is never called until settle, so this record never
+  // appears — untilAsync times out and the test fails, exactly reproducing the
+  // field bug (nothing in the Transfers list, nothing for the resume watcher).
+  await untilAsync(async () => {
+    const r = await store.load(jobId);
+    return !!r && r.jobState === 'active';
+  });
+  const rec = await store.load(jobId);
+  expect(rec.dir).toBe('send');
+  expect(rec.tier).toBe('fleet');
+  expect(rec.sourceRoots).toEqual(sourceRoots);
+  expect(rec.manifest).toEqual(manifest);
+  expect(rec.peer).toEqual({ id: 'sig-1', deviceId: 'dev-1' });
+  expect(typeof rec.createdAt).toBe('number');
+
+  await svc.cancel(jobId); // cleanup so the test doesn't leave a dangling promise
+});
+
+test('recoverStaleSends() rewrites a stale active SEND record by tier: fleet/contact -> interrupted, adhoc -> error', async () => {
+  const store = createJobsStore({ dir: tmp() });
+  const blankManifest = { entries: [], totalBytes: 0, totalFiles: 0 };
+  await store.save({ jobId: 'stale-fleet', dir: 'send', tier: 'fleet', peer: {}, sourceRoots: [], destRoot: null, manifest: blankManifest, perFile: [], jobState: 'active', createdAt: 1 });
+  await store.save({ jobId: 'stale-contact', dir: 'send', tier: 'contact', peer: {}, sourceRoots: [], destRoot: null, manifest: blankManifest, perFile: [], jobState: 'active', createdAt: 2 });
+  await store.save({ jobId: 'stale-adhoc', dir: 'send', tier: 'adhoc', peer: {}, sourceRoots: [], destRoot: null, manifest: blankManifest, perFile: [], jobState: 'active', createdAt: 3 });
+
+  const svc = createTransferService({
+    store, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => { throw new Error('not used in this test'); },
+  });
+  await svc.recoverStaleSends();
+
+  const jobs = await store.list();
+  // fleet/contact are resumable — the resume watcher will re-establish them.
+  expect(jobs.find((j) => j.jobId === 'stale-fleet').jobState).toBe('interrupted');
+  expect(jobs.find((j) => j.jobId === 'stale-contact').jobState).toBe('interrupted');
+  // adhoc has no resume path — showing "Interrupted — will resume" would be a lie.
+  expect(jobs.find((j) => j.jobId === 'stale-adhoc').jobState).toBe('error');
+});
+
+test('recoverStaleSends() leaves done/canceled/error SEND records and ALL dir:recv records untouched', async () => {
+  const store = createJobsStore({ dir: tmp() });
+  const blankManifest = { entries: [], totalBytes: 0, totalFiles: 0 };
+  await store.save({ jobId: 'send-done', dir: 'send', tier: 'fleet', jobState: 'done', peer: {}, sourceRoots: [], destRoot: null, manifest: blankManifest, perFile: [], createdAt: 1 });
+  await store.save({ jobId: 'send-canceled', dir: 'send', tier: 'fleet', jobState: 'canceled', peer: {}, sourceRoots: [], destRoot: null, manifest: blankManifest, perFile: [], createdAt: 2 });
+  await store.save({ jobId: 'send-error', dir: 'send', tier: 'adhoc', jobState: 'error', peer: {}, sourceRoots: [], destRoot: null, manifest: blankManifest, perFile: [], createdAt: 3 });
+  // A dir:'recv' record left 'active' by a killed process: the RECEIVE side has
+  // its own watchdog and its own tier semantics (transfer-orchestrator.js's
+  // inactivity watchdog, already fixed separately) — this sweep is send-only
+  // and must not touch it.
+  await store.save({ jobId: 'recv-active', dir: 'recv', tier: 'fleet', jobState: 'active', peer: {}, destRoot: '/x', manifest: blankManifest, perFile: [], createdAt: 4 });
+
+  const svc = createTransferService({
+    store, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => { throw new Error('not used in this test'); },
+  });
+  await svc.recoverStaleSends();
+
+  const jobs = await store.list();
+  expect(jobs.find((j) => j.jobId === 'send-done').jobState).toBe('done');
+  expect(jobs.find((j) => j.jobId === 'send-canceled').jobState).toBe('canceled');
+  expect(jobs.find((j) => j.jobId === 'send-error').jobState).toBe('error');
+  expect(jobs.find((j) => j.jobId === 'recv-active').jobState).toBe('active'); // untouched
+});
+
+test('after recoverStaleSends(), the resume watcher picks up the swept fleet record and re-establishes it (listInterrupted sees it)', async () => {
+  const srcDir = tmp();
+  const srcFile = join(srcDir, 'stale-resume.txt');
+  writeFileSync(srcFile, Buffer.from('stale payload '.repeat(20)));
+  const sendStore = createJobsStore({ dir: tmp() });
+
+  // Seed a STALE 'active' send record directly, as if a process died mid-send —
+  // before this fix, nothing would even be here (the whole point of BUG 1).
+  await sendStore.save({
+    jobId: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    dir: 'send', tier: 'fleet', peer: { id: 'sig-OLD', deviceId: 'dev-1' },
+    sourceRoots: [srcFile], destRoot: null,
+    manifest: { entries: [], totalBytes: 0, totalFiles: 0 }, perFile: [],
+    jobState: 'active', createdAt: Date.now(),
+  });
+
+  let capturedTarget = null;
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true, rendezvousTimeoutMs: 60,
+    // The fleet reports the device online at its CURRENT signalingId.
+    getFleet: async () => [{ deviceId: 'dev-1', signalingId: 'sig-CURRENT', online: true }],
+    openChannel: async (args) => { capturedTarget = args.target; return { channel: deadChannel(), close: async () => {} }; },
+  });
+
+  await svc.recoverStaleSends();
+  expect((await sendStore.list()).find((j) => j.jobId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').jobState).toBe('interrupted');
+
+  svc.startResumeWatcher();
+  await svc.resumeSweepNow();
+  svc.stopResumeWatcher();
+
+  // openChannel was called with the resolved CURRENT signalingId — proof the
+  // resume watcher's listInterrupted actually returned the swept record.
+  expect(capturedTarget).toMatchObject({ id: 'sig-CURRENT', deviceId: 'dev-1', linked: true });
 });

@@ -142,6 +142,17 @@ export function createTransferService({ store, transferDir, consent, openChannel
     const { manifest, sources, target, createdAt, sourceRoots } = entry;
     const peer = peerFor(target);
     const tier = tierFor(target);
+    // Persist BEFORE any bytes move (field bug — see MEMORY/task notes): a send
+    // used to live only in the in-memory pendingSends Map until it SETTLED, so a
+    // killed process (crash, kill, or even a graceful quit whose async settle-save
+    // never completed) left NO record at all — invisible in the Transfers list
+    // and invisible to the resume watcher's listInterrupted (which reads
+    // store.list()). Writing 'active' here, at the top of runSend (not
+    // startSend — a queued-but-never-started job has moved no bytes and needs no
+    // record), makes a durable record exist for the whole lifetime of a running
+    // send. Best-effort: a store write failure here must not abort a transfer
+    // that would otherwise work.
+    try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'active', peer, tier, sourceRoots }); } catch { /* best effort */ }
     let channel = null;
     let close = null;
     let onRendezvousError = null;
@@ -282,7 +293,30 @@ export function createTransferService({ store, transferDir, consent, openChannel
     return { ok: true };
   }
 
+  // A dir:'send' record still saying 'active' at process START is
+  // impossible-by-definition — the process that owned it is gone (this app
+  // just launched). Rewrite each one to a terminal-but-honest state, mirroring
+  // the RECEIVE side's own inactivity watchdog exactly (transfer-orchestrator.js:
+  // `resumable = tier === 'fleet' || tier === 'contact'`): a resumable tier
+  // becomes 'interrupted' so the resume watcher re-establishes it; anything
+  // else (adhoc) becomes 'error', because nothing will ever resume it and
+  // showing "Interrupted — will resume" would be a lie. dir:'recv' records are
+  // deliberately NOT touched here — the receive side has its own watchdog and
+  // its own tier semantics; sweeping them here would be a second, uncoordinated
+  // writer over the same records.
+  async function recoverStaleSends() {
+    let jobs = [];
+    try { jobs = await store.list(); } catch { jobs = []; }
+    for (const job of jobs) {
+      if (!job || job.dir !== 'send' || job.jobState !== 'active') continue;
+      const resumable = job.tier === 'fleet' || job.tier === 'contact';
+      try { await store.save({ ...job, jobState: resumable ? 'interrupted' : 'error' }); } catch { /* best effort */ }
+    }
+  }
+
   const api = {
+    recoverStaleSends,
+
     startSend({ jobId, manifest, sources, target, sourceRoots = [] }) {
       return new Promise((resolve, reject) => {
         pendingSends.set(jobId, { manifest, sources, target, sourceRoots, createdAt: Date.now(), resolve, reject });

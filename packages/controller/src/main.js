@@ -13,6 +13,7 @@ import { createAppLogger } from '@farsight/shared/app-log';
 import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
 import { createUpdater } from '@farsight/shared/updater';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from './account.js';
+import { revealWindow } from './reveal-window.js';
 // Verbose diagnostic logging: consent-gated upload of a redaction-safe log
 // bundle for support triage (see docs/SECURITY.md).
 import { buildDiagnosticsBundle } from '@farsight/shared/diagnostics-bundle';
@@ -298,7 +299,25 @@ function createWindow() {
   mainWindow = win;
   return win;
 }
-app.whenReady().then(() => {
+
+// Single-instance lock (BUG 2, field-diagnosed): the controller had no lock at
+// all, so relaunching it ran a SECOND process beside a still-running first one
+// — a real controller log showed the OLD process's [ft-worker] heartbeat still
+// beating 24s after the NEW process logged "controller starting", with the new
+// instance showing its own empty Transfers list. Two instances sharing one
+// jobs-store also makes the startup stale-send sweep below unsafe: a second
+// instance could rewrite the FIRST instance's genuinely-live 'active' send
+// record to 'interrupted' out from under it, and the resume watcher would then
+// try to re-establish a job that is still actively sending. Mirrors the host's
+// lock (packages/host/src/main.js) — first instance wins; a later launch hands
+// off via 'second-instance' (focus/restore the existing window; no tray here)
+// and exits.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) app.quit();
+app.on('second-instance', () => revealWindow(mainWindow));
+
+app.whenReady().then(async () => {
+  if (!gotSingleInstanceLock) return;   // losing instance: never create a window
   ({ log, minLevel: logMinLevel } = createAppLogger({
     filePath: path.join(app.getPath('userData'), 'logs', 'main.log'),
     fs: nodeFs,
@@ -321,6 +340,14 @@ app.whenReady().then(() => {
   });
 
   createWindow();
+  // BUG 1 (field-diagnosed): a dir:'send' record still saying 'active' at
+  // process START is impossible-by-definition — the process that owned it is
+  // gone (this app just launched). Sweep those to 'interrupted' (fleet/contact,
+  // resumable) or 'error' (adhoc, nothing will ever resume it) BEFORE the resume
+  // watcher starts, so its first sweep actually sees the swept records — this
+  // is the single-instance lock above's real payoff (a second instance sweeping
+  // concurrently could stomp a genuinely-live 'active' record).
+  try { await getTransferService().recoverStaleSends(); } catch (e) { log?.child('transfer').warn(`stale-send sweep failed: ${e?.message || e}`); }
   // SP3 Phase 4 auto-resume: start the resume watcher on launch so an own-fleet
   // send interrupted in a PREVIOUS run resumes once its device is online again
   // (across-restart). Idle/no-op until signed in and an interrupted job exists.
