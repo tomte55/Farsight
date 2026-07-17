@@ -5,6 +5,7 @@ import { isOlder } from '@farsight/shared/version';
 import { createRateEstimator, etaSeconds, bytesDone, formatBytes, formatRate, formatDuration } from '@farsight/shared/transfer-rate';
 import { railItems, activeTransferCount, TERMINAL_TRANSFER_STATES, isShellPage, SHELL_PAGES } from '@farsight/shared/shell-nav';
 import { buildStatusSegments } from '@farsight/shared/status-bar';
+import { transferLabel } from '@farsight/shared/transfer-label';
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
@@ -560,7 +561,7 @@ function renderStatusBar() {
     ...statusState,
     transfers: [...transferJobs.values()].map((j) => ({
       jobId: j.jobId,
-      peer: (j.target && j.target.id) || 'Unknown peer',
+      peer: transferLabel(j), // the file/folder name, not an often-unknown peer id
       direction: j.direction,
       progress: j.progress,
       rate: j.rate,
@@ -1194,6 +1195,7 @@ const XFER_ERROR_LABELS = {
   bad_password: 'wrong password',
   transfer_timeout: 'the host didn’t respond',
   no_response: 'the host didn’t respond',
+  connection_lost: 'the connection dropped',
   busy: 'the host is busy',
   locked: 'too many attempts — locked',
   rate_limited: 'rate limited — try again shortly',
@@ -1265,7 +1267,10 @@ function jobRow(j) {
   const title = document.createElement('div');
   title.className = 'host-name';
   const arrow = j.direction === 'recv' ? '↓' : '↑';
-  title.textContent = `${arrow} ${(j.target && j.target.id) || 'Unknown peer'} — ${fmtCount(j.manifest)}`;
+  // Label by WHAT is being transferred (file/folder name) — the peer id is often
+  // unknown (not persisted for receives; lost across a restart). fmtCount adds the
+  // file count for context.
+  title.textContent = `${arrow} ${transferLabel(j)} · ${fmtCount(j.manifest)}`;
 
   const barWrap = document.createElement('div');
   barWrap.className = 'xfer-bar';
@@ -1345,6 +1350,10 @@ async function refreshTransfersList() {
       jobId: r.jobId,
       direction: r.dir === 'recv' ? 'recv' : 'send',
       manifest: existing.manifest || r.manifest,
+      // Carry the persisted source paths + peer so the transfer keeps its
+      // file/folder label (and peer) after an app restart, not "Unknown peer".
+      sourceRoots: existing.sourceRoots || r.sourceRoots,
+      peer: existing.peer || r.peer,
       // Prefer this session's live-tracked state while a send is still in
       // flight (waiting for approval or actively transferring); otherwise trust
       // the store's jobState. (The store has no 'awaiting-approval'/'declined'
@@ -1372,8 +1381,15 @@ window.farsightIpc.onTransferEvent((ev) => {
     // The host approved — ONLY now is the transfer genuinely active.
     existing.state = 'active';
   } else if (ev.type === 'interrupted') {
-    // Recoverable own-fleet drop — the resume watcher will retry (not terminal).
-    existing.state = 'interrupted';
+    // Only an own-fleet/contact drop actually resumes; an ad-hoc one is terminal.
+    // The event carries `resumable` — honor it so an ad-hoc drop reads "Failed —
+    // the connection dropped", not a "will resume" that never will.
+    if (ev.resumable === false) {
+      existing.state = 'error';
+      existing.error = existing.error || 'connection_lost';
+    } else {
+      existing.state = 'interrupted';
+    }
     existing.rate = null;
     sendEstimatorFor(ev.jobId).reset(); // a re-established run restarts the window
   } else if (ev.type === 'reconnecting') {

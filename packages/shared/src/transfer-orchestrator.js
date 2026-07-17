@@ -173,8 +173,13 @@ export function createReceiver({
   // the connection dropped) must NOT hang "Receiving" forever — after this long
   // with no ctrl/bulk frame, fail it and persist the terminal state so the UI
   // clears it (and a Refresh reflects it). Armed only AFTER accept, so a human
-  // deliberating over the consent prompt never trips it. Timer injectable for tests.
-  inactivityMs = 60000, setTimer = setTimeout, clearTimer = clearTimeout,
+  // deliberating over the consent prompt never trips it. During a healthy
+  // transfer bulk chunks arrive continuously (every chunk pokes this), so the
+  // window only elapses on a genuine stall — 25s keeps the receiver from looking
+  // frozen when a sender is closed/restarted, while still tolerating a brief
+  // ICE-restart reconnect (an own-fleet drop is saved 'interrupted' and the
+  // sender's resume watcher re-establishes anyway). Timer injectable for tests.
+  inactivityMs = 25000, setTimer = setTimeout, clearTimer = clearTimeout,
   // Bytes land per chunk but the UI only needs a legible cadence; without ANY
   // per-chunk emission a single huge file shows no movement for hours (progress
   // otherwise rides only on file-done).

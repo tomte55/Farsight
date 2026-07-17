@@ -262,7 +262,11 @@ body.in-session .cog, body.in-session .menu { display: none; }
 .sb-dot.acc2 { background: var(--acc2); box-shadow: 0 0 7px rgba(74, 168, 255, .7); }
 .sb-dot.warn { background: var(--warn, #f0b429); }
 .sb-bar { width: 54px; height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; flex: 0 0 auto; }
-.sb-bar-fill { height: 100%; background: linear-gradient(135deg, var(--acc), var(--acc2)); transition: width .2s ease; }
+/* display:block is LOAD-BEARING: paintSeg builds this fill as a <span> (inline),
+   and width/height do not apply to inline boxes — so the bar rendered as a 0×0
+   sliver (measured fillW:0) no matter the percentage. Blockifying it makes the
+   width% actually paint. Guarded by test/status-bar-fill-css.test.js. */
+.sb-bar-fill { display: block; height: 100%; background: linear-gradient(135deg, var(--acc), var(--acc2)); transition: width .2s ease; }
 .sb-ver { opacity: .45; }
 
 /* Panel primitives promoted out of both apps' inline <style> blocks, where they
@@ -299,7 +303,7 @@ body.in-session .cog, body.in-session .menu { display: none; }
 .xfer-row .host-main { display: flex; flex-direction: column; gap: 5px; }
 .xfer-row .host-right { justify-content: flex-end; flex: 0 0 auto; }
 .xfer-bar { height: 3px; border-radius: 999px; background: var(--line); overflow: hidden; }
-.xfer-bar-fill { height: 100%; background: linear-gradient(90deg, var(--acc), var(--acc2)); transition: width .2s ease; }
+.xfer-bar-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--acc), var(--acc2)); transition: width .2s ease; }
 
 /* Utilities replacing inline style="..." attributes — required to retire
    style-src 'unsafe-inline' (a CSP hash covers <style> elements, NOT style
