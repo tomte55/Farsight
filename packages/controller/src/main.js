@@ -296,6 +296,16 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (e, url) => { if (url !== win.webContents.getURL()) e.preventDefault(); });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  // Closing the window QUITS the app — every controller process stops.
+  // 'window-all-closed' is not enough on its own: a running transfer owns a
+  // hidden transfer-worker BrowserWindow (transfer-worker.js), which still counts
+  // as a window, so that event never fires mid-transfer. The process would linger
+  // invisibly — still moving bytes — and, since it holds the single-instance lock,
+  // relaunching would silently do nothing. app.quit() closes the worker windows too.
+  // Safe, not destructive: an in-flight send is already persisted 'active'
+  // (transfer-service persists before the first byte), and the next launch sweeps
+  // it to 'interrupted' and resumes it.
+  win.on('closed', () => { mainWindow = null; app.quit(); });
   mainWindow = win;
   return win;
 }
@@ -314,7 +324,13 @@ function createWindow() {
 // and exits.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) app.quit();
-app.on('second-instance', () => revealWindow(mainWindow));
+// Relaunching must always give the user a window back. Revealing a destroyed
+// mainWindow would silently do nothing — which is exactly what a lingering
+// process looked like before the close-quits-the-app fix above.
+app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) { if (app.isReady()) createWindow(); return; }
+  revealWindow(mainWindow);
+});
 
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return;   // losing instance: never create a window

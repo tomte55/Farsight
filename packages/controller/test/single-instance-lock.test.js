@@ -27,8 +27,21 @@ describe('controller main: single-instance lock', () => {
     expect(main).toMatch(/if\s*\(\s*!gotSingleInstanceLock\s*\)\s*app\.quit\(\)/);
   });
 
-  test('a later launch reveals the running window via second-instance, not a new one', () => {
-    expect(main).toMatch(/app\.on\('second-instance',\s*\(\)\s*=>\s*revealWindow\(mainWindow\)\)/);
+  test('a later launch reveals the running window via second-instance, not a new process', () => {
+    expect(main).toMatch(/app\.on\('second-instance'/);
+    expect(main).toMatch(/revealWindow\(mainWindow\)/);
+  });
+
+  test('a later launch RECREATES the window if the running one is gone', () => {
+    // Field report: "I closed the controller during the transfer and tried to
+    // start it again, but nothing happens" — the process lingered (a running
+    // transfer's hidden worker window kept it alive), so it still held the lock,
+    // and second-instance revealed a DESTROYED mainWindow = a silent no-op. The
+    // close-quits-the-app fix removes the lingering process; this is the belt to
+    // that braces — a relaunch must never do nothing.
+    const handler = main.slice(main.indexOf("app.on('second-instance'"), main.indexOf("app.on('second-instance'") + 400);
+    expect(handler).toMatch(/mainWindow\.isDestroyed\(\)/);
+    expect(handler).toMatch(/createWindow\(\)/);
   });
 
   test('the losing instance never builds a window inside whenReady', () => {
@@ -39,5 +52,25 @@ describe('controller main: single-instance lock', () => {
 
   test('imports revealWindow from a local module (mirrors the host, no tray here)', () => {
     expect(main).toMatch(/import\s*\{\s*revealWindow\s*\}\s*from\s*'\.\/reveal-window\.js'/);
+  });
+});
+
+describe('controller main: closing the window quits every process', () => {
+  test('the main window close handler quits the app', () => {
+    // Field report: "I closed the controller during the transfer ... the process
+    // is still running and has network activity. When I close the program by
+    // pressing the windows X every controller process should stop."
+    //
+    // 'window-all-closed' (below) is NOT sufficient: a running transfer owns a
+    // hidden transfer-worker BrowserWindow (transfer-worker.js: `show: false`),
+    // which still counts as a window — so that event never fires mid-transfer and
+    // the process lingers invisibly, still moving bytes, holding the
+    // single-instance lock so a relaunch silently does nothing.
+    expect(main).toMatch(/win\.on\('closed'[\s\S]{0,120}app\.quit\(\)/);
+  });
+
+  test('window-all-closed still quits too (the no-transfer path)', () => {
+    expect(main).toMatch(/app\.on\('window-all-closed'/);
+    expect(main).toMatch(/window-all-closed[\s\S]{0,160}app\.quit\(\)/);
   });
 });
