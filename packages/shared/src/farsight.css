@@ -157,3 +157,108 @@ body.in-session .cog, body.in-session .menu { display: none; }
    bottom:0 with a higher z-index. When it's showing, lift the version label
    above it so it stays visible instead of hiding behind the banner. */
 #panic-warning:not([hidden]) ~ #version-tag { bottom: 62px; }
+
+/* ─── Unification step 1: the shell ────────────────────────────────────────────
+   Rail navigation + a persistent bottom status bar, replacing the settings-cog-as-
+   navigation and the full-screen takeover panels. ADDITIVE ONLY — packages/host
+   links this same stylesheet and is frozen until it is retired, so no selector
+   above this line may change. */
+.shell { display: flex; flex-direction: column; height: 100vh; }
+.shell-body { display: flex; flex: 1; min-height: 0; }
+
+/* Rail — primary navigation. Was a cogwheel dropdown that mixed the product's four
+   features in with "Open logs folder". */
+.rail {
+  width: 148px; flex: 0 0 auto; padding: 10px 8px;
+  background: var(--bg2); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column;
+}
+.rail-item {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 10px; margin-bottom: 2px; border-radius: 7px;
+  background: transparent; border: none; width: 100%;
+  font: inherit; font-size: 12.5px; color: var(--sub);
+  text-align: left; cursor: pointer;
+}
+.rail-item:hover { background: var(--line); color: var(--ink); }
+.rail-item.sel { background: var(--line); color: var(--ink); font-weight: 600; }
+.rail-icon { width: 14px; text-align: center; opacity: .85; flex: 0 0 auto; }
+.rail-badge {
+  margin-left: auto; flex: 0 0 auto;
+  background: var(--acc); color: #fff;
+  font-size: 9px; font-weight: 800; line-height: 1;
+  border-radius: 999px; padding: 3px 6px;
+}
+.rail-gap { flex: 1; }
+
+/* Pane + pages. A page is a scrollable region inside the shell, NOT a 100vh
+   takeover with a "back" link. */
+.pane { flex: 1; min-width: 0; overflow-y: auto; padding: 18px 20px; }
+.page { max-width: 560px; }
+.page[hidden] { display: none; }
+.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.page-title { font-size: 15px; font-weight: 700; margin-bottom: 2px; }
+.page-sub { font-size: 12px; color: var(--sub); }
+.row-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.stack > * + * { margin-top: 18px; }
+
+/* Status bar — the always-on overview. Absorbs #update-banner and #version-tag
+   (and, from step 3, the host's #panic-warning): all three pinned to bottom:0 and
+   would otherwise fight for the same strip. */
+.statusbar {
+  flex: 0 0 auto; display: flex; align-items: center;
+  height: 30px; padding: 0 12px;
+  background: var(--bg2); border-top: 1px solid var(--line);
+  font-size: 11px; color: var(--sub);
+}
+.sb-seg { display: flex; align-items: center; gap: 6px; padding: 0 11px; height: 100%; white-space: nowrap; }
+.sb-seg:first-child { padding-left: 0; }
+.sb-seg.clickable { cursor: pointer; background: none; border: none; font: inherit; color: inherit; }
+.sb-seg.clickable:hover { color: var(--ink); }
+.sb-div { width: 1px; height: 14px; background: var(--line); flex: 0 0 auto; }
+.sb-spring { flex: 1; }
+.sb-strong { color: var(--ink); font-weight: 600; }
+.sb-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; background: var(--sub); }
+.sb-dot.acc { background: var(--acc); }
+.sb-dot.acc2 { background: var(--acc2); box-shadow: 0 0 7px rgba(74, 168, 255, .7); }
+.sb-dot.warn { background: var(--warn, #f0b429); }
+.sb-bar { width: 54px; height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; flex: 0 0 auto; }
+.sb-bar-fill { height: 100%; background: linear-gradient(135deg, var(--acc), var(--acc2)); transition: width .2s ease; }
+.sb-ver { opacity: .45; }
+
+/* Panel primitives promoted out of both apps' inline <style> blocks, where they
+   were copy-pasted and drifted (fleet rendered .host-dot without the .on class
+   that contacts used; 'Online' vs 'online'). */
+.host-row { display: flex; align-items: center; gap: 13px; padding: 11px 2px; border-top: 1px solid var(--line); }
+.host-row:first-child { border-top: none; }
+.host-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: transparent; box-shadow: inset 0 0 0 2px #3a3a52; }
+.host-row.online .host-dot { background: var(--acc2); box-shadow: 0 0 9px rgba(74, 168, 255, .65); }
+.host-main { flex: 1; min-width: 0; }
+.host-name { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-meta { font-size: 11px; color: var(--sub); margin-top: 3px; font-family: var(--mono); }
+.host-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.host-status { font-size: 11px; color: var(--sub); }
+.host-row.online .host-status { color: #9ccaff; }
+.host-badge { font-size: 9.5px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: rgba(240, 180, 41, .14); color: var(--warn, #f0b429); text-transform: uppercase; letter-spacing: .06em; }
+.fleet-empty { text-align: center; color: var(--sub); font-size: 12.5px; padding: 28px 12px; line-height: 1.65; }
+.xfer-row { flex-direction: column; align-items: stretch; gap: 6px; }
+.xfer-row .host-main { display: flex; flex-direction: column; gap: 5px; }
+.xfer-row .host-right { justify-content: flex-end; }
+.xfer-bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.xfer-bar-fill { height: 100%; background: linear-gradient(135deg, var(--acc), var(--acc2)); transition: width .2s ease; }
+
+/* Utilities replacing inline style="..." attributes — required to retire
+   style-src 'unsafe-inline' (a CSP hash covers <style> elements, NOT style
+   attributes). */
+.u-full { width: 100%; }
+.u-flex1 { flex: 1; }
+.u-row { display: flex; gap: 8px; }
+.u-danger { color: var(--danger-ink); }
+.u-ok { color: var(--acc2); }
+.u-tight { margin-top: 0; }
+.u-mb16 { margin-bottom: 16px; }
+.u-hidden { display: none; }
+.linkbtn { background: none; border: none; color: var(--acc2); font: inherit; font-size: 12.5px; cursor: pointer; padding: 0; }
+.linkbtn:hover { text-decoration: underline; }
+.acct-links { display: flex; justify-content: space-between; margin-top: 13px; }
+.acct-opt { color: var(--sub); font-weight: 400; text-transform: none; letter-spacing: 0; }
