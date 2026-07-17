@@ -7,8 +7,16 @@ import { assertSecureSignalingUrl } from './signaling-url.js';
 export function parseConfig(text) {
   try {
     const obj = JSON.parse(text);
-    if (obj && typeof obj === 'object' && typeof obj.signalingUrl === 'string') {
-      return { signalingUrl: obj.signalingUrl };
+    if (obj && typeof obj === 'object') {
+      const out = {};
+      if (typeof obj.signalingUrl === 'string') out.signalingUrl = obj.signalingUrl;
+      // controlAllowed: the "Allow this computer to be controlled" toggle
+      // (default true when absent — see readControlAllowed in controller
+      // main.js). Only a real boolean is honored; anything else is dropped
+      // so a corrupt/foreign value can't silently disable the receiver-side
+      // gate or be mistaken for an explicit false.
+      if (typeof obj.controlAllowed === 'boolean') out.controlAllowed = obj.controlAllowed;
+      return out;
     }
   } catch { /* fall through to empty */ }
   return {};
@@ -19,6 +27,9 @@ export function serializeConfig(cfg) {
   const out = {};
   if (cfg && typeof cfg.signalingUrl === 'string' && cfg.signalingUrl.trim() !== '') {
     out.signalingUrl = cfg.signalingUrl.trim();
+  }
+  if (cfg && typeof cfg.controlAllowed === 'boolean') {
+    out.controlAllowed = cfg.controlAllowed;
   }
   return JSON.stringify(out, null, 2);
 }

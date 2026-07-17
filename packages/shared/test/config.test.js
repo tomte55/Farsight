@@ -28,6 +28,25 @@ test('validateSignalingUrl accepts wss, trims, rejects empty and ws-public', () 
   expect(() => validateSignalingUrl('ws://s.example.org')).toThrow('insecure signaling URL');
 });
 
+test('parseConfig reads a valid controlAllowed and both fields together', () => {
+  expect(parseConfig('{"controlAllowed":false}')).toEqual({ controlAllowed: false });
+  expect(parseConfig('{"signalingUrl":"wss://s.example.org","controlAllowed":false}'))
+    .toEqual({ signalingUrl: 'wss://s.example.org', controlAllowed: false });
+});
+
+test('parseConfig drops a non-boolean controlAllowed', () => {
+  expect(parseConfig('{"controlAllowed":"false"}')).toEqual({});
+  expect(parseConfig('{"controlAllowed":null}')).toEqual({});
+});
+
+test('serializeConfig round-trips controlAllowed (including false) alongside signalingUrl', () => {
+  expect(parseConfig(serializeConfig({ signalingUrl: 'wss://s.example.org', controlAllowed: false })))
+    .toEqual({ signalingUrl: 'wss://s.example.org', controlAllowed: false });
+  expect(parseConfig(serializeConfig({ controlAllowed: true })))
+    .toEqual({ controlAllowed: true });
+  expect(serializeConfig({})).toBe('{}');
+});
+
 test('resolveSignalingUrl: env wins, then config, then null', () => {
   expect(resolveSignalingUrl({ envUrl: 'ws://localhost:8080', storedUrl: 'wss://s.example.org' }))
     .toEqual({ url: 'ws://localhost:8080', source: 'env' });

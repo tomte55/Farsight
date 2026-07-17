@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   getSignalingUrl: () => ipcRenderer.invoke('get-signaling-url'),
   setSignalingUrl: (url) => ipcRenderer.invoke('set-signaling-url', url),
+  // "Allow this computer to be controlled" — persisted, default-on, gated
+  // receiver-side (enforcement wiring lands in Task 6/7).
+  getControlAllowed: () => ipcRenderer.invoke('control-allowed:get'),
+  setControlAllowed: (v) => ipcRenderer.invoke('control-allowed:set', v),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   setSessionActive: (active) => ipcRenderer.send('updater:set-session-active', active),

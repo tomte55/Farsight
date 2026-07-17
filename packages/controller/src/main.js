@@ -251,12 +251,33 @@ ipcMain.handle('get-signaling-url', () => {
 ipcMain.handle('set-signaling-url', (_e, url) => {
   try {
     const normalized = validateSignalingUrl(url);
-    writeFileSync(configFilePath(), serializeConfig({ signalingUrl: normalized }), { encoding: 'utf8', mode: 0o600 });
+    // Merge onto the existing stored config — a bare { signalingUrl } write
+    // here would CLOBBER controlAllowed (and any other persisted field).
+    writeFileSync(configFilePath(), serializeConfig({ ...readStoredConfig(), signalingUrl: normalized }), { encoding: 'utf8', mode: 0o600 });
     return { ok: true, url: normalized };
   } catch (err) {
     return { ok: false, error: err.message };
   }
 });
+
+// "Allow this computer to be controlled" — persisted, receiver-side-enforced
+// gate on inbound CONNECT (enforcement wiring lands in Task 6/7). Defaults to
+// true — the maintainer's decision; the DEFAULT is what actually ships. The
+// toggle is the mitigation for the posture change (every install is
+// control-reachable); an owner turns it OFF on machines that must not be
+// driven. Never trust a peer's flag — this machine decides from its own
+// setting only, and fails closed on any read error.
+function readControlAllowed() {
+  const stored = readStoredConfig();
+  return typeof stored.controlAllowed === 'boolean' ? stored.controlAllowed : true; // default when unset
+}
+function writeControlAllowed(allowed) {
+  // Merge onto the existing stored config — see the set-signaling-url note above.
+  writeFileSync(configFilePath(), serializeConfig({ ...readStoredConfig(), controlAllowed: !!allowed }), { encoding: 'utf8', mode: 0o600 });
+  return { ok: true, controlAllowed: !!allowed };
+}
+ipcMain.handle('control-allowed:get', () => readControlAllowed());
+ipcMain.handle('control-allowed:set', (_e, v) => writeControlAllowed(!!v));
 
 // Provide the primary screen source id to the renderer on request.
 ipcMain.handle('get-screen-source', async () => {
