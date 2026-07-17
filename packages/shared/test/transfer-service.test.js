@@ -494,6 +494,16 @@ test('SECURITY: a VERIFIED key whose classify returned tier:null is never rememb
   // pinned the `tier === 'contact'` half of the memo guard — mutating the guard
   // to `publicKey ? ... : null` (i.e. remembering ANY verified key regardless of
   // tier) still passes that test and the rest of the 339-test shared suite.
+  //
+  // To actually pin the tier guard, the record must stay ACTIVE (never driven
+  // to completion) across both offers: a fully-completed 'done' record would
+  // let condition 3 (the receiver's-own-record check, which requires
+  // active/interrupted) force the second prompt all on its own, regardless of
+  // what the tier guard does — the same failure mode this test exists to
+  // catch. So this drives the OFFER frame by hand (like the neighbouring
+  // ESCALATION test above) and stops once the record reaches 'active', never
+  // completing the transfer, so ONLY the tier guard can be responsible for
+  // forcing the second prompt.
   const dest = tmp();
   const recvStore = createJobsStore({ dir: tmp() });
   let prompts = 0;
@@ -511,26 +521,28 @@ test('SECURITY: a VERIFIED key whose classify returned tier:null is never rememb
     receiveCloseGraceMs: 0,
   });
   const jobId = newJobId();
-  let senderSvc = createTransferService({
-    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
-  });
-  const { manifest, sources } = await oneFileSource();
+  const { manifest } = await oneFileSource();
 
-  let recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } });
-  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
-  await recvPromise;
+  // First OFFER: human approves. Record left ACTIVE — no accept/complete
+  // round-trip is driven, so the record never advances past 'active'.
+  receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } }).catch(() => {});
+  await untilAsync(() => lastSenderSide != null);
+  lastSenderSide.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.entries.length }));
+  await untilAsync(async () => {
+    const rec = await recvStore.load(jobId);
+    return !!rec && rec.jobState === 'active';
+  });
   expect(prompts).toBe(1);
 
-  // Same jobId again, same peer key, tier still null → must prompt again: a
-  // tier:null classification (even with a real key) is never memoized.
-  recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } });
-  senderSvc = createTransferService({
-    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
-  });
-  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
-  await recvPromise;
+  // Same jobId, BYTE-IDENTICAL manifest, same peer key, tier still null →
+  // must prompt again: a tier:null classification (even with a real key) is
+  // never memoized, no matter how "safe" the replay looks (same key, same
+  // job, same manifest, record still genuinely unfinished).
+  lastSenderSide = null;
+  receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } }).catch(() => {});
+  await untilAsync(() => lastSenderSide != null);
+  lastSenderSide.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.entries.length }));
+  await untilAsync(async () => prompts >= 2, 1500);
   expect(prompts).toBe(2);
 });
 
