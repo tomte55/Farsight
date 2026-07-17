@@ -229,6 +229,11 @@ ipcMain.handle('transfer:incoming', async (_e, input) => {
 
 ipcMain.handle('transfer:list', () => getTransferService().listJobs());
 
+// Lets the receiver stop an incoming transfer (dad must be able to say "stop" to
+// a 100 GB folder). transfer-service.cancel() aborts the live receive — sending a
+// `cancel` ctrl frame the sender honors — and records it canceled.
+ipcMain.handle('transfer:cancel', async (_e, jobId) => getTransferService().cancel(jobId));
+
 let mainWindow = null;
 let tray = null;
 let hostId = '';

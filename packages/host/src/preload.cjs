@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   // send-side bridge.
   transferIncoming: (input) => ipcRenderer.invoke('transfer:incoming', input),
   transferList: () => ipcRenderer.invoke('transfer:list'),
+  transferCancel: (jobId) => ipcRenderer.invoke('transfer:cancel', jobId),
   onTransferEvent: (cb) => ipcRenderer.on('transfer:event', (_e, ev) => cb(ev)),
   onTransferConsent: (cb) => ipcRenderer.on('transfer:consent-request', (_e, req) => cb(req)),
   respondConsent: (input) => ipcRenderer.send('transfer:respond-consent', input),

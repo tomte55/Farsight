@@ -64,6 +64,11 @@ describe('main.js: transfer:incoming / transfer:list IPC', () => {
     expect(main).toContain(`'transfer:list'`);
     expect(main).toMatch(/listJobs\(\)/);
   });
+
+  test('host main registers a transfer:cancel handler', () => {
+    expect(main).toContain("ipcMain.handle('transfer:cancel'");
+    expect(main).toContain('.cancel(jobId)');
+  });
 });
 
 describe('main.js: consent round-trip', () => {
@@ -95,6 +100,10 @@ describe('preload.cjs: exposes the receive-path bridge', () => {
   test('transferIncoming invokes transfer:incoming and respondConsent sends transfer:respond-consent', () => {
     expect(preload).toMatch(/ipcRenderer\.invoke\('transfer:incoming'/);
     expect(preload).toMatch(/ipcRenderer\.send\('transfer:respond-consent'/);
+  });
+
+  test('host preload exposes transferCancel', () => {
+    expect(preload).toContain("transferCancel: (jobId) => ipcRenderer.invoke('transfer:cancel', jobId)");
   });
 });
 

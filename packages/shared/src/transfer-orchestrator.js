@@ -222,36 +222,8 @@ export function createReceiver({
     if (inactive && inactive.unref) inactive.unref();
   }
 
-  // Fd-leak fix: tryFinalize only closes a file's .part handle as part of
-  // actually finalizing it (fsync+close, unconditional, right before the
-  // settled check — see tryFinalize). A receive that settles (abort, stall,
-  // error) while a file is still mid-flight — either still receiving bytes, or
-  // byte-complete but awaiting FILE_END's hash — never reaches that close, so
-  // its fd would otherwise sit open until Node's FileHandle finalizer gets
-  // around to it (non-deterministic, with a process warning). On Windows a
-  // leaked open handle on a `.part` can make a LATER resume's rename onto that
-  // same path fail (EBUSY/EPERM), breaking cancel->resume. Marking
-  // `item.finalizing = true` before closing also prevents a late-queued
-  // tryFinalize call for this same item from trying to finalize/close it too —
-  // though in practice tryFinalize's own `if (settled) return` (its first line)
-  // already makes that impossible once we get here.
-  function closeOpenPartFiles() {
-    for (const item of seq) {
-      if (item.partFile && !item.finalizing) {
-        item.finalizing = true;
-        item.partFile.close().catch(() => { /* best effort */ });
-      }
-    }
-  }
-
-  // Routed through run() (not called directly) so the close is queued behind
-  // any handler currently in-flight on the shared serializer — most notably
-  // onBulk's `await item.partFile.write(take)` for the very item we're about
-  // to close. Closing a fd while a write to it is still parked in libuv would
-  // race the fd itself; run() guarantees the write's handler has already
-  // returned (its own `if (settled) return` bails it out) before this runs.
-  const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopWatchdog(); run(closeOpenPartFiles); resolve(v); } };
-  const fail = (e) => { if (!settled) { settled = true; watching = false; stopWatchdog(); run(closeOpenPartFiles); reject(e); } };
+  const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopWatchdog(); resolve(v); } };
+  const fail = (e) => { if (!settled) { settled = true; watching = false; stopWatchdog(); reject(e); } };
   const run = serializer(fail);
 
   let lastProgressAt = 0;
@@ -326,31 +298,7 @@ export function createReceiver({
     item.finalizing = true;
     await item.partFile.fsync();
     await item.partFile.close();
-    // Round 3: a cancel can land while suspended on fsync/close too. Both already
-    // ran by the time we can observe this (an fd close can't be un-run, and
-    // there's nothing to undo — the closed .part is exactly the resumable state
-    // beginReceive's resume logic expects), so just stop BEFORE the potentially
-    // expensive hash+rename step below instead of doing it for a transfer that's
-    // already canceled.
-    if (settled) return;
     const r = await finalizeReceivedFile({ partFile: item.partFile, expectedHash: item.hash, mtime: item.entry.mtime });
-    // Round 4 (CRITICAL, reverts round 3): finalizeReceivedFile's rename onto the
-    // real destination is a real, uninterruptible disk op — once the call above
-    // was made, it commits regardless of whether `settled` flips while it's in
-    // flight. Round 3 tried to "undo" a landed rename by renaming the file back
-    // onto a `.part` — but that causes DATA LOSS: skipExisting only skips when
-    // size AND mtime both match (transfer-manifest.js), so a pre-existing
-    // destination file that's merely an OLDER version of the incoming one reaches
-    // this function, and the rename above has already overwritten it before this
-    // check runs. The round-3 undo then relocated the just-landed new content
-    // away to `.part`, leaving the destination EMPTY: the user's original file
-    // was already gone (overwritten) and the new one never actually lands there
-    // either. An already-verified file quietly finishing despite a cancel that
-    // raced its last byte is an acceptable outcome (the user gets the file they
-    // asked for); a file that existed before the transfer vanishing is not. So:
-    // don't undo it — just stop advancing bookkeeping/events for a settled
-    // receiver, same discipline as every other guard in this file.
-    if (settled) return;   // an already-verified file may land; that's acceptable
     pending.delete(item.entry.fileId);
     if (r.ok) { doneIds.add(item.entry.fileId); job.markVerified(item.entry.fileId); onEvent({ type: 'file-done', fileId: item.entry.fileId, progress: job.progress() }); }
     else { ok = false; failedIds.add(item.entry.fileId); job.markFailed(item.entry.fileId); onEvent({ type: 'file-failed', fileId: item.entry.fileId }); }
@@ -369,28 +317,14 @@ export function createReceiver({
     if (!job) return; // bytes before accept: impossible in practice, guard anyway
     let chunk = Buffer.from(buf);
     while (chunk.length > 0 && cursor < seq.length) {
-      // Round 3: the entry guard above only catches a cancel that landed BEFORE
-      // this handler started. This loop itself suspends on awaits below, and a
-      // cancel can land while parked on any of them — re-check every iteration
-      // so a canceled receive can't open/write into the NEXT file once it does.
-      if (settled) return;
       const item = seq[cursor];
       if (item.expected <= 0) { cursor += 1; continue; } // fully-resumed file: no bytes, finalized via FILE_END
       // Open the .part lazily when the cursor first reaches this file (keeps at
       // most one fd open at a time — matters for huge file counts).
       if (!item.partFile) item.partFile = await createPartFile({ destRoot, relPath: item.entry.path, resumeFrom: item.offset, hashLive: true });
-      // Opening the .part is a real (uninterruptible) fs op, but it's exactly
-      // the "leave the .part for resume" state this design already wants — no
-      // need to undo it. Just don't write bytes into it once canceled.
-      if (settled) return;
       const need = item.expected - item.received;
       const take = chunk.subarray(0, need);
       await item.partFile.write(take);
-      // Same reasoning: the write itself lands real (but resumable) .part bytes
-      // on disk, which is fine — that's what resume expects. What must NOT
-      // happen is advancing bookkeeping/finalizing/emitting progress for a
-      // receive that's already canceled, so stop right here.
-      if (settled) return;
       item.received += take.length;
       job.onBytes(item.entry.fileId, take.length);
       chunk = chunk.subarray(take.length);
@@ -399,7 +333,6 @@ export function createReceiver({
         await tryFinalize(item); // finalizes only if FILE_END's hash already landed
       }
     }
-    if (settled) return; // don't emit a stray progress event after canceled
     emitProgress(); // throttled: the bar/speed/ETA need movement between file boundaries
     // Trailing bytes past the last file (cursor === seq.length) shouldn't happen
     // for a well-formed stream — discarded silently, not an error.
@@ -469,12 +402,6 @@ export function createReceiver({
         // hangs the whole receive (field bug: "stuck at verifying" + orphan .part).
         // Keep it in `seq` (onBulk's cursor skips expected<=0 items) but not in
         // `pending`; publish any full .part and mark it done.
-        // Round 3 (minor): guard BEFORE this write too, not just after — a
-        // cancel landing during a PRIOR iteration's await (resumeOffsetFor, or
-        // this same call on an earlier entry) must stop the NEXT entry's
-        // publish from starting at all, not just suppress the events that
-        // follow it.
-        if (settled) return;
         await publishFullyReceivedFile({ destRoot, relPath: e.path, mtime: e.mtime });
         if (settled) return;
         doneIds.add(e.fileId);
