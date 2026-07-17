@@ -167,6 +167,15 @@ describe('renderer: Send… entry point + Transfers panel', () => {
     expect(renderer).toMatch(/if \(ev\.manifest\) existing\.manifest = ev\.manifest/);
   });
 
+  test("a receive shows a 'verifying' state during hash-verification, not a misleading 'Transferring…'", () => {
+    // The receiver emits 'verifying' while hashing the received files. With no
+    // branch for it, it fell through to the progress path and read
+    // "Transferring…" — with a live ETA that is meaningless during verify. Give
+    // it its own state + label.
+    expect(renderer).toMatch(/ev\.type === 'verifying'/);
+    expect(renderer).toMatch(/case 'verifying'/);
+  });
+
   test('controller renderer imports the rate helpers', () => {
     const src = readFileSync(new URL('../src/renderer/renderer.js', import.meta.url), 'utf8');
     expect(src).toMatch(/import \{[^}]*createRateEstimator[^}]*\} from '@farsight\/shared\/transfer-rate'/);

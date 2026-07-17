@@ -1223,6 +1223,7 @@ function stateLabel(j) {
     case 'reconnecting': return 'Reconnecting…';
     case 'active': return sendDetailText(j) ? `Transferring · ${sendDetailText(j)}` : 'Transferring…';
     case 'finishing': return 'Finishing — verifying on host…';
+    case 'verifying': return 'Finishing — verifying received files…';
     case 'done': return hasCount ? `Completed · ${total} file${total === 1 ? '' : 's'}` : 'Completed';
     case 'declined': return 'Declined by host';
     case 'canceled': return 'Canceled';
@@ -1411,6 +1412,12 @@ window.farsightIpc.onTransferEvent((ev) => {
   } else if (ev.type === 'error') {
     existing.state = 'error';
     if (ev.reason) existing.error = ev.reason;
+  } else if (ev.type === 'verifying') {
+    // The receiver is hash-verifying files it already received. Keep the last
+    // progress but show a distinct finishing state — NOT "Transferring…" with a
+    // live ETA, which is meaningless once bytes have stopped and hashing began.
+    if (ev.progress) existing.progress = ev.progress;
+    existing.state = 'verifying';
   } else if (ev.progress) {
     // Progress implies the peer accepted (bytes are flowing). Completion is
     // signaled by 'completed', NOT by fraction hitting 1 (that's "all sent", not
