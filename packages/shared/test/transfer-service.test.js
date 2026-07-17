@@ -22,6 +22,11 @@ async function until(pred, ms = 2000) {
   const t0 = Date.now();
   while (!pred()) { if (Date.now() - t0 > ms) throw new Error('until: timed out'); await new Promise((r) => setTimeout(r, 1)); }
 }
+// Same, but for an async predicate (e.g. awaiting a store.load()).
+async function untilAsync(pred, ms = 2000) {
+  const t0 = Date.now();
+  while (!(await pred())) { if (Date.now() - t0 > ms) throw new Error('untilAsync: timed out'); await new Promise((r) => setTimeout(r, 1)); }
+}
 
 // Same cross-wired fake channel pattern as transfer-orchestrator.test.js's
 // loopback(), generalized to produce fresh named sides on each call so a test
@@ -268,9 +273,17 @@ test('SP3 P5 Task 6: consent branches on the verified peer tier — fleet auto-a
   expect(await runWithTier(null)).toBe(true); // ad-hoc / unverified → prompted
 });
 
-test('SP3: a contact resuming the SAME job is not re-prompted (same verified peer)', async () => {
-  // An auto-resumed transfer re-sends its OFFER with the same jobId. Re-prompting
-  // on every network drop makes an overnight 100GB contact transfer hands-on.
+test('SECURITY: REPLAY AFTER COMPLETION — a contact re-offering a FINISHED jobId must be re-prompted', async () => {
+  // Was 'SP3: a contact resuming the SAME job is not re-prompted' and asserted
+  // prompts stayed at 1 across this exact sequence — but that sequence (full
+  // completion, THEN the same jobId re-offered with the same manifest) is
+  // precisely the replay-after-completion hole: jobId is sender-chosen, so once
+  // a job reaches 'done' there is nothing left to "resume" — a re-offer of it is
+  // a NEW write request that happens to reuse an old id, and must go through a
+  // real prompt like any other. The receiver's own persisted record now gates
+  // this: a 'done' record no longer qualifies the memo, so the human is asked
+  // again. (A real accepted-and-actually-unfinished resume is covered by the
+  // "happy path" test below, using an 'active'/'interrupted' record instead.)
   const dest = tmp();
   const recvStore = createJobsStore({ dir: tmp() });
   let prompts = 0;
@@ -289,7 +302,8 @@ test('SP3: a contact resuming the SAME job is not re-prompted (same verified pee
   const jobId = newJobId();
   const { manifest, sources } = await oneFileSource();
 
-  // First run: prompts once, dad accepts.
+  // First run: prompts once, dad accepts, and the transfer runs to completion
+  // (jobState 'done' persisted).
   let recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } });
   let senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
@@ -298,8 +312,10 @@ test('SP3: a contact resuming the SAME job is not re-prompted (same verified pee
   await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true, contact: true } });
   await recvPromise;
   expect(prompts).toBe(1);
+  expect((await recvStore.load(jobId)).jobState).toBe('done');
 
-  // The SAME job re-offered (a resume) → must NOT prompt again.
+  // The SAME jobId + SAME manifest, re-offered after the job already finished
+  // → MUST prompt again (pre-fix this stayed at 1; that was the vulnerability).
   recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } });
   senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
@@ -307,7 +323,215 @@ test('SP3: a contact resuming the SAME job is not re-prompted (same verified pee
   });
   await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true, contact: true } });
   await recvPromise;
-  expect(prompts).toBe(1); // still 1 — the resume rode the remembered consent
+  expect(prompts).toBe(2); // re-prompted — a finished job cannot ride the old consent
+});
+
+test('SECURITY: happy path — a contact resuming a genuinely UNFINISHED job with the SAME manifest is not re-prompted', async () => {
+  // A real resume: the sender's OFFER lands, the human approves, the receiver
+  // persists jobState:'active' (accept-time save, before any bytes flow), and
+  // then the connection drops before job_done. A fresh re-offer of the SAME
+  // jobId with the IDENTICAL manifest (an unchanged source re-walked) must NOT
+  // re-prompt — this is the whole point of the SP3 consent-memo feature.
+  // Frames are driven by hand (not a real createSender) so the first "peer" can
+  // be stopped deliberately right after ACCEPT, before any file bytes/job_done —
+  // producing a genuinely 'active' (not 'done') persisted record, which a full
+  // real send would not let us observe from outside.
+  const dest = tmp();
+  const recvStore = createJobsStore({ dir: tmp() });
+  let prompts = 0;
+  let lastSenderSide = null;
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: dest,
+    consent: async () => { prompts += 1; return true; },
+    openChannel: async () => {
+      const { sideA, sideB } = loopback();
+      lastSenderSide = sideA;
+      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
+    },
+    receiveCloseGraceMs: 0,
+  });
+  const jobId = newJobId();
+  const { manifest } = await oneFileSource(); // 1 file, 64 bytes
+
+  // First "connection": OFFER goes out, human approves — then silence (no
+  // file bytes, no job_done). The accept-time saveRecord('active') has already
+  // landed by the time we observe it in the store.
+  receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } }).catch(() => {});
+  await untilAsync(() => lastSenderSide != null);
+  lastSenderSide.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.entries.length }));
+  await untilAsync(async () => {
+    const rec = await recvStore.load(jobId);
+    return !!rec && rec.jobState === 'active';
+  });
+  expect(prompts).toBe(1);
+
+  // A fresh channel (a real re-establish) re-offers the SAME jobId with the
+  // IDENTICAL manifest → must NOT re-prompt.
+  lastSenderSide = null;
+  receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } }).catch(() => {});
+  await untilAsync(() => lastSenderSide != null);
+  let sawAccept = false;
+  lastSenderSide.onCtrl((s) => { const f = parseCtrlFrame(s); if (f && f.t === 'accept') sawAccept = true; });
+  lastSenderSide.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.entries.length }));
+  await until(() => sawAccept); // proves the receive proceeded past consent without prompting
+  expect(prompts).toBe(1); // still 1 — no second prompt for the same, unfinished, unchanged job
+});
+
+test('SECURITY (ESCALATION — reviewer demo): a contact re-offering the SAME jobId with a DIFFERENT manifest must prompt again, and the undeclared files are not silently written', async () => {
+  // The finding: the memo bound (peer key, jobId) but not the manifest. Once a
+  // human approved ONE small transfer for a contact, that contact (or anyone who
+  // later controls that jobId on the wire) could re-offer the SAME jobId with a
+  // COMPLETELY DIFFERENT, bigger manifest and have it silently accepted — an
+  // unlimited unprompted write channel for the process's lifetime. This
+  // reproduces that exact shape and proves the fix: the offered manifest must be
+  // byte-identical to the one approved, or a real prompt fires.
+  const dest = tmp();
+  const recvStore = createJobsStore({ dir: tmp() });
+  let prompts = 0;
+  let lastSenderSide = null;
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: dest,
+    // The (simulated) human approves the innocent first request, but would
+    // DECLINE the evil one if actually shown it — proving the prompt reached is
+    // a REAL gate, not a rubber stamp: if the fix regressed to skipping the
+    // prompt, this decline is never reached and the evil files land anyway.
+    consent: async () => { prompts += 1; return prompts === 1; },
+    openChannel: async () => {
+      const { sideA, sideB } = loopback();
+      lastSenderSide = sideA;
+      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
+    },
+    receiveCloseGraceMs: 0,
+  });
+  const jobId = newJobId();
+  const innocent = buildManifestReal([{ fileId: 0, path: 'innocent.txt', size: 16, mtime: Date.now() }]);
+
+  // Innocent OFFER: human approves; connection then drops before completion
+  // (same "active, unfinished" shape as the happy-path test above).
+  receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } }).catch(() => {});
+  await untilAsync(() => lastSenderSide != null);
+  lastSenderSide.sendCtrl(offerFrame({ jobId, entries: innocent.entries, totalBytes: innocent.totalBytes, totalFiles: innocent.entries.length }));
+  await untilAsync(async () => {
+    const rec = await recvStore.load(jobId);
+    return !!rec && rec.jobState === 'active';
+  });
+  expect(prompts).toBe(1);
+
+  // The SAME jobId is re-offered, but with a BIGGER, DIFFERENT manifest (3 evil
+  // files). Pre-fix: memo hit on (key, jobId) alone → auto-accepted, no prompt,
+  // files written. Post-fix: manifest fingerprint mismatch → real prompt.
+  lastSenderSide = null;
+  receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } }).catch(() => {});
+  await untilAsync(() => lastSenderSide != null);
+  const evil = buildManifestReal([
+    { fileId: 0, path: 'evil1.bin', size: 5000, mtime: Date.now() },
+    { fileId: 1, path: 'evil2.bin', size: 5000, mtime: Date.now() },
+    { fileId: 2, path: 'evil3.bin', size: 5000, mtime: Date.now() },
+  ]);
+  let sawReject = false;
+  lastSenderSide.onCtrl((s) => { const f = parseCtrlFrame(s); if (f && f.t === 'reject') sawReject = true; });
+  lastSenderSide.sendCtrl(offerFrame({ jobId, entries: evil.entries, totalBytes: evil.totalBytes, totalFiles: evil.entries.length }));
+  // Try to sneak the evil bytes in immediately too (attacker doesn't wait for an
+  // accept) — the receiver must never build a job/pending set for a declined
+  // offer, so these bytes have nowhere to land regardless.
+  for (const e of evil.entries) { await lastSenderSide.sendBulk(Buffer.alloc(e.size, 7)); }
+  await until(() => sawReject);
+
+  expect(prompts).toBe(2); // re-prompted — the different manifest was NOT silently accepted
+  const written = evil.entries.map((e) => existsSync(join(dest, e.path)));
+  expect(written).toEqual([false, false, false]); // evil files NOT silently written to disk
+});
+
+test('SECURITY: ACCEPT-THEN-CANCEL — a canceled job re-offered under the same jobId must be re-prompted', async () => {
+  // The human accepted, then canceled before it finished. The persisted record
+  // flips to 'canceled' — the same peer re-offering that jobId later must not
+  // ride the old approval; a canceled job is not "unfinished", it's declined.
+  const dest = tmp();
+  const recvStore = createJobsStore({ dir: tmp() });
+  let prompts = 0;
+  let lastSenderSide = null;
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: dest,
+    consent: async () => { prompts += 1; return true; },
+    openChannel: async () => {
+      const { sideA, sideB } = loopback();
+      lastSenderSide = sideA;
+      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
+    },
+    receiveCloseGraceMs: 0,
+  });
+  const jobId = newJobId();
+  const { manifest } = await oneFileSource();
+
+  receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } }).catch(() => {});
+  await untilAsync(() => lastSenderSide != null);
+  lastSenderSide.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.entries.length }));
+  await untilAsync(async () => {
+    const rec = await recvStore.load(jobId);
+    return !!rec && rec.jobState === 'active';
+  });
+  expect(prompts).toBe(1);
+
+  // The user cancels before it finishes.
+  await receiverSvc.cancel(jobId);
+  expect((await recvStore.load(jobId)).jobState).toBe('canceled');
+
+  // Re-offered under the same jobId, identical manifest → MUST prompt again.
+  lastSenderSide = null;
+  receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } }).catch(() => {});
+  await untilAsync(() => lastSenderSide != null);
+  lastSenderSide.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.entries.length }));
+  await until(() => prompts === 2);
+  expect(prompts).toBe(2);
+});
+
+test('SECURITY: a VERIFIED key whose classify returned tier:null is never remembered (coverage gap: existing ad-hoc test used no publicKey)', async () => {
+  // Reachable in production: packages/host/src/main.js makes a SECOND,
+  // independent classifyPublicKey call AFTER the device-keypair handshake
+  // already passed — a transient auth-server error or token expiry can yield
+  // { tier: null, publicKey: <a real verified key> }. The existing "ad-hoc
+  // replay" guard only exercises { tier: null } with NO publicKey, so it never
+  // pinned the `tier === 'contact'` half of the memo guard — mutating the guard
+  // to `publicKey ? ... : null` (i.e. remembering ANY verified key regardless of
+  // tier) still passes that test and the rest of the 339-test shared suite.
+  const dest = tmp();
+  const recvStore = createJobsStore({ dir: tmp() });
+  let prompts = 0;
+  let lastSenderSide = null;
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: dest,
+    consent: async () => { prompts += 1; return true; },
+    openChannel: async () => {
+      const { sideA, sideB } = loopback();
+      lastSenderSide = sideA;
+      // tier:null WITH a real verified key — the classify call itself failed
+      // transiently, even though the handshake proved this key.
+      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: null, publicKey: 'PK-DAD' }) };
+    },
+    receiveCloseGraceMs: 0,
+  });
+  const jobId = newJobId();
+  let senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+  });
+  const { manifest, sources } = await oneFileSource();
+
+  let recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } });
+  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
+  await recvPromise;
+  expect(prompts).toBe(1);
+
+  // Same jobId again, same peer key, tier still null → must prompt again: a
+  // tier:null classification (even with a real key) is never memoized.
+  recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } });
+  senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+  });
+  await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
+  await recvPromise;
+  expect(prompts).toBe(2);
 });
 
 test('SECURITY: a DIFFERENT contact cannot reuse an accepted jobId to skip the prompt', async () => {

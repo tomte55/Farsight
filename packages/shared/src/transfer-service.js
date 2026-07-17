@@ -9,12 +9,22 @@
 // upload at a time, others wait). RECEIVES are NOT gated by that queue — a
 // receive can run concurrently with an active send, since the remote peer
 // initiates it and the user has already consented per-offer.
+import { createHash } from 'node:crypto';
 import { createSender, createReceiver } from './transfer-orchestrator.js';
 import { createQueue, selectResumable } from './transfer-queue.js';
 import { parseCtrlFrame } from './transfer-protocol.js';
 import { walkSource } from './transfer-io.js';
 import { buildManifest } from './transfer-manifest.js';
 import { createResumeWatcher } from './transfer-resume-watcher.js';
+
+// A stable fingerprint of a manifest's file list, so a resumed contact job can
+// be recognized by content, not just by the sender-chosen jobId (SECURITY —
+// see acceptedContactJobs below). manifest.entries is already the RECEIVER's
+// own buildManifest() output (sanitized paths, validated fields), so this is
+// deterministic across an unchanged source re-walk.
+function manifestFingerprint(manifest) {
+  return createHash('sha256').update(JSON.stringify(manifest.entries)).digest('hex');
+}
 
 // Wrap a channel so we can observe the jobId as soon as it appears on the wire
 // (the OFFER frame) without altering behavior — the real onCtrl callback still
@@ -64,13 +74,28 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // so several can be in flight — this must be a map, not a single slot.
   const activeReceives = new Map(); // jobId -> { abort }
 
-  // Contact consents already granted, keyed by VERIFIED-peer-key + jobId. An
+  // Contact consents already granted, keyed by VERIFIED-peer-key + jobId, valued
+  // by the fingerprint of the manifest the human actually approved. An
   // auto-resumed transfer re-offers the same jobId; re-prompting on every network
   // drop makes an overnight transfer hands-on. Keyed by the device-keypair-verified
   // public key because jobId is chosen by the SENDER — binding to jobId alone would
   // let another contact replay an accepted id. In-memory only: a restart re-prompts
   // once, which is fine (and safer than persisting a consent).
-  const acceptedContactJobs = new Set(); // `${publicKey}::${jobId}`
+  //
+  // SECURITY (memo alone is NOT enough to skip a prompt): jobId is entirely
+  // sender-chosen, so (key, jobId) alone means "the same job" only because the
+  // sender SAYS so. A verified contact who got ONE small transfer approved could
+  // re-offer that same jobId later with a completely different (bigger) manifest
+  // and — with only the (key, jobId) memo — have it silently accepted: an
+  // unlimited, unprompted write channel for the process's lifetime after a single
+  // approval. Skipping the prompt on a memo hit therefore additionally requires,
+  // checked at the point of use below: (a) the OFFERED manifest fingerprint
+  // matches the one recorded at accept time, and (b) the receiver's OWN
+  // persisted record for this jobId says the job is genuinely unfinished
+  // ('active'/'interrupted', not 'done'/'canceled'/absent) — receiver-side
+  // truth, not the sender's assertion. Both self-expire the memo with no manual
+  // cleanup: a completed or canceled job can never ride it again.
+  const acceptedContactJobs = new Map(); // `${publicKey}::${jobId}` -> approved manifest fingerprint
 
   function emit(jobId, direction, ev) {
     onEvent({ ...ev, jobId, direction });
@@ -326,9 +351,21 @@ export function createTransferService({ store, transferDir, consent, openChannel
         // null, no key) always prompts — there's no authenticated identity to bind
         // to, so a replayed jobId must not skip the prompt. Fail-closed intact.
         const memo = tier === 'contact' && publicKey ? `${publicKey}::${jobId}` : null;
-        if (memo && acceptedContactJobs.has(memo)) return true; // a resume of a job this peer already got approved
+        // A memo hit alone must NOT skip the prompt (see the SECURITY comment on
+        // acceptedContactJobs above) — additionally require the offered manifest
+        // to be byte-identical to the one approved, AND the receiver's OWN store
+        // record to say this job is still genuinely unfinished. Any mismatch or
+        // missing/terminal record falls through to a real prompt — fail closed.
+        const fingerprint = manifestFingerprint(manifest);
+        if (memo && acceptedContactJobs.get(memo) === fingerprint) {
+          let rec = null;
+          try { rec = await store.load(jobId); } catch { rec = null; }
+          if (rec && rec.dir === 'recv' && (rec.jobState === 'active' || rec.jobState === 'interrupted')) {
+            return true; // a resume of a job this peer already got approved: same manifest, still unfinished
+          }
+        }
         const ok = await consent({ jobId, manifest });
-        if (ok && memo) acceptedContactJobs.add(memo);
+        if (ok && memo) acceptedContactJobs.set(memo, fingerprint);
         return ok;
       };
       const receiver = createReceiver({
