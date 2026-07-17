@@ -283,6 +283,12 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true, // R-7: defense in depth
+      // Mirrors the host (see its main.js for the measured numbers): this
+      // renderer owns the signaling client, the peer connection and input
+      // capture, so a throttled background renderer stalls the session's
+      // timer-driven reconnect/keepalive work. A minimized controller must not
+      // quietly degrade the session it is driving.
+      backgroundThrottling: false,
     },
   });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));

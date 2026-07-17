@@ -293,6 +293,17 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true, // R-7: defense in depth
+      // The host's SIGNALING CLIENT, peer connection and input datachannel all
+      // live in this renderer — and the host spends its life minimized or hidden
+      // to the tray. Chromium throttles a background renderer's timers (measured:
+      // 4/s -> 1.1/s the moment the window is minimized, and ~1/MINUTE once
+      // "intensive throttling" kicks in after ~5 min), so the signaling client's
+      // setTimeout-driven auto-reconnect can't self-heal a dropped socket. The
+      // account heartbeat runs in MAIN and keeps reporting presence, so the
+      // console shows the host Online while CONNECT returns host_offline —
+      // exactly the failure signaling-client.js's header warns about. Same reason
+      // the hidden transfer workers set this (transfer-worker.js).
+      backgroundThrottling: false,
     },
   });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
