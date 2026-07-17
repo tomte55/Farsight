@@ -123,3 +123,26 @@ test('JOB_STATES covers every state the engine reducer can reach', () => {
   for (const s of [...JOB_STATES]) for (const e of events) reachable.add(nextJobState(s, e));
   for (const s of reachable) expect(JOB_STATES).toContain(s);
 });
+
+test('concurrent saves for the SAME jobId never publish a corrupt record', async () => {
+  // A cancel racing the start-save writes the same jobId twice at once. With a
+  // shared `${target}.tmp` both writes truncate/interleave one file and a rename
+  // can publish it half-written — and a corrupt record is the worst outcome
+  // possible here: list() skips it and load() returns null, so the job vanishes
+  // from the Transfers list permanently. (Measured pre-fix: 74/120 corrupt.)
+  const store = createJobsStore({ dir: tmp() });
+  const jobId = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+  const big = { jobId, dir: 'send', tier: 'fleet', manifest: { entries: Array.from({ length: 400 }, (_, i) => ({ fileId: i, path: `f${i}.bin`, size: 1024, mtime: 1 })) } };
+
+  for (let round = 0; round < 40; round += 1) {
+    await Promise.all([
+      store.save({ ...big, jobState: 'active' }),
+      store.save({ ...big, jobState: 'canceled' }),
+    ]);
+    const rec = await store.load(jobId);
+    expect(rec).not.toBeNull();                       // never corrupt -> never "not found"
+    expect(['active', 'canceled']).toContain(rec.jobState); // always one whole write, never a blend
+    expect(rec.manifest.entries.length).toBe(400);
+  }
+  expect((await store.list()).length).toBe(1); // and no stray tmp/duplicate records
+});

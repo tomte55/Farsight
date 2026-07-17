@@ -5,6 +5,21 @@
 import { mkdir, writeFile, readFile, rename, readdir, rm } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 
+// Monotonic suffix so queued writes never share a tmp path (see save()).
+let writeSeq = 0;
+
+// Serialize writes per jobId (see save()). The chain is dropped once it drains,
+// so this can't grow with the number of jobs seen over a long-lived process.
+const writeChains = new Map(); // jobId -> promise of the last queued write
+function enqueueWrite(jobId, run) {
+  const prev = writeChains.get(jobId);
+  const next = (prev ? prev.then(run, run) : run());
+  const tracked = next.catch(() => {}); // a failed write must not break the chain
+  writeChains.set(jobId, tracked);
+  tracked.then(() => { if (writeChains.get(jobId) === tracked) writeChains.delete(jobId); });
+  return next; // callers still see their own write's error
+}
+
 // jobId is sender-chosen (transfer-protocol.js's OFFER carries it) and the
 // RECEIVER path-joins it into a filename *after the human has already
 // consented to the transfer* -- consent is "let dad send me photo.jpg", never
@@ -49,11 +64,27 @@ export function createJobsStore({ dir }) {
       if (!job || typeof job.jobId !== 'string' || job.jobId.length === 0) {
         throw new Error('job requires a non-empty string jobId');
       }
-      await ensureDir();
-      const target = jobPath(dir, job.jobId);
-      const tmp = `${target}.tmp`;
-      await writeFile(tmp, JSON.stringify(job), 'utf8');
-      await rename(tmp, target); // atomic replace
+      // Writes for one jobId are SERIALIZED. Two concurrent saves for the same
+      // job (a cancel racing the start-save) are otherwise unsafe twice over: a
+      // shared `${target}.tmp` gets truncated and interleaved by both writers,
+      // and — measured on Windows — two concurrent renames onto the same target
+      // throw EPERM, which the best-effort callers swallow, silently losing the
+      // write. Either way the record can end up corrupt, and corrupt is the worst
+      // outcome here: list() skips it and load() returns null, so the job would
+      // vanish from the Transfers list permanently with nothing to clean it up.
+      // Chaining keeps last-writer-wins (a cancel after a start still wins).
+      return enqueueWrite(job.jobId, async () => {
+        await ensureDir();
+        const target = jobPath(dir, job.jobId);
+        const tmp = `${target}.${writeSeq++}.tmp`; // unique: never collide with a queued write
+        try {
+          await writeFile(tmp, JSON.stringify(job), 'utf8');
+          await rename(tmp, target); // atomic replace
+        } catch (err) {
+          await rm(tmp, { force: true }).catch(() => {}); // don't leave a stray tmp behind
+          throw err;
+        }
+      });
     },
     async load(jobId) {
       try {
