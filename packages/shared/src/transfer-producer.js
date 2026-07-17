@@ -3,6 +3,7 @@
 // byte range is not already covered on the far end. The single sequential read keeps
 // sender disk I/O efficient; the gap filter avoids resending resumed bytes.
 export function createChunkProducer({ readChunk, hashUpdate, chunkSize = 131072 }) {
+  if (!(chunkSize > 0)) throw new Error('chunkSize must be > 0');
   return {
     async *produce(file, coveredRangeSet) {
       const { fileId, size } = file;

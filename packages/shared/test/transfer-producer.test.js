@@ -27,4 +27,11 @@ describe('transfer-producer', () => {
     expect(out).toEqual([10, 20]);        // only the uncovered chunks are sent
     expect(hashed.length).toBe(30);       // but the whole file was hashed
   });
+
+  it('throws immediately for a non-positive chunkSize instead of infinite-looping', () => {
+    expect(() => createChunkProducer({ readChunk: () => Promise.resolve(new Uint8Array()), hashUpdate: () => {}, chunkSize: 0 }))
+      .toThrow('chunkSize must be > 0');
+    expect(() => createChunkProducer({ readChunk: () => Promise.resolve(new Uint8Array()), hashUpdate: () => {}, chunkSize: -1 }))
+      .toThrow('chunkSize must be > 0');
+  });
 });
