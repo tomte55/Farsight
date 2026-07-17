@@ -4,7 +4,7 @@
 // payloads — only error text, truncated again on the main side.
 (() => {
   const report = (level, msg) => {
-    try { window.farsightIpc?.reportError({ level, msg: String(msg).slice(0, 2000) }); } catch {}
+    try { window.farsightSession?.reportError({ level, msg: String(msg).slice(0, 2000) }); } catch {}
   };
   window.addEventListener('error', (e) => report('error', e?.error?.stack || e?.message || 'window error'));
   window.addEventListener('unhandledrejection', (e) => report('error', `unhandledrejection: ${e?.reason?.stack || e?.reason || ''}`));

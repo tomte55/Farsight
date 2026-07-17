@@ -8,7 +8,7 @@
   fails loudly if you forget. Runtime CSSOM writes (el.style.display, etc.) are
   unaffected by style-src.
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'sha256-PLACEHOLDER'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'sha256-8E28aJIl5JvSgY0nwN0SOvf8+MZ+gh71j/kO33c5OeU='; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>Farsight — Remote session</title>
 <link rel="stylesheet" href="../shared/farsight.css" />
 <link rel="stylesheet" href="./session.css" />
@@ -22,7 +22,8 @@
     "@farsight/shared/version": "../shared/version.js",
     "@farsight/shared/connection-auth": "../shared/connection-auth.js",
     "@farsight/shared/connect-transcript": "../shared/connect-transcript.js",
-    "@farsight/shared/signaling-url": "../shared/signaling-url.js"
+    "@farsight/shared/signaling-url": "../shared/signaling-url.js",
+    "@farsight/shared/input-events": "../shared/input-events.js"
   }
 }
 </script>
