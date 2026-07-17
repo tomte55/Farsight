@@ -290,6 +290,13 @@ body.in-session .cog, body.in-session .menu { display: none; }
 .host-main { flex: 1 1 120px; min-width: 0; }
 .host-name { font-family: var(--mono); font-weight: 600; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .host-meta { font-size: 10px; color: var(--sub2); margin-top: 2px; text-transform: uppercase; letter-spacing: .07em; }
+/* An out-of-date host's version is the update affordance: a subtle teal link with
+   an up-arrow, in place of a separate Update button. Pending = muted, non-clickable. */
+.host-meta .host-ver.host-update { color: var(--go-dim); cursor: pointer; display: inline-flex; align-items: center; gap: 3px; }
+.host-meta .host-ver.host-update:hover { text-decoration: underline; }
+.host-meta .host-ver.host-update:focus-visible { outline: 1px solid var(--go-dim); outline-offset: 2px; border-radius: 3px; }
+.host-ver-ic { display: inline-block; }
+.host-ver--pending { color: var(--sub2); cursor: default; }
 .host-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
 .host-status { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--sub2); }
 .host-row.online .host-status { color: var(--go-dim); }

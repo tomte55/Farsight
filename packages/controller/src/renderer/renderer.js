@@ -812,6 +812,92 @@ function renderFleet(devices) {
   }
   for (const d of devices) fleetList.appendChild(hostRow(d));
 }
+// A small up-arrow, rendered inline next to a device's version when an update is
+// available — the subtle "there's a newer build" cue.
+function makeUpdateIcon() {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', 'host-ver-ic');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', '9');
+  svg.setAttribute('height', '9');
+  svg.setAttribute('aria-hidden', 'true');
+  const p = document.createElementNS(NS, 'path');
+  p.setAttribute('d', 'M12 20V6M6 12l6-6 6 6');
+  p.setAttribute('fill', 'none');
+  p.setAttribute('stroke', 'currentColor');
+  p.setAttribute('stroke-width', '2.5');
+  p.setAttribute('stroke-linecap', 'round');
+  p.setAttribute('stroke-linejoin', 'round');
+  svg.appendChild(p);
+  return svg;
+}
+
+// Set the remote-update directive for a device, driven by clicking its version
+// link. The host converges to the official feed on its next heartbeat (works
+// even if it's offline now — it converges on return). NOT gated on "no session
+// active" (CLAUDE.md): this is an explicit owner request. Mirrors the old
+// Update-button flow, including the bounded re-poll so the row reflects the host
+// coming back on the new version.
+async function triggerRemoteUpdate(d, verEl) {
+  // Optimistic pending look; the poll below rebuilds the row from server state.
+  verEl.onclick = null;
+  verEl.onkeydown = null;
+  verEl.removeAttribute('role');
+  verEl.removeAttribute('tabindex');
+  verEl.title = '';
+  verEl.className = 'host-ver host-ver--pending';
+  verEl.replaceChildren(document.createTextNode(`v${d.appVersion} · updating…`));
+  const res = await window.farsightIpc.accountRequestUpdate({ deviceId: d.id, targetVersion: appVersion });
+  if (!res || !res.ok) {
+    setMsg(fleetError, 'Couldn’t request the update. Check your connection.');
+    loadFleet(); // rebuild the row back to the clickable link
+    return;
+  }
+  let polls = 0;
+  const t = setInterval(() => {
+    // The fleet page may have been navigated away from (or a connect started,
+    // which also leaves it) while this poll was running — bail out instead of
+    // making IPC calls + DOM writes into a page nobody can see.
+    if (activePage !== 'fleet') { clearInterval(t); return; }
+    polls += 1; loadFleet(); if (polls >= 12) clearInterval(t);
+  }, 5000);
+}
+
+// The device's version line. When the host lags this controller's build, the
+// version itself becomes the update affordance — a subtle teal link with an
+// up-arrow — instead of a separate "Update" button (which pushed the row's
+// actions onto a second line).
+function buildHostMeta(meta, d) {
+  meta.replaceChildren();
+  const updateAvailable = d.appVersion && appVersion && isOlder(d.appVersion, appVersion);
+  const pending = updateAvailable && d.targetVersion && isOlder(d.appVersion, d.targetVersion);
+
+  let verNode;
+  if (!d.appVersion) {
+    verNode = document.createTextNode('version unknown');
+  } else if (pending) {
+    verNode = document.createElement('span');
+    verNode.className = 'host-ver host-ver--pending';
+    verNode.textContent = `v${d.appVersion} · updating…`;
+  } else if (updateAvailable) {
+    verNode = document.createElement('span');
+    verNode.className = 'host-ver host-update';
+    verNode.setAttribute('role', 'button');
+    verNode.tabIndex = 0;
+    verNode.title = `Update to v${appVersion}`;
+    verNode.append(`v${d.appVersion}`, makeUpdateIcon());
+    const run = () => triggerRemoteUpdate(d, verNode);
+    verNode.onclick = run;
+    verNode.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); run(); } };
+  } else {
+    verNode = document.createTextNode(`v${d.appVersion}`);
+  }
+  meta.appendChild(verNode);
+  const seen = lastSeenText(d);
+  if (seen) meta.appendChild(document.createTextNode(' · ' + seen));
+}
+
 function hostRow(d) {
   const row = document.createElement('div');
   row.className = 'host-row' + (d.online ? ' online' : '');
@@ -826,51 +912,14 @@ function hostRow(d) {
   name.textContent = d.name || 'Unnamed device';
   const meta = document.createElement('div');
   meta.className = 'host-meta';
-  meta.textContent = [d.appVersion ? `v${d.appVersion}` : 'version unknown', lastSeenText(d)].filter(Boolean).join(' · ');
+  buildHostMeta(meta, d);
   main.append(name, meta);
 
   const right = document.createElement('div');
   right.className = 'host-right';
-  // Remote update (S2.7): a host behind this controller's version gets an actionable
-  // Update button. Setting the directive makes the host converge to the official feed
-  // on its next heartbeat (works even if it's offline now — it converges on return).
-  if (d.appVersion && appVersion && isOlder(d.appVersion, appVersion)) {
-    // "Updating…" while a newer target than the host's current version is pending.
-    const pending = d.targetVersion && isOlder(d.appVersion, d.targetVersion);
-    const btn = document.createElement('button');
-    btn.className = 'btn btn-ghost host-update';
-    if (pending) {
-      btn.textContent = 'Updating…';
-      btn.disabled = true;
-    } else {
-      btn.textContent = 'Update';
-      btn.onclick = async () => {
-        btn.disabled = true;
-        btn.textContent = 'Updating…';
-        const res = await window.farsightIpc.accountRequestUpdate({ deviceId: d.id, targetVersion: appVersion });
-        if (!res || !res.ok) {
-          btn.disabled = false;
-          btn.textContent = 'Update';
-          setMsg(fleetError, 'Couldn’t request the update. Check your connection.');
-        } else {
-          // A download+install+relaunch takes ~10-60s. Re-poll for a bounded
-          // window so the row reflects the host coming back on the new
-          // version, instead of sitting on "Updating…" until a manual refresh.
-          let polls = 0;
-          const t = setInterval(() => {
-            // The fleet page may have been navigated away from (or a connect
-            // started, which also leaves it) while this poll was running — bail
-            // out instead of making IPC calls + DOM writes into a page nobody
-            // can see.
-            if (activePage !== 'fleet') { clearInterval(t); return; }
-            polls += 1; loadFleet(); if (polls >= 12) clearInterval(t);
-          }, 5000);
-        }
-      };
-    }
-    right.appendChild(btn);
-  }
-  // Online/offline needs no words — the coloured .host-dot already shows it.
+  // Remote update: the "update available" affordance now lives in the version
+  // line (buildHostMeta) — a subtle link instead of a button, so the row's
+  // actions stay on one line. Online/offline needs no words — the .host-dot shows it.
 
   // Connect-from-console (SP2 §4.4): a password-free Connect for an online device
   // that has enrolled a key and reported where it's reachable (signalingId). The
