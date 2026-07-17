@@ -39,8 +39,14 @@ describe('controller connect-from-console wiring', () => {
     expect(renderer).toMatch(/signalingId/);
     expect(renderer).toMatch(/linked:\s*true/);
     expect(renderer).toMatch(/openSession\(/);
-    // The shell itself no longer runs the handshake — that lives in the session window.
-    expect(renderer).not.toContain('runConnectionAuth');
+    // The shell itself never runs the CONTROLLING side of the handshake — that
+    // lives in the session window. Unification step 3 (Task 7) gave the shell a
+    // SEPARATE, legitimate runConnectionAuth call for the opposite role: this
+    // machine BEING controlled (host/renderer.js's runHostAuth, ported
+    // verbatim). Guard the role instead of banning the import outright.
+    expect(renderer).toMatch(/import\s*\{[^}]*\brunConnectionAuth\b[^}]*\}\s*from\s*['"]@farsight\/shared\/connection-auth['"]/);
+    expect(renderer).toMatch(/role:\s*'host'/);
+    expect(renderer).not.toMatch(/role:\s*'controller'/);
   });
 
   // Regression guard (v1.7.2 bug): runConnectionAuth was USED but not IMPORTED →

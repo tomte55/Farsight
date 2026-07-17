@@ -91,6 +91,7 @@
             <div class="chip"><span id="cred-id">…</span><button class="cbtn" data-copy="cred-id">Copy</button></div>
             <div class="lbl">Password</div>
             <div class="chip"><span id="cred-pw">…</span><button class="cbtn" data-copy="cred-pw">Copy</button><button id="cred-regen" class="cbtn" title="Regenerate password" aria-label="Regenerate password">↻</button></div>
+            <p id="host-status" class="statusline u-tight"></p>
           </div>
         </div>
       </section>
@@ -198,7 +199,27 @@
 
     </main>
   </div>
+  <!-- Task 7: the physical panic-hotkey (Ctrl+Alt+F12) instant-kill override is
+       normally invisible — this only appears if main couldn't register it
+       (another app owns the shortcut), so the user knows it's NOT active. -->
+  <div id="panic-warning" hidden>Panic hotkey (Ctrl+Alt+F12) is unavailable — another app may be using it. The instant-kill override is not active.</div>
   <div id="statusbar" class="statusbar"></div>
+</div>
+
+<!-- Task 7: inbound remote-control consent — shown when a controller (password
+     path) wants to connect to THIS machine. A linked (own-fleet) connect never
+     shows this; it auto-accepts and gates on the device-keypair handshake
+     instead (see renderer.js's "Inbound remote control" section). -->
+<div id="consent" class="overlay" hidden>
+  <div class="veil"></div>
+  <div class="card attn">
+    <div class="page-title">Allow remote control?</div>
+    <div class="statusline u-tight u-mb16">A controller is requesting access to this computer. They will be able to see your screen and control it.</div>
+    <div class="u-row">
+      <button id="allow" class="btn btn-primary u-flex1">Allow</button>
+      <button id="deny" class="btn btn-ghost u-flex1">Deny</button>
+    </div>
+  </div>
 </div>
 
 <script type="module" src="./error-reporter.js"></script>

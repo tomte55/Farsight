@@ -6,11 +6,20 @@ import { createRateEstimator, etaSeconds, bytesDone, formatBytes, formatRate, fo
 import { railItems, activeTransferCount, TERMINAL_TRANSFER_STATES, isShellPage, SHELL_PAGES } from '@farsight/shared/shell-nav';
 import { buildStatusSegments } from '@farsight/shared/status-bar';
 import { MSG } from '@farsight/shared/protocol';
+import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
+import { runConnectionAuth } from '@farsight/shared/connection-auth';
 import { createIdleRotator } from '@farsight/shared/idle-rotator';
 // Task 4's auto-registering host signaling client (REGISTER + reconnect +
 // acceptsLinked) — a DIFFERENT file from the sibling one-shot ./signaling-client.js
 // that the session window uses. Aliased to avoid any confusion between the two.
 import { createSignalingClient as createHostSignalingClient } from '../host-signaling-client.js';
+// Task 7: the inbound-control path (this machine BEING controlled). Ported
+// from host/src/{peer,session,timeouts,capture}.js, one level up from this
+// renderer directory — same layout as host-signaling-client.js above.
+import { createHostPeer } from '../host-peer.js';
+import { createSession } from '../session.js';
+import { createSessionTimers } from '../timeouts.js';
+import { monitorsForControl } from '../capture.js';
 import { createRendererLogger } from './rlog.js';
 
 const idInput = document.getElementById('host-id');
@@ -84,8 +93,53 @@ async function startHostRegistration() {
       },
       // R-1: ICE servers arrive from the server, ready for Task 7's answering peer.
       [MSG.ICE_SERVERS]: (m) => { hostIceServers = m.iceServers || []; },
-      // MSG.CONNECT / OFFER / CANDIDATE / PEER_DISCONNECTED / TRANSFER_REQUEST:
-      // consent, capture and the answering peer are Task 7 — out of scope here.
+      // Task 7: the controller sends CONNECT, then immediately its OFFER (and ICE
+      // candidates) — but nothing is captured or streamed until the user grants
+      // (or the linked path auto-grants) consent. See the "Inbound remote
+      // control" section below for session/consent/capture/peer/auth-gate.
+      [MSG.CONNECT]: (m) => {
+        // A new incoming connect attempt: stamp a fresh correlation id so every
+        // log line from this point (peer/session/auth/capture) can be grepped
+        // together for this one attempt.
+        connId = newConnId();
+        clog = hlog.child(`conn:${connId}`);
+        clog.info('connect start');
+        linkedConnect = !!(m && m.linked);
+        peerAuthed = false;
+        window.farsightIpc.requestAttention();
+        if (linkedConnect) {
+          // Own fleet (account-linked): the account login on THIS machine is the
+          // standing consent (§4.3) — no per-session prompt for your own devices.
+          // Auto-accept; the E2E keypair handshake still gates input, so a peer
+          // that isn't verifiably your device can never drive the machine.
+          hostStatusEl.textContent = m && typeof m.peerVersion === 'string' ? `Linked device (v${m.peerVersion}) connecting…` : 'A linked device is connecting…';
+          clog.info('consent auto-accepted (linked)');
+          session.requestConsent();
+          session.allow(); // synchronous idle→pending_consent→active: no visible prompt
+          startSession();
+        } else {
+          // Ad-hoc / password connect: still requires explicit per-session consent.
+          session.requestConsent();
+          clog.info('consent shown');
+          hostStatusEl.textContent = m && typeof m.peerVersion === 'string' ? `A controller (v${m.peerVersion}) wants to connect.` : 'A controller wants to connect.';
+        }
+      },
+      [MSG.OFFER]: async (m) => {
+        if (peer) { await peer.handleOffer(m.sdp); remoteReady = true; flushCandidates(); }
+        else { pendingOffer = m.sdp; }
+      },
+      [MSG.CANDIDATE]: (m) => {
+        if (peer && remoteReady) peer.handleCandidate(m.candidate);
+        else pendingCandidates.push(m.candidate);
+      },
+      [MSG.PEER_DISCONNECTED]: () => {
+        teardown();
+        session.end();
+        hostStatusEl.textContent = 'Peer disconnected.';
+      },
+      // MSG.TRANSFER_REQUEST (SP3 receive path) is not wired into the shell yet
+      // — no window.farsightIpc.transferIncoming bridge exists on this app's
+      // preload, unlike host's. Out of scope for this task.
     }, { password, version, acceptsLinked: true, log: hlog.child('signaling') });
     hostRotator = createIdleRotator({ intervalMs: HOST_PW_ROTATE_MS, onRotate: rotateHostPassword });
     hostRotator.start();
@@ -128,6 +182,277 @@ if (controlToggleEl) {
 document.getElementById('cred-regen')?.addEventListener('click', async () => {
   await rotateHostPassword();
   if (hostRotator) hostRotator.kick();
+});
+
+// ─── Inbound remote control (Task 7) ────────────────────────────────────────
+// Unification step 3: when a controller connects to THIS machine (registered
+// above), port the host's consent/capture/answering-peer/auth-gate machinery
+// in here — VERBATIM from host/src/renderer/renderer.js, adapted only at the
+// seams: `signal` -> `hostSignal` and `iceServers` -> `hostIceServers` (Task
+// 6's registration client/state, reused rather than duplicated), `rotator` ->
+// `hostRotator` (ditto), and `statusEl` -> `hostStatusEl` (this file's #status
+// is the unrelated connect-to-a-host status line on the home page). There is
+// no video/session window on this side — hosting is a consent-modal +
+// status-line experience; the MSG.CONNECT/OFFER/CANDIDATE/PEER_DISCONNECTED
+// handlers live on hostSignal's own handler map (see startHostRegistration
+// above), so this whole path is only reachable while hostSignal exists — i.e.
+// only while "Allow this computer to be controlled" is on (Task 6).
+const hostStatusEl = document.getElementById('host-status');
+const consentEl = document.getElementById('consent');
+
+// A fresh base64 nonce for the connect-from-console handshake (Web Crypto in the
+// renderer). 16 bytes → ample against replay within a single handshake.
+function authNonce() {
+  const b = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(b);
+  let s = ''; for (const x of b) s += String.fromCharCode(x);
+  return btoa(s);
+}
+
+// newConnId()/clog mirror host/renderer.js: a fresh, greppable log scope per
+// connect attempt, reassigned at the start of each MSG.CONNECT (see above).
+const newConnId = (() => { let n = 0; return () => (++n).toString(36) + Math.random().toString(36).slice(2, 6); })();
+let connId = newConnId();
+let clog = hlog.child(`conn:${connId}`);
+
+let peer = null;
+let displays = [];
+let currentStream = null;
+let timers = null;
+
+async function getStreamForDisplay(display) {
+  // desktopCapturer runs in main; renderer asks for the source id for the given
+  // monitor, then uses getUserMedia to capture it.
+  const sourceId = await window.farsightIpc.getScreenSourceFor(display.id);
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { mandatory: {
+      chromeMediaSource: 'desktop', chromeMediaSourceId: sourceId, maxFrameRate: 30,
+    } },
+  });
+  // Breadcrumb only — resolution/monitor index, NEVER pixel/frame data.
+  const track = stream.getVideoTracks()[0];
+  const s = track && track.getSettings ? track.getSettings() : {};
+  clog.child('capture').info(`capture stream monitor=${display.index} ${s.width || '?'}x${s.height || '?'}`);
+  return stream;
+}
+
+// The controller sends CONNECT then immediately its OFFER (and ICE candidates),
+// but the host does not build its peer until the user grants consent — which
+// can take several seconds. Buffer the early offer/candidates and apply them
+// once the peer exists and the remote description is set; otherwise they would
+// be silently dropped and the session would hang with no video.
+let remoteReady = false;
+let pendingOffer = null;
+const pendingCandidates = [];
+
+// Connect-from-console (SP2 §4.4): when the server flags a CONNECT as `linked`
+// (password-free, from one of the owner's own account devices), the controller is
+// authenticated end-to-end over the 'auth' data channel with device keypairs.
+// Until that handshake passes, input injection is BLOCKED (peerAuthed gates it),
+// so a linked peer can never drive the machine without proving it's the owner's
+// device. The classic id+password path leaves linkedConnect false and is untouched.
+let linkedConnect = false;
+let peerAuthed = false;
+
+async function runHostAuth(channel) {
+  // Attach a synchronous buffer the instant the channel arrives, so the
+  // controller's first message (hello) can't be dropped during the async identity
+  // fetch below — the data channel won't replay a message sent before onmessage
+  // was set. Buffered messages are replayed into the pump once it's wired.
+  const early = [];
+  channel.onmessage = (e) => early.push(e);
+  let deviceId = null, publicKey = null;
+  try {
+    [deviceId, publicKey] = await Promise.all([
+      window.farsightIpc.connAuthDeviceId(),
+      window.farsightIpc.connAuthPublicKey(),
+    ]);
+  } catch { /* leave null → handshake fails closed */ }
+  const fp = peer.getFingerprints();
+  console.debug('[connect-auth host] fp', fp, 'deviceId', deviceId, 'hasKey', !!publicKey);
+  try {
+    const p = runConnectionAuth({
+      role: 'host', channel, deviceId, publicKey,
+      localFingerprint: fp.local, remoteFingerprint: fp.remote,
+      sign: (m) => window.farsightIpc.connAuthSign(m),
+      verify: (pk, m, s) => window.farsightIpc.connAuthVerify(pk, m, s),
+      isAccountKey: (pk) => window.farsightIpc.connAuthIsAccountKey(pk),
+      nonce: authNonce, timeoutMs: 20000,
+      log: clog.child('auth'),
+    });
+    for (const e of early) channel.onmessage(e); // replay into the pump's handler
+    await p;
+    peerAuthed = true; // control unlocked
+    hostStatusEl.textContent = 'Linked device verified — session active.';
+  } catch (e) {
+    // Failed device verification (unknown key / bad signature / fingerprint
+    // mismatch / timeout) → block and end. Nothing was ever injectable. Surface
+    // the reason so failures are diagnosable.
+    const reason = (e && e.message) ? e.message : 'error';
+    console.error('[connect-auth host] failed:', reason);
+    endSessionByHost('auth_failed', `Connection blocked — device verification failed (${reason}).`);
+  }
+}
+
+// Clipboard sync: while the session is active, poll the local OS clipboard and
+// forward changes to the peer over the control channel; write received peer
+// clipboard text locally. lastClip tracks the last text seen/synced in either
+// direction so a write we just performed doesn't get re-sent on the next poll
+// (echo-loop prevention).
+let clipTimer = null;
+let lastClip = null;
+function startClipboardSync() {
+  if (clipTimer) return;
+  lastClip = null;
+  clipTimer = setInterval(async () => {
+    try {
+      const text = await window.farsightIpc.readClipboard();
+      if (typeof text === 'string' && text !== '' && text !== lastClip) {
+        lastClip = text;
+        if (peer) peer.sendControl({ type: CONTROL.CLIPBOARD, text: text.slice(0, 100000) });
+      }
+    } catch { /* ignore */ }
+  }, 800);
+}
+function stopClipboardSync() {
+  if (clipTimer) { clearInterval(clipTimer); clipTimer = null; }
+}
+
+function flushCandidates() {
+  while (pendingCandidates.length) peer.handleCandidate(pendingCandidates.shift());
+}
+
+// Full teardown: stop screen capture (releases the OS capture indicator), close
+// the peer, and clear buffered signaling. Used by the auth-failure path, peer-
+// disconnect, controller-initiated SESSION_END, and session timeouts.
+function teardown() {
+  clog.info('session teardown');
+  if (currentStream) { currentStream.getTracks().forEach((t) => t.stop()); currentStream = null; }
+  if (peer) { peer.close(); peer = null; }
+  if (timers) { timers.stop(); timers = null; }
+  stopClipboardSync();
+  remoteReady = false;
+  pendingOffer = null;
+  pendingCandidates.length = 0;
+  linkedConnect = false;
+  peerAuthed = false;
+}
+
+// End an active session that the HOST initiated (auth failure, timeout, panic).
+// Notify the controller over the reliable control channel first so it shows a
+// clear "session ended" message instead of trying to reconnect, then tear down.
+// A short flush delay lets the ordered channel deliver the message before the
+// peer closes; panic tears down immediately (physical override wins).
+function endSessionByHost(reason, statusText, { immediate = false } = {}) {
+  if (peer) { try { peer.sendControl({ type: CONTROL.HOST_ENDED, reason }); } catch { /* channel gone */ } }
+  session.end();
+  hostStatusEl.textContent = statusText;
+  if (immediate || !peer) teardown();
+  else setTimeout(teardown, 150);
+}
+
+// Consent gate: nothing is captured or streamed until the user clicks Allow (or
+// the linked path auto-allows below). Unlike host's own window, the shell has no
+// #idle/#banner views or in-session body class to toggle — hosting has no video
+// on this side, so the only visible state is the consent modal + the status line.
+const session = createSession({
+  log: clog.child('session'),
+  onStateChange: (st) => {
+    window.farsightIpc.setSessionActive(st === 'active');
+    consentEl.hidden = st !== 'pending_consent';
+    if (st === 'active') startClipboardSync();
+    if (hostRotator) {
+      if (st === 'pending_consent' || st === 'active') hostRotator.pause();
+      else if (st === 'idle') hostRotator.resumeAfterSession();
+    }
+  },
+});
+
+async function onControl(raw) {
+  let evt;
+  try { evt = validateControlEvent(raw); } catch { return; }
+  if (evt.type === CONTROL.CLIPBOARD) {
+    lastClip = evt.text;
+    window.farsightIpc.writeClipboard(evt.text);
+    return;
+  }
+  if (evt.type === CONTROL.LIST_MONITORS) {
+    peer && peer.sendControl({ type: CONTROL.MONITORS, monitors: monitorsForControl(displays, clog.child('capture')) });
+  } else if (evt.type === CONTROL.SELECT_MONITOR) {
+    const d = displays[evt.index];
+    if (!d || !peer) return;
+    const newStream = await getStreamForDisplay(d);
+    await peer.replaceVideoTrack(newStream.getVideoTracks()[0]);
+    if (currentStream) currentStream.getTracks().forEach((t) => t.stop());
+    currentStream = newStream;
+    await window.farsightIpc.selectInjectorDisplay(d.index);
+  } else if (evt.type === CONTROL.SESSION_END) {
+    session.end();
+    teardown();
+    hostStatusEl.textContent = 'Session ended by controller.';
+  }
+}
+
+async function startSession() {
+  displays = await window.farsightIpc.listDisplays();
+  const primary = displays.find((d) => d.primary) ?? displays[0];
+  currentStream = await getStreamForDisplay(primary);
+  await window.farsightIpc.selectInjectorDisplay(primary.index);
+  peer = createHostPeer({
+    stream: currentStream,
+    iceServers: hostIceServers,
+    sendSignal: (type, payload) => hostSignal.send(type, payload),
+    // Input injection runs in the main process. Only forward while the session
+    // is active — a second layer over the consent gate. Each event counts as
+    // activity so an actively-used session doesn't hit the idle timeout.
+    // Input is gated on the session being active AND — for a linked connect —
+    // the device-keypair handshake having passed. A linked peer cannot inject
+    // until peerAuthed flips true.
+    onInput: (evt) => { if (session.isActive() && (!linkedConnect || peerAuthed)) { window.farsightIpc.injectInput(evt); if (timers) timers.activity(); } },
+    onControl: (evt) => onControl(evt),
+    // Only authenticate on the linked path; on the password path the auth channel
+    // is unused (the controller never starts a handshake) and is ignored.
+    onAuthChannel: (channel) => { if (linkedConnect) runHostAuth(channel); },
+    log: clog.child('peer'),
+  });
+  // Auto-end the session on inactivity (idle) or after a hard cap (absolute).
+  timers = createSessionTimers({
+    idleMs: 10 * 60 * 1000,
+    absoluteMs: 8 * 60 * 60 * 1000,
+    onExpire: (reason) => { endSessionByHost(`${reason}_timeout`, `Session ended (${reason} timeout).`); },
+  });
+  timers.start();
+  if (pendingOffer) {
+    await peer.handleOffer(pendingOffer);
+    pendingOffer = null;
+    remoteReady = true;
+    flushCandidates();
+  }
+}
+
+document.getElementById('allow').addEventListener('click', async () => {
+  session.allow();
+  hostStatusEl.textContent = 'Session active.';
+  await startSession();
+});
+document.getElementById('deny').addEventListener('click', () => {
+  session.deny();
+  teardown();
+  hostStatusEl.textContent = 'Request denied. Waiting for a controller.';
+});
+
+// Panic hotkey (Ctrl/Cmd+Alt+F12) fires from the main process — instantly kill
+// any session. The physical override always wins.
+window.farsightIpc.onPanic(() => {
+  endSessionByHost('panic', 'Session ended by panic key.', { immediate: true });
+});
+
+// If the main process couldn't register the panic hotkey (another app owns
+// Ctrl+Alt+F12), show a visible warning that the instant-kill override is
+// inactive.
+window.farsightIpc.onPanicUnavailable(() => {
+  document.getElementById('panic-warning').hidden = false;
 });
 
 // Copy buttons on the ID/password chips (clipboard is allowed in the renderer).

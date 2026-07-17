@@ -21,3 +21,14 @@
 .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; cursor: pointer; }
 .toggle-row .lbl { margin-bottom: 0; }
 #host-credentials[hidden] { display: none; }
+
+/* Task 7 (inbound remote control): the panic-hotkey-unavailable warning is a
+   flex child of #shell, sitting above the persistent status bar rather than a
+   position:fixed bar of its own — the status bar already owns bottom:0. */
+#panic-warning { flex: 0 0 auto; padding: 8px 16px; background: var(--danger-bg); border-top: 1px solid var(--danger-line); color: var(--danger-ink); font-size: 12.5px; text-align: center; }
+#panic-warning[hidden] { display: none; }
+
+/* The consent modal reuses .overlay/.veil/.card from farsight.css; only its
+   width is specific to this window (unconstrained, a .card would stretch to
+   fill the centering grid cell). */
+#consent .card { width: 360px; max-width: 92vw; }

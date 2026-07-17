@@ -1,7 +1,12 @@
-// Unification step 2 moved the remote-control session (and therefore the
-// connection-correlated logger it drives) out of the shell's renderer.js and
-// into the session window's own renderer — see session-window/session.js.
-// This guard now targets that file; the shell owns no connection logging.
+// Unification step 2 moved the CONTROLLING-role remote-control session (and its
+// connection-correlated logger) out of the shell's renderer.js and into the
+// session window's own renderer — see session-window/session.js. Step 3 / Task 7
+// then gave the shell a SEPARATE, legitimate per-connection correlated logger of
+// its own for the opposite role — this machine BEING controlled (inbound
+// consent/capture/peer/auth, ported from host/renderer.js) — so the shell now
+// has its own `conn:${connId}` scope again, distinct from (and independent of)
+// the session window's. What must still never come back into the shell is the
+// CONTROLLING-side peer/signaling machinery itself.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -18,7 +23,7 @@ test('the session window builds a root logger and passes children into connectio
 test('the session window stamps a connection correlation id', () => {
   expect(r).toMatch(/conn:/);
 });
-test('the shell no longer builds the controller-session peer/signaling connection', () => {
+test('the shell never builds the CONTROLLING-role peer/signaling connection', () => {
   expect(shell).not.toContain('createControllerPeer');
   // The banned import is the ONE-SHOT session signaling client
   // (src/signaling-client.js, driven by session-window/session.js) — that
@@ -29,11 +34,12 @@ test('the shell no longer builds the controller-session peer/signaling connectio
   // banned import path instead.
   expect(shell).not.toMatch(/from\s*['"]\.\.?\/signaling-client\.js['"]/);
 });
-test('the shell no longer stamps a PER-CONNECTION correlated logger — that moved with the session', () => {
-  // Task 6 legitimately uses createRendererLogger for host-REGISTRATION
-  // logging (a single, long-lived scope) — a different concern from the
-  // session's per-connection correlation id (session.js's
-  // `clog = rlog.child(\`conn:${connId}\`)`, re-stamped on every CONNECT).
-  // That specific pattern is what must stay out of the shell.
-  expect(shell).not.toMatch(/conn:\$\{/);
+test('the shell stamps its OWN per-connection correlated logger for the HOSTING role (Task 7)', () => {
+  // Task 6 uses createRendererLogger for host-REGISTRATION logging (a single,
+  // long-lived scope); Task 7 adds a genuinely separate per-connection
+  // correlation id on top of it — `clog = hlog.child(\`conn:${connId}\`)`,
+  // re-stamped on every inbound MSG.CONNECT — mirroring host/renderer.js's own
+  // pattern (and the session window's, for the other role) exactly.
+  expect(shell).toMatch(/conn:\$\{connId\}/);
+  expect(shell).toMatch(/connId = newConnId\(\)/);
 });
