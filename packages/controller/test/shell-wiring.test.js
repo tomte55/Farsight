@@ -111,9 +111,16 @@ describe('the session moved out of the shell (unification step 2)', () => {
     expect(html).not.toContain('id="overlay"');
   });
 
-  test('the shell no longer imports or builds the peer/signaling connection', () => {
+  test('the shell no longer imports or builds the controller-session peer/signaling connection', () => {
     expect(js).not.toContain('createControllerPeer');
-    expect(js).not.toContain('createSignalingClient');
+    // The banned import is the ONE-SHOT session signaling client
+    // (src/signaling-client.js, used by session-window/session.js to drive an
+    // outbound connect) — that stays out of the shell. Task 6 legitimately
+    // imports a DIFFERENT file, the auto-registering host-signaling-client.js,
+    // to register THIS machine as a controllable host; a plain
+    // not.toContain('createSignalingClient') would false-positive on that
+    // aliased import, so this checks the specific banned import path instead.
+    expect(js).not.toMatch(/from\s*['"]\.\.?\/signaling-client\.js['"]/);
   });
 
   test('the shell launches and focuses the session window instead', () => {

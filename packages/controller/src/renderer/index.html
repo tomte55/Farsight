@@ -14,7 +14,7 @@
       so removing them was the only route.
   Runtime CSSOM writes (el.style.width = …) are unaffected by style-src.
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'sha256-lcKn2H6UHfPw9LBfxOgU/tO8F7RFkOi5iJEP7PkQesw='; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'sha256-CapFqqZ/T/SHEipsrxhUbcJK5A9B2kw3lN+la8PRB1U='; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>Farsight Controller</title>
 <link rel="stylesheet" href="../shared/farsight.css" />
 <link rel="stylesheet" href="./shell.css" />
@@ -37,7 +37,8 @@
     "@farsight/shared/connection-auth": "../shared/connection-auth.js",
     "@farsight/shared/transfer-rate": "../shared/transfer-rate.js",
     "@farsight/shared/shell-nav": "../shared/shell-nav.js",
-    "@farsight/shared/status-bar": "../shared/status-bar.js"
+    "@farsight/shared/status-bar": "../shared/status-bar.js",
+    "@farsight/shared/idle-rotator": "../shared/idle-rotator.js"
   }
 }
 </script>
@@ -73,6 +74,25 @@
         <input id="host-pw" class="input" placeholder="Password" />
         <button id="go" class="btn btn-primary u-full">Connect</button>
         <p id="status" class="statusline"></p>
+
+        <div id="host-card" class="card">
+          <div class="page-head">
+            <div>
+              <div class="page-title">This computer</div>
+              <div class="page-sub">Let others connect to and control this machine.</div>
+            </div>
+          </div>
+          <label id="control-allowed-row" class="toggle-row" for="control-allowed-toggle">
+            <span class="lbl u-tight">Allow this computer to be controlled</span>
+            <input type="checkbox" id="control-allowed-toggle" />
+          </label>
+          <div id="host-credentials" hidden>
+            <div class="lbl">Your ID</div>
+            <div class="chip"><span id="cred-id">…</span><button class="cbtn" data-copy="cred-id">Copy</button></div>
+            <div class="lbl">Password</div>
+            <div class="chip"><span id="cred-pw">…</span><button class="cbtn" data-copy="cred-pw">Copy</button><button id="cred-regen" class="cbtn" title="Regenerate password" aria-label="Regenerate password">↻</button></div>
+          </div>
+        </div>
       </section>
 
       <section id="page-fleet" class="page" hidden>

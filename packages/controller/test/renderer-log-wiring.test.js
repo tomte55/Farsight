@@ -18,8 +18,22 @@ test('the session window builds a root logger and passes children into connectio
 test('the session window stamps a connection correlation id', () => {
   expect(r).toMatch(/conn:/);
 });
-test('the shell no longer builds a connection-correlated logger — that moved with the session', () => {
-  expect(shell).not.toContain('createRendererLogger');
+test('the shell no longer builds the controller-session peer/signaling connection', () => {
   expect(shell).not.toContain('createControllerPeer');
-  expect(shell).not.toContain('createSignalingClient');
+  // The banned import is the ONE-SHOT session signaling client
+  // (src/signaling-client.js, driven by session-window/session.js) — that
+  // stays out of the shell. Task 6 legitimately imports a DIFFERENT file,
+  // the auto-registering host-signaling-client.js, to register this machine
+  // as a controllable host — a plain not.toContain('createSignalingClient')
+  // would false-positive on that aliased import, so this checks the specific
+  // banned import path instead.
+  expect(shell).not.toMatch(/from\s*['"]\.\.?\/signaling-client\.js['"]/);
+});
+test('the shell no longer stamps a PER-CONNECTION correlated logger — that moved with the session', () => {
+  // Task 6 legitimately uses createRendererLogger for host-REGISTRATION
+  // logging (a single, long-lived scope) — a different concern from the
+  // session's per-connection correlation id (session.js's
+  // `clog = rlog.child(\`conn:${connId}\`)`, re-stamped on every CONNECT).
+  // That specific pattern is what must stay out of the shell.
+  expect(shell).not.toMatch(/conn:\$\{/);
 });

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const main = readFileSync(resolve(__dirname, '../src/main.js'), 'utf8');
 const preload = readFileSync(resolve(__dirname, '../src/preload.cjs'), 'utf8');
+const renderer = readFileSync(resolve(__dirname, '../src/renderer/renderer.js'), 'utf8');
 
 describe('control-allowed setting', () => {
   test('main persists and exposes the setting, defaulting to allowed', () => {
@@ -18,9 +19,12 @@ describe('control-allowed setting', () => {
     expect(preload).toContain('getControlAllowed');
     expect(preload).toContain('setControlAllowed');
   });
-  // NOTE: the renderer enforcement assertion (checking that
-  // packages/controller/src/renderer/renderer.js references `controlAllowed`)
-  // is deliberately NOT included here — enforcement wiring lands in Task 6/7.
-  // This task's scope is the persisted setting + main/preload plumbing only,
-  // so it must be independently green without the renderer change.
+  // Task 6: the shell renderer now reads the setting and gates host
+  // REGISTRATION on it — when control is OFF, no registering client is ever
+  // created (fail closed), so this machine is simply absent from the
+  // signaling server and unreachable for control.
+  test('the renderer enforces the setting on host registration', () => {
+    expect(renderer).toMatch(/controlAllowed/);
+    expect(renderer).toContain('getControlAllowed');
+  });
 });

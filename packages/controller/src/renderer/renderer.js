@@ -1,10 +1,17 @@
 // packages/controller/src/renderer/renderer.js
 import { isValidHostId } from '@farsight/shared/host-id';
-import { normalizeHostId, passwordCandidates } from '@farsight/shared/credentials-format';
+import { normalizeHostId, passwordCandidates, formatHostId } from '@farsight/shared/credentials-format';
 import { isOlder } from '@farsight/shared/version';
 import { createRateEstimator, etaSeconds, bytesDone, formatBytes, formatRate, formatDuration } from '@farsight/shared/transfer-rate';
 import { railItems, activeTransferCount, TERMINAL_TRANSFER_STATES, isShellPage, SHELL_PAGES } from '@farsight/shared/shell-nav';
 import { buildStatusSegments } from '@farsight/shared/status-bar';
+import { MSG } from '@farsight/shared/protocol';
+import { createIdleRotator } from '@farsight/shared/idle-rotator';
+// Task 4's auto-registering host signaling client (REGISTER + reconnect +
+// acceptsLinked) — a DIFFERENT file from the sibling one-shot ./signaling-client.js
+// that the session window uses. Aliased to avoid any confusion between the two.
+import { createSignalingClient as createHostSignalingClient } from '../host-signaling-client.js';
+import { createRendererLogger } from './rlog.js';
 
 const idInput = document.getElementById('host-id');
 const statusEl = document.getElementById('status');
@@ -15,6 +22,122 @@ let signalingUrl = null;
 const lastCreds = { targetId: '', password: '' };
 
 const menuStatus = document.getElementById('menu-status');
+
+// ─── Host registration (this machine as a controllable host) ────────────────
+// Unification step 3: the shell now also registers this machine as a host on
+// the signaling server, mirroring host/src/renderer/renderer.js's
+// startSignaling() (~:338-393) — registration + credential display only. The
+// consent/capture/answering-peer machinery (host/renderer.js's MSG.CONNECT/
+// OFFER/CANDIDATE handlers) is Task 7, not this task.
+//
+// Gated by the "Allow this computer to be controlled" setting (Task 5):
+// registration happens ONLY when control is allowed AND a signaling URL is
+// configured. When control is OFF, no registering client is ever created —
+// fail closed, this machine is simply absent from the signaling server and
+// unreachable for control (it stays reachable for file transfers, a separate
+// client). Toggling live: OFF tears the registering client down; ON registers.
+const hlog = createRendererLogger('host-reg');
+const credIdEl = document.getElementById('cred-id');
+const credPwEl = document.getElementById('cred-pw');
+const hostCredentialsEl = document.getElementById('host-credentials');
+const controlToggleEl = document.getElementById('control-allowed-toggle');
+
+const HOST_PW_ROTATE_MS = 60 * 60 * 1000; // rotate the session password hourly while idle
+let hostSignal = null;
+let hostRotator = null;
+let hostIceServers = []; // stored for Task 7's answering peer; unused by this task
+let controlAllowed = true;
+
+function setCredEl(el, value) {
+  if (!el) return;
+  el.textContent = value;
+  el.dataset.copyValue = value;
+}
+
+// Regenerate in main (trusted, node:crypto), display it, and re-sync it to the
+// signaling server if currently registered. Used by the manual ↻ button and the
+// hourly idle rotator.
+async function rotateHostPassword() {
+  const next = await window.farsightIpc.regenerateSessionPassword();
+  setCredEl(credPwEl, next);
+  if (hostSignal) hostSignal.send(MSG.UPDATE_PASSWORD, { password: next });
+}
+
+async function startHostRegistration() {
+  if (hostSignal || !signalingUrl) return; // already registered, or nothing to register with
+  try {
+    const [password, version] = await Promise.all([
+      window.farsightIpc.getSessionPassword(),
+      window.farsightIpc.getAppVersion(),
+    ]);
+    setCredEl(credPwEl, password);
+    hostSignal = createHostSignalingClient(signalingUrl, {
+      [MSG.REGISTERED]: (m) => {
+        // Display formatted, but copy the raw id (mirrors host/renderer.js:340).
+        setCredEl(credIdEl, formatHostId(m.id));
+        if (credIdEl) credIdEl.dataset.copyValue = m.id;
+        window.farsightIpc.setHostId(m.id);
+        // Re-sync the currently-displayed password (it may have rotated
+        // between REGISTER and REGISTERED, or across a reconnect).
+        hostSignal.send(MSG.UPDATE_PASSWORD, { password: credPwEl ? credPwEl.textContent : password });
+        hlog.info('registered id=' + m.id);
+      },
+      // R-1: ICE servers arrive from the server, ready for Task 7's answering peer.
+      [MSG.ICE_SERVERS]: (m) => { hostIceServers = m.iceServers || []; },
+      // MSG.CONNECT / OFFER / CANDIDATE / PEER_DISCONNECTED / TRANSFER_REQUEST:
+      // consent, capture and the answering peer are Task 7 — out of scope here.
+    }, { password, version, acceptsLinked: true, log: hlog.child('signaling') });
+    hostRotator = createIdleRotator({ intervalMs: HOST_PW_ROTATE_MS, onRotate: rotateHostPassword });
+    hostRotator.start();
+  } catch (err) {
+    hlog.warn(`host registration failed to start: ${err && err.message}`);
+  }
+}
+
+function stopHostRegistration() {
+  if (hostSignal) { hostSignal.close(); hostSignal = null; }
+  if (hostRotator) { hostRotator.stop(); hostRotator = null; }
+  hostIceServers = [];
+  setCredEl(credIdEl, '…');
+  setCredEl(credPwEl, '…');
+}
+
+function renderControlUi() {
+  if (controlToggleEl) controlToggleEl.checked = controlAllowed;
+  if (hostCredentialsEl) hostCredentialsEl.hidden = !controlAllowed;
+}
+
+// Re-read the persisted setting and converge registration state to it. Called
+// on launch (once signalingUrl is known) and whenever signaling reconfigures.
+async function refreshHostRegistration() {
+  controlAllowed = await window.farsightIpc.getControlAllowed();
+  renderControlUi();
+  if (controlAllowed) startHostRegistration();
+  else stopHostRegistration();
+}
+
+if (controlToggleEl) {
+  controlToggleEl.addEventListener('change', async () => {
+    controlAllowed = controlToggleEl.checked;
+    await window.farsightIpc.setControlAllowed(controlAllowed);
+    renderControlUi();
+    if (controlAllowed) startHostRegistration();
+    else stopHostRegistration();
+  });
+}
+document.getElementById('cred-regen')?.addEventListener('click', async () => {
+  await rotateHostPassword();
+  if (hostRotator) hostRotator.kick();
+});
+
+// Copy buttons on the ID/password chips (clipboard is allowed in the renderer).
+for (const btn of document.querySelectorAll('.cbtn[data-copy]')) {
+  btn.addEventListener('click', async () => {
+    const el = document.getElementById(btn.dataset.copy);
+    const text = el.dataset.copyValue || el.textContent;
+    try { await navigator.clipboard.writeText(text); const old = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = old; }, 1200); } catch { /* ignore */ }
+  });
+}
 
 // ─── Status bar ──────────────────────────────────────────────────────────────
 // The always-on overview. Replaces #update-banner and #version-tag, which both
@@ -141,7 +264,8 @@ async function refreshSignalingUrl() {
   shellEl.hidden = !configured;
   statusState.signaling = configured ? 'ready' : 'connecting';
   renderStatusBar();
-  if (configured) showPage(activePage);
+  if (configured) { showPage(activePage); refreshHostRegistration(); }
+  else stopHostRegistration();
 }
 async function saveSignaling() {
   const res = await window.farsightIpc.setSignalingUrl(urlInput.value);

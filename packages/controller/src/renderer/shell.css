@@ -14,3 +14,10 @@
 #fleet-refresh, #acct-signout, #contacts-refresh, #transfers-refresh { padding: 6px 12px; }
 .settings-actions { margin-top: 10px; }
 #settings-signaling { word-break: break-all; }
+
+/* Home page: this-computer credentials card + the "Allow this computer to be
+   controlled" toggle (unification step 3, task 6). */
+#host-card { margin-top: 20px; }
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; cursor: pointer; }
+.toggle-row .lbl { margin-bottom: 0; }
+#host-credentials[hidden] { display: none; }
