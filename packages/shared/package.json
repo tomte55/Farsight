@@ -32,6 +32,7 @@
     "./transfer-channel": "./src/transfer-channel.js",
     "./transfer-chunk": "./src/transfer-chunk.js",
     "./transfer-ranges": "./src/transfer-ranges.js",
+    "./transfer-producer": "./src/transfer-producer.js",
     "./transfer-io": "./src/transfer-io.js",
     "./jobs-store": "./src/jobs-store.js",
     "./transfer-orchestrator": "./src/transfer-orchestrator.js",
