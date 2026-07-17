@@ -48,6 +48,9 @@ export function createSender({
   // backstops a lost ack / dead connection so the send can't hang forever.
   // Generous: the ack normally arrives seconds after the last byte.
   completionTimeoutMs = 120000, setTimer = setTimeout, clearTimer = clearTimeout,
+  // Per-chunk progress would be far too chatty over IPC (a 100 GB send is ~800k
+  // chunks); throttle to a human-legible cadence. Clock injected for tests.
+  progressIntervalMs = 250, now = () => Date.now(),
 }) {
   let job = null;
   let canceled = false;
@@ -60,6 +63,15 @@ export function createSender({
   const fail = (e) => { if (!settled) { settled = true; clearCompletion(); reject(e); } };
   const run = serializer(fail);
 
+  let lastProgressAt = 0;
+  function emitProgress() {
+    if (!job) return;
+    const t = now();
+    if (t - lastProgressAt < progressIntervalMs) return;
+    lastProgressAt = t;
+    onEvent({ type: 'progress', progress: job.progress() });
+  }
+
   async function pump() {
     for (;;) {
       if (canceled) return;
@@ -68,7 +80,12 @@ export function createSender({
       channel.sendCtrl(fileBeginFrame({ jobId, fileId: nf.fileId, offset: nf.offset }));
       const { hash } = await sendFile({
         sourcePath: sources.get(nf.fileId), offset: nf.offset, chunkSize,
-        onChunk: async (buf) => { if (canceled) throw new Error('canceled'); await channel.sendBulk(buf); },
+        onChunk: async (buf) => {
+          if (canceled) throw new Error('canceled');
+          await channel.sendBulk(buf);
+          job.onBytes(nf.fileId, buf.length);
+          emitProgress();
+        },
       });
       channel.sendCtrl(fileEndFrame({ jobId, fileId: nf.fileId, hash }));
       job.onFileSent(nf.fileId);
@@ -153,6 +170,10 @@ export function createReceiver({
   // clears it (and a Refresh reflects it). Armed only AFTER accept, so a human
   // deliberating over the consent prompt never trips it. Timer injectable for tests.
   inactivityMs = 60000, setTimer = setTimeout, clearTimer = clearTimeout,
+  // Bytes land per chunk but the UI only needs a legible cadence; without ANY
+  // per-chunk emission a single huge file shows no movement for hours (progress
+  // otherwise rides only on file-done).
+  progressIntervalMs = 250, now = () => Date.now(),
 }) {
   let job = null, manifest = null, jobId = null, ok = true;
   let jobDoneSeen = false;
@@ -194,6 +215,15 @@ export function createReceiver({
   const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopWatchdog(); resolve(v); } };
   const fail = (e) => { if (!settled) { settled = true; watching = false; stopWatchdog(); reject(e); } };
   const run = serializer(fail);
+
+  let lastProgressAt = 0;
+  function emitProgress() {
+    if (!job) return;
+    const t = now();
+    if (t - lastProgressAt < progressIntervalMs) return;
+    lastProgressAt = t;
+    onEvent({ type: 'progress', progress: job.progress() });
+  }
 
   // Resolves the receiver's promise only once JOB_DONE has actually been seen
   // AND every file has finalized (pending empty) — job_done and the last file's
@@ -265,6 +295,7 @@ export function createReceiver({
         await tryFinalize(item); // finalizes only if FILE_END's hash already landed
       }
     }
+    emitProgress(); // throttled: the bar/speed/ETA need movement between file boundaries
     // Trailing bytes past the last file (cursor === seq.length) shouldn't happen
     // for a well-formed stream — discarded silently, not an error.
   }));

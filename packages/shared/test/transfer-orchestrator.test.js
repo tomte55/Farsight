@@ -506,3 +506,80 @@ test('loopback: an interrupted single file resumes and still verifies (restart c
     expect(readFileSync(join(dest, 'big.bin'))).toEqual(data);
   }
 });
+
+test('receiver emits throttled progress events as bulk bytes arrive — not just at file boundaries', async () => {
+  const dest = tmp();
+  const payload = Buffer.alloc(4000, 7);
+  const hash = createHash('sha256').update(payload).digest('hex');
+  const manifest = { entries: [{ fileId: 0, path: 'big.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; } };
+  const events = [];
+  let clock = 0;
+  const rx = createReceiver({
+    channel: ch, destRoot: dest, store: memStore(), consent: async () => true,
+    progressIntervalMs: 100, now: () => clock, onEvent: (ev) => events.push(ev),
+  });
+  const done = rx.start();
+  await recvCtrl(offerFrame({ jobId: 'p1', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  // Four 1000-byte chunks of ONE file, each a throttle-interval apart.
+  for (let i = 0; i < 4; i += 1) { clock += 100; await recvBulk(payload.subarray(i * 1000, (i + 1) * 1000)); }
+  await recvCtrl(fileEndFrame({ jobId: 'p1', fileId: 0, hash }));
+  await recvCtrl(jobDoneFrame({ jobId: 'p1' }));
+  await done;
+  const prog = events.filter((e) => e.type === 'progress');
+  expect(prog.length).toBeGreaterThan(1); // NOT one snapshot at the end — a 100GB file needs movement
+  const bytes = prog.map((e) => e.progress.received);
+  expect(bytes).toEqual([...bytes].sort((a, b) => a - b)); // monotonic
+  expect(bytes[bytes.length - 1]).toBeGreaterThan(0);
+});
+
+test('receiver progress emission is throttled by progressIntervalMs', async () => {
+  const dest = tmp();
+  const payload = Buffer.alloc(4000, 9);
+  const hash = createHash('sha256').update(payload).digest('hex');
+  const manifest = { entries: [{ fileId: 0, path: 'big.bin', size: payload.length, mtime: 1700000000000 }], totalBytes: payload.length, totalFiles: 1 };
+  let recvCtrl = () => {}, recvBulk = () => {};
+  const ch = { sendCtrl() {}, async sendBulk() {}, onCtrl(cb) { recvCtrl = cb; }, onBulk(cb) { recvBulk = cb; } };
+  const events = [];
+  const rx = createReceiver({
+    channel: ch, destRoot: dest, store: memStore(), consent: async () => true,
+    progressIntervalMs: 100_000, now: () => 0, // a clock that never advances past the interval
+    onEvent: (ev) => events.push(ev),
+  });
+  const done = rx.start();
+  await recvCtrl(offerFrame({ jobId: 'p2', entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
+  for (let i = 0; i < 4; i += 1) await recvBulk(payload.subarray(i * 1000, (i + 1) * 1000));
+  await recvCtrl(fileEndFrame({ jobId: 'p2', fileId: 0, hash }));
+  await recvCtrl(jobDoneFrame({ jobId: 'p2' }));
+  await done;
+  // Every chunk pokes emitProgress; the throttle admits at most one. (Per-chunk
+  // IPC on a 100GB send would be ~800k messages.)
+  expect(events.filter((e) => e.type === 'progress').length).toBeLessThanOrEqual(1);
+});
+
+test('sender emits throttled progress events as chunks go out', async () => {
+  const root = tmp();
+  const f = join(root, 'a.bin');
+  const data = Buffer.alloc(4000, 3);
+  writeFileSync(f, data);
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: data.length, mtime: 5 }], totalBytes: data.length, totalFiles: 1 };
+  const events = [];
+  let clock = 0;
+  const ch = fakeChannel();
+  // Advance the clock past the throttle on every chunk handed to the channel.
+  const origSendBulk = ch.sendBulk.bind(ch);
+  ch.sendBulk = async (b) => { clock += 100; return origSendBulk(b); };
+  const sender = createSender({
+    channel: ch, jobId: 'sp1', manifest, sources: new Map([[0, f]]), chunkSize: 1000,
+    progressIntervalMs: 100, now: () => clock, onEvent: (ev) => events.push(ev),
+  });
+  const finished = sender.start();
+  await ch.feedCtrl(acceptFrame({ jobId: 'sp1', resume: [] }));
+  await until(() => ch.ctrlOut.some((fr) => fr.t === 'job_done'));
+  await ch.feedCtrl(completeFrame({ jobId: 'sp1', ok: true }));
+  await finished;
+  const prog = events.filter((e) => e.type === 'progress');
+  expect(prog.length).toBeGreaterThan(1);
+  expect(prog[prog.length - 1].progress.sent).toBeGreaterThan(0);
+});
