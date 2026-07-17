@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   getSignalingUrl: () => ipcRenderer.invoke('get-signaling-url'),
   setSignalingUrl: (url) => ipcRenderer.invoke('set-signaling-url', url),
+  // Received-files folder (Settings): read current, pick a new one, reset to default.
+  getReceivedDir: () => ipcRenderer.invoke('received-dir:get'),
+  chooseReceivedDir: () => ipcRenderer.invoke('received-dir:choose'),
+  resetReceivedDir: () => ipcRenderer.invoke('received-dir:reset'),
   // "Allow this computer to be controlled" — persisted, default-on, gated
   // receiver-side (enforcement wiring lands in Task 6/7).
   getControlAllowed: () => ipcRenderer.invoke('control-allowed:get'),
