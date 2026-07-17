@@ -191,6 +191,12 @@
             <button id="menu-change-server" class="btn btn-ghost">Change signaling server…</button>
             <button id="menu-check-updates" class="btn btn-ghost">Check for updates</button>
           </div>
+          <div class="lbl">Received files folder</div>
+          <div id="settings-received-dir" class="host-meta"></div>
+          <div class="u-row settings-actions">
+            <button id="menu-change-received-dir" class="btn btn-ghost">Change folder…</button>
+            <button id="menu-reset-received-dir" class="btn btn-ghost">Reset to default</button>
+          </div>
           <div class="u-row settings-actions">
             <button id="menu-open-logs" class="btn btn-ghost">Open logs folder</button>
             <button id="menu-send-diagnostics" class="btn btn-ghost" hidden>Send diagnostics to support…</button>
@@ -246,6 +252,8 @@
     <div id="transfer-consent-summary" class="statusline u-tight xfer-consent-strong"></div>
     <div class="lbl">Save to</div>
     <div id="transfer-consent-dest" class="statusline u-tight xfer-consent-dest"></div>
+    <div id="transfer-consent-space" class="statusline u-tight"></div>
+    <div id="transfer-consent-warning" class="statusline u-tight xfer-consent-warn" hidden></div>
     <div class="lbl">Contents</div>
     <div id="transfer-consent-tree" class="xfer-tree-wrap"></div>
     <div class="u-row xfer-consent-actions">

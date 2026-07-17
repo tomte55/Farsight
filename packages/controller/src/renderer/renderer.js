@@ -2,7 +2,7 @@
 import { isValidHostId } from '@farsight/shared/host-id';
 import { normalizeHostId, passwordCandidates, formatHostId } from '@farsight/shared/credentials-format';
 import { isOlder } from '@farsight/shared/version';
-import { createRateEstimator, etaSeconds, bytesDone, filesDone, formatBytes, formatRate, formatDuration } from '@farsight/shared/transfer-rate';
+import { createRateEstimator, etaSeconds, bytesDone, filesDone, formatBytes, formatRate, formatDuration, classifyDiskSpace } from '@farsight/shared/transfer-rate';
 import { railItems, activeTransferCount, TERMINAL_TRANSFER_STATES, isShellPage, SHELL_PAGES } from '@farsight/shared/shell-nav';
 import { buildStatusSegments } from '@farsight/shared/status-bar';
 import { transferLabel } from '@farsight/shared/transfer-label';
@@ -645,6 +645,14 @@ document.getElementById('menu-change-server').addEventListener('click', async ()
   shellEl.hidden = true;
   setupEl.hidden = false;
 });
+document.getElementById('menu-change-received-dir').addEventListener('click', async () => {
+  await window.farsightIpc.chooseReceivedDir();
+  refreshSettingsView();
+});
+document.getElementById('menu-reset-received-dir').addEventListener('click', async () => {
+  await window.farsightIpc.resetReceivedDir();
+  refreshSettingsView();
+});
 
 // Cache our own version for the SP1 version-aware handshake (sent on CONNECT and
 // compared against the host's relayed version), and feed it to the status bar
@@ -1100,7 +1108,10 @@ const transfersEmptyEl = document.getElementById('transfers-empty');
 const consentModalEl = document.getElementById('transfer-consent');
 const consentSummaryEl = document.getElementById('transfer-consent-summary');
 const consentDestEl = document.getElementById('transfer-consent-dest');
+const consentSpaceEl = document.getElementById('transfer-consent-space');
+const consentWarnEl = document.getElementById('transfer-consent-warning');
 const consentTreeEl = document.getElementById('transfer-consent-tree');
+const LOW_MARGIN_BYTES = 1024 * 1024 * 1024; // 1 GiB — warn if this little (or less) would remain
 
 // Build a nested folder/file tree from the manifest's flat, '/'-separated paths
 // (transfer-manifest sanitizes them to posix-relative), so the prompt shows
@@ -1149,6 +1160,23 @@ window.farsightIpc.onTransferConsent((req) => {
   const n = manifest.totalFiles ?? (manifest.entries || []).length;
   consentSummaryEl.textContent = `${n} file${n === 1 ? '' : 's'} · ${formatBytes(manifest.totalBytes ?? 0)}`;
   consentDestEl.textContent = req.destDir || '';
+  const totalBytes = manifest.totalBytes ?? 0;
+  const freeBytes = (typeof req.freeBytes === 'number') ? req.freeBytes : null;
+  consentSpaceEl.textContent = freeBytes == null ? '' : `${formatBytes(freeBytes)} free`;
+  const { status } = classifyDiskSpace({ totalBytes, freeBytes, lowMarginBytes: LOW_MARGIN_BYTES });
+  if (status === 'insufficient') {
+    consentWarnEl.hidden = false;
+    consentWarnEl.classList.add('is-danger');
+    consentWarnEl.textContent = `Not enough space — needs ${formatBytes(totalBytes)}, only ${formatBytes(freeBytes)} free.`;
+  } else if (status === 'low-margin') {
+    consentWarnEl.hidden = false;
+    consentWarnEl.classList.remove('is-danger');
+    consentWarnEl.textContent = `Low disk space — ${formatBytes(freeBytes - totalBytes)} would remain after this transfer.`;
+  } else {
+    consentWarnEl.hidden = true;
+    consentWarnEl.classList.remove('is-danger');
+    consentWarnEl.textContent = '';
+  }
   consentTreeEl.replaceChildren();
   consentTreeEl.appendChild(renderManifestTree(buildManifestTree(manifest.entries)));
   consentModalEl.hidden = false;
@@ -1590,6 +1618,9 @@ function renderRail() {
 
 function refreshSettingsView() {
   document.getElementById('settings-signaling').textContent = signalingUrl || 'not configured';
+  window.farsightIpc.getReceivedDir().then((p) => {
+    document.getElementById('settings-received-dir').textContent = p || '';
+  });
 }
 
 // Eager init — MUST be the last thing in the file. refreshSignalingUrl() reaches
