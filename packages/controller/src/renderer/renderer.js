@@ -13,6 +13,7 @@ import { railItems, activeTransferCount, TERMINAL_TRANSFER_STATES, isShellPage, 
 import { sessionOverlayFor } from '../session-overlay.js';
 import { extractStats, throughputKbps, formatQuality } from '../stats.js';
 import { createRendererLogger } from './rlog.js';
+import { buildStatusSegments } from '@farsight/shared/status-bar';
 
 // Root renderer logger (forwards to the main-process file log over IPC — see
 // rlog.js). newConnId() stamps a short, unique-enough-for-log-correlation id
@@ -58,6 +59,10 @@ function startStatsPoll() {
       const kbps = lastStatsSample ? throughputKbps(lastStatsSample, cur) : null;
       lastStatsSample = cur;
       if (qualityEl) qualityEl.textContent = formatQuality({ rttMs: cur.rttMs, kbps, width: cur.width, height: cur.height, transport: cur.transport }, clog.child('stats'));
+      if (statusState.session) {
+        Object.assign(statusState.session, { rttMs: cur.rttMs, width: cur.width, height: cur.height, transport: cur.transport });
+        renderStatusBar();
+      }
     } catch { /* never throw into the poller */ }
   }, 2000);
 }
@@ -94,16 +99,100 @@ function stopClipboardSync() {
   if (clipTimer) { clearInterval(clipTimer); clipTimer = null; }
 }
 
-const updateBanner = document.getElementById('update-banner');
-const updateMsg = document.getElementById('update-msg');
 const menuStatus = document.getElementById('menu-status');
 
+// ─── Status bar ──────────────────────────────────────────────────────────────
+// The always-on overview. Replaces #update-banner and #version-tag, which both
+// pinned to bottom:0 and would collide with this strip.
+const statusbarEl = document.getElementById('statusbar');
+const statusState = {
+  signaling: 'connecting',
+  signedInAs: null,
+  session: null,     // { peer, rttMs, width, height, transport }
+  update: null,      // { version }
+  appVersion: null,
+};
+
+const SB_FOCUS = {
+  transfers: () => showPage('transfers'),
+  session: () => {}, // step 2 gives the session its own window; today it takes over
+  'install-update': () => window.farsightIpc.installUpdate(),
+};
+
+// Paint one segment's content (dot / progress bar / label + clickability) into an
+// existing element without touching the surrounding DOM structure.
+function paintSeg(el, s, onClick) {
+  el.className = `sb-seg${onClick ? ' clickable' : ''}${s.kind === 'version' ? ' sb-ver' : ''}`;
+  el.replaceChildren();
+  if (s.dot) el.appendChild(Object.assign(document.createElement('span'), { className: `sb-dot ${s.dot}` }));
+  if (s.bar !== null) {
+    const bar = document.createElement('span');
+    bar.className = 'sb-bar';
+    const fill = document.createElement('span');
+    fill.className = 'sb-bar-fill';
+    fill.style.width = `${Math.round(s.bar * 100)}%`; // CSSOM write — not subject to style-src
+    bar.appendChild(fill);
+    el.appendChild(bar);
+  }
+  el.appendChild(Object.assign(document.createElement('span'), { textContent: s.text }));
+}
+
+// segment id -> its live element, valid only while the segment IDENTITY LIST
+// (statusbarIds) is unchanged from the previous render. onTransferEvent fires
+// renderStatusBar() per-file and UNTHROTTLED — same as renderRail() below, whose
+// comment documents the demonstrated bug: a keyboard user can be focused on a
+// clickable segment (Transfers, Restart to update) when a progress tick lands, and
+// a plain rebuild-every-time (replaceChildren()) would blur it. A progress tick
+// never changes WHICH segments exist or their order, only their text/bar — so the
+// hot path mutates existing nodes in place and never removes any of them, and
+// focus survives. Only a genuine structural change (session start/end, sign-in/
+// out, a transfer entering/leaving the bar, update becoming ready) rebuilds the
+// strip from scratch; that residual case can still move focus, same as the rail's
+// own fix left unresolved for its rarer structural rebuilds.
+let statusbarIds = [];
+const statusbarSegs = new Map();
+
+function renderStatusBar() {
+  const segments = buildStatusSegments({
+    ...statusState,
+    transfers: [...transferJobs.values()].map((j) => ({
+      jobId: j.jobId,
+      peer: (j.target && j.target.id) || 'Unknown peer',
+      direction: j.direction,
+      progress: j.progress,
+      rate: j.rate,
+      state: j.state,
+    })),
+  });
+
+  const ids = segments.map((s) => s.id);
+  const structureChanged = ids.length !== statusbarIds.length || ids.some((id, i) => id !== statusbarIds[i]);
+
+  if (!structureChanged) {
+    segments.forEach((s) => paintSeg(statusbarSegs.get(s.id), s, s.focus ? SB_FOCUS[s.focus] : null));
+    return;
+  }
+
+  statusbarSegs.clear();
+  statusbarEl.replaceChildren();
+  statusbarIds = ids;
+  segments.forEach((s, i) => {
+    if (i > 0) statusbarEl.appendChild(Object.assign(document.createElement('span'), { className: 'sb-div' }));
+    if (s.kind === 'version') statusbarEl.appendChild(Object.assign(document.createElement('span'), { className: 'sb-spring' }));
+    const onClick = s.focus ? SB_FOCUS[s.focus] : null;
+    const el = document.createElement(onClick ? 'button' : 'span');
+    if (onClick) el.onclick = onClick;
+    paintSeg(el, s, onClick);
+    statusbarEl.appendChild(el);
+    statusbarSegs.set(s.id, el);
+  });
+}
+
 window.farsightIpc.onUpdateStatus((ui) => {
-  updateBanner.classList.toggle('show', ui.showRestartPrompt);
-  updateMsg.textContent = ui.showRestartPrompt ? `Update available (${ui.version})` : '';
+  statusState.update = ui.showRestartPrompt ? { version: ui.version } : null;
   menuStatus.textContent = ui.message || '';
+  renderStatusBar();
 });
-document.getElementById('update-restart').addEventListener('click', (e) => { e.preventDefault(); window.farsightIpc.installUpdate(); });
 
 document.getElementById('menu-check-updates').addEventListener('click', () => window.farsightIpc.checkForUpdates());
 document.getElementById('menu-open-logs').addEventListener('click', () => { window.farsightIpc.openLogs(); });
@@ -123,6 +212,8 @@ async function refreshSignalingUrl() {
   const configured = Boolean(signalingUrl);
   setupEl.hidden = configured;
   shellEl.hidden = !configured;
+  statusState.signaling = configured ? 'ready' : 'connecting';
+  renderStatusBar();
   if (configured) showPage(activePage);
 }
 async function saveSignaling() {
@@ -138,14 +229,14 @@ document.getElementById('menu-change-server').addEventListener('click', async ()
   setupEl.hidden = false;
 });
 
-// Paint the subtle build-version label in the bottom-left corner. Also cache
-// our own version for the SP1 version-aware handshake (sent on CONNECT and
-// compared against the host's relayed version).
+// Cache our own version for the SP1 version-aware handshake (sent on CONNECT and
+// compared against the host's relayed version), and feed it to the status bar
+// (replaces the old bottom-left #version-tag label).
 let appVersion = null;
 window.farsightIpc.getAppVersion().then((v) => {
   appVersion = v || null;
-  const el = document.getElementById('version-tag');
-  if (el && v) el.textContent = `v${v}`;
+  statusState.appVersion = appVersion;
+  renderStatusBar();
 });
 
 // SP1: reflect the host's app version (relayed by the server on ICE_SERVERS)
@@ -206,6 +297,8 @@ function doClose() {
   screenEl.style.display = 'none';
   statusEl.textContent = '';
   setActive(false);
+  statusState.session = null;
+  renderStatusBar();
 }
 
 function doReconnect() {
@@ -240,6 +333,8 @@ let pendingStream = null;
 function revealSession(stream) {
   video.srcObject = stream;
   setActive(true);
+  statusState.session = { peer: lastCreds.targetId || null };
+  renderStatusBar();
   screenEl.style.display = 'block';
   document.getElementById('end').onclick = doClose;
   startStatsPoll();
@@ -377,6 +472,8 @@ async function connectTo({ targetId, candidates, linked }) {
           // of the reconnect flow.
           sessionClosing = true;
           setActive(false);
+          statusState.session = null;
+          renderStatusBar();
           stopStatsPoll();
           stopClipboardSync();
           if (peer) { peer.close(); peer = null; }
@@ -424,10 +521,14 @@ async function connectTo({ targetId, candidates, linked }) {
         return;
       }
       statusEl.textContent = ERROR_TEXT[m.reason] || `Error: ${m.reason}`;
+      statusState.signaling = 'error';
+      renderStatusBar();
     },
     [MSG.PEER_DISCONNECTED]: () => {
       clog.info('peer disconnected');
       setActive(false);
+      statusState.session = null;
+      renderStatusBar();
       stopStatsPoll();
       stopClipboardSync();
       if (sessionClosing) return; // host already told us it ended — keep that overlay
@@ -476,11 +577,22 @@ const fleetError = document.getElementById('fleet-error');
 
 const setMsg = (el, text, ok = false) => { el.textContent = text; el.style.color = ok ? 'var(--acc2)' : 'var(--danger-ink)'; };
 
+// account:status carries no email (see account-service.status(), which returns
+// only { signedIn }) — the only identity this renderer ever learns is whatever
+// the user just typed to sign in, captured here. A session resumed from a
+// persisted token at launch (nobody re-typed anything this run) is signed in but
+// this stays null, so the bar's account segment is simply omitted rather than
+// showing a wrong or made-up name — buildStatusSegments() already treats a null
+// signedInAs as "no account segment", not an error state.
+let signedInEmail = null;
+
 async function refreshAccountView() {
   const { signedIn } = await window.farsightIpc.accountStatus();
   acctSignin.hidden = signedIn;
   acctFleet.hidden = !signedIn;
   menuSendDiagnostics.hidden = !signedIn;
+  statusState.signedInAs = signedIn ? signedInEmail : null;
+  renderStatusBar();
   if (signedIn) loadFleet();
 }
 
@@ -509,6 +621,7 @@ async function doSignIn() {
     acctSigninBtn.textContent = 'Sign in';
   }
   if (res.ok) {
+    signedInEmail = email;
     acctPassword.value = '';
     acctCode.value = '';
     refreshAccountView();
@@ -667,7 +780,7 @@ function lastSeenText(d) {
   return `seen ${Math.floor(hrs / 24)}d ago`;
 }
 
-document.getElementById('acct-signout').addEventListener('click', async () => { await window.farsightIpc.accountLogout(); refreshAccountView(); });
+document.getElementById('acct-signout').addEventListener('click', async () => { await window.farsightIpc.accountLogout(); signedInEmail = null; refreshAccountView(); });
 document.getElementById('fleet-refresh').addEventListener('click', loadFleet);
 acctSigninBtn.addEventListener('click', doSignIn);
 document.getElementById('acct-register').addEventListener('click', doRegister);
@@ -804,7 +917,11 @@ document.getElementById('contact-add-btn').addEventListener('click', async () =>
 // to be opened. No stored token → no network call; status() just returns signed-out.
 // Also paints the diagnostics-menu item's initial visibility (it otherwise only
 // refreshes when the fleet panel opens, via refreshAccountView above).
-window.farsightIpc.accountStatus().then(({ signedIn }) => { menuSendDiagnostics.hidden = !signedIn; });
+window.farsightIpc.accountStatus().then(({ signedIn }) => {
+  menuSendDiagnostics.hidden = !signedIn;
+  statusState.signedInAs = signedIn ? signedInEmail : null;
+  renderStatusBar();
+});
 
 // ── SP3 file transfer (send path) ───────────────────────────────────────────
 // A "Send…" entry point (dial a peer by ID+password, pick files/folders, send)
@@ -1034,6 +1151,7 @@ window.farsightIpc.onTransferEvent((ev) => {
   transferJobs.set(ev.jobId, existing);
   if (activePage === 'transfers') renderTransfers();
   renderRail();
+  renderStatusBar();
 });
 
 // mode: 'files' (multi-select files) or 'folder' (one directory). Windows/Linux
@@ -1200,4 +1318,5 @@ function refreshSettingsView() {
 // zone until :909 executes. Running this at the old :154 position throws before
 // the renderer ever finishes.
 renderRail();
+renderStatusBar();
 refreshSignalingUrl();

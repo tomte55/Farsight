@@ -103,3 +103,28 @@ describe('no inline styling', () => {
     expect(html).not.toMatch(/<style>/);
   });
 });
+
+describe('status bar', () => {
+  test('renderer builds the bar from the shared pure model', () => {
+    expect(js).toContain("from '@farsight/shared/status-bar'");
+    expect(js).toMatch(/buildStatusSegments\(/);
+    expect(js).toMatch(/function renderStatusBar\(/);
+  });
+
+  test('the bar absorbs the update banner and the version tag', () => {
+    // All three used to pin to bottom:0 and fight for the same strip.
+    expect(html).not.toContain('id="update-banner"');
+    expect(html).not.toContain('id="version-tag"');
+    expect(js).not.toContain("getElementById('version-tag')");
+  });
+
+  test('installUpdate is still reachable — now from the bar, not a banner link', () => {
+    expect(js).toContain('installUpdate()');
+  });
+
+  test('signaling, session and account state all feed the bar', () => {
+    for (const key of ['signaling:', 'session:', 'signedInAs:']) {
+      expect(js, `statusState must carry ${key}`).toContain(key);
+    }
+  });
+});
