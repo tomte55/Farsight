@@ -1253,5 +1253,19 @@ export function createMultiFlowReceiver({
       onEvent({ type: 'canceled' });
       fail(new Error(reason));
     },
+    // Lets a re-dialed REPLACEMENT flow join a receive already in progress (the
+    // supervisor's re-dial + the group rendezvous' onFlowJoin are a later
+    // task's job — this is just the receiver-side hook they call). Wires the
+    // new flow's onBulk EXACTLY like the initial `for (const flow of flows)`
+    // loop in beginReceive above: chunks are self-addressed (fileId+offset), so
+    // the router is flow-agnostic — any flow's bytes land in the same place.
+    // flowIndex isn't used here (bulk routing needs no per-flow bookkeeping);
+    // it's accepted for interface parity with the sender/supervisor side and
+    // for future diagnostics. A no-op if the receive hasn't begun yet (no
+    // router to route into) or has already settled.
+    addFlow(channel, flowIndex) {
+      if (settled || !router) return;
+      channel.onBulk((buf) => run(() => { pokeWatchdog(); return router.onBulkFrame(buf); }));
+    },
   };
 }

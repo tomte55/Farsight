@@ -878,4 +878,93 @@ describe('createMultiFlowReceiver', () => {
       expect(out.some((f) => f.t === 'complete' && f.ok === false)).toBe(true);
     });
   });
+
+  // Task 5: a re-dialed replacement flow (the supervisor's job, done in a later
+  // task) must be able to JOIN the running receive — its bulk frames need to
+  // reach the SAME router as the original flows so reassembly keeps working.
+  // addFlow just wires channel.onBulk into router.onBulkFrame exactly like the
+  // initial `for (const flow of flows) flow.onBulk(...)` loop above.
+  it('addFlow wires a new flow\'s onBulk into the same router — its bulk frames advance reassembly', async () => {
+    const size = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const parts = new Map();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      reportIntervalMs: 10_000,
+    });
+    const done = rx.start();
+    toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'r.bin', size, mtime: 0 }], totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+    expect(out.some((f) => f.t === 'accept')).toBe(true);
+
+    // Original flow (index 0) delivers the first half.
+    flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array(4).fill(1) }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // A replacement flow (index 2, a bulk-only re-dial slot) JOINS mid-receive.
+    let newFlowCb = null;
+    const newChannel = { onBulk: (cb) => { newFlowCb = cb; } };
+    rx.addFlow(newChannel, 2);
+    expect(newFlowCb).toBeTruthy(); // onBulk was actually wired
+
+    // Its bulk frame must reach the SAME router as flow 0 — deliver the second
+    // half via the NEW flow and finish the transfer entirely through it.
+    newFlowCb(encodeBulkFrame({ fileId: 0, offset: 4, length: 4, payload: new Uint8Array(4).fill(2) }));
+    await new Promise((r) => setTimeout(r, 0));
+    toReceiver(fileEndFrame({ jobId: JOB, fileId: 0, hash: 'H' }));
+    toReceiver(jobDoneFrame({ jobId: JOB }));
+    const r = await done;
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    expect([...parts.get('r.bin')]).toEqual([1, 1, 1, 1, 2, 2, 2, 2]); // both flows' bytes landed
+  });
+
+  // Task 5: idempotent OFFER — a rolling-join re-dial re-sends the OFFER to
+  // re-sync a replacement flow (a later task), but the receiver must not treat
+  // a repeat OFFER for the SAME (already-active) jobId as a fresh transfer: no
+  // second consent prompt, no state reset.
+  it('ignores a duplicate OFFER for the already-active jobId: no re-prompt, no state reset', async () => {
+    const size = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const consent = vi.fn(async () => true);
+    const events = [];
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent,
+      openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null }),
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      onEvent: (ev) => events.push(ev),
+      reportIntervalMs: 10_000,
+    });
+    const done = rx.start();
+    const entries = [{ fileId: 0, path: 'd.bin', size, mtime: 0 }];
+    toReceiver(offerFrame({ jobId: JOB, entries, totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+    expect(out.some((f) => f.t === 'accept')).toBe(true);
+    expect(consent).toHaveBeenCalledTimes(1);
+    const acceptFramesBefore = out.filter((f) => f.t === 'accept').length;
+    const acceptedEventsBefore = events.filter((e) => e.type === 'accepted').length;
+
+    // Duplicate OFFER for the SAME jobId arrives (e.g. a ctrl re-dial re-sync).
+    toReceiver(offerFrame({ jobId: JOB, entries, totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(consent).toHaveBeenCalledTimes(1); // NOT re-prompted
+    expect(out.filter((f) => f.t === 'accept').length).toBe(acceptFramesBefore); // no second accept frame
+    expect(events.filter((e) => e.type === 'accepted').length).toBe(acceptedEventsBefore); // no state reset
+
+    // Finish the transfer normally so the promise settles cleanly.
+    flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: size, payload: new Uint8Array(size).fill(3) }));
+    await new Promise((r) => setTimeout(r, 0));
+    toReceiver(fileEndFrame({ jobId: JOB, fileId: 0, hash: 'H' }));
+    toReceiver(jobDoneFrame({ jobId: JOB }));
+    const r = await done;
+    expect(r).toEqual({ jobId: JOB, ok: true });
+  });
 });
