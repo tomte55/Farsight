@@ -31,6 +31,7 @@
     "./transfer-engine": "./src/transfer-engine.js",
     "./transfer-channel": "./src/transfer-channel.js",
     "./transfer-chunk": "./src/transfer-chunk.js",
+    "./transfer-flow-supervisor": "./src/transfer-flow-supervisor.js",
     "./transfer-send-pool": "./src/transfer-send-pool.js",
     "./transfer-ranges": "./src/transfer-ranges.js",
     "./transfer-reconcile": "./src/transfer-reconcile.js",
