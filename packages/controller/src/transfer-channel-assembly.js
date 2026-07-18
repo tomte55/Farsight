@@ -74,7 +74,28 @@ export function assembleSendFlows({ flowCount, createWorker, makeParams }) {
       sendBulk: (buf) => w.channel.sendBulk(buf),
       isAlive: () => !!alive.get(w),
     })),
-    close: async () => { await Promise.all(workers.map((w) => w.close())); },
+    // C2 (cancel-path leak fix): worker.close() -> win.destroy() BYPASSES
+    // channel.fail() entirely, so any sendBulk already in flight on that
+    // worker (parked waiting on an 'ft-bulk-credit' that will now never
+    // arrive, because the window is gone) stays pending FOREVER. The send
+    // pool's run() then never unwinds pump()'s createSendPool(...).run(...),
+    // which means initialPass()/gapPass()'s generator cleanup (closing the
+    // open `reader`) never runs -- a silent fd + closure leak on every
+    // canceled multi-flow send, distinct from the C1 flow-DEATH deadlock
+    // (which is handled by wireAliveness calling fail() on a terminal session
+    // state) because a user CANCEL destroys the window directly without ever
+    // routing through a terminal state at all. Failing each channel first
+    // forces any in-flight sendBulk to reject, so the pool retires every flow,
+    // run() rejects with no_live_flows, pump() throws, and the generator's
+    // `await reader.close()` actually executes. Best-effort/guarded: a worker
+    // whose channel has no fail() (e.g. some future non-channel reuse) must
+    // not stop the other workers from closing.
+    close: async () => {
+      await Promise.all(workers.map((w) => {
+        try { w.channel.fail('closed'); } catch { /* best-effort */ }
+        return w.close();
+      }));
+    },
     onRendezvousError: (cb) => { rendezvousErrorCb = cb; },
   };
 }

@@ -20,6 +20,7 @@ import path from 'node:path';
 import { describe, test, expect, vi } from 'vitest';
 import { assembleSendFlows, assembleReceiveGroup } from '../src/transfer-channel-assembly.js';
 import { createGroupRendezvous } from '@farsight/shared/transfer-group-rendezvous';
+import { createTransferChannel } from '@farsight/shared/transfer-channel';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const main = readFileSync(path.join(dir, '../src/main.js'), 'utf8');
@@ -177,6 +178,85 @@ describe('assembleSendFlows (SEND multi-flow assembly)', () => {
     });
     await close();
     workers.forEach((w) => expect(w.close).toHaveBeenCalledTimes(1));
+  });
+
+  // C2 (cancel-path leak fix, sibling of the C1 flow-death deadlock covered
+  // above): a user CANCEL calls close() directly -- it never routes through a
+  // terminal session state, so wireAliveness's fail()-on-terminal-state never
+  // fires for it. Before this fix, close() only called worker.close()
+  // (destroy()ing the window), so any sendBulk already parked waiting for an
+  // 'ft-bulk-credit' event that will now NEVER arrive (the window is gone)
+  // stayed pending forever -- the send pool's run() never unwinds, so
+  // pump()'s generator (and its open file `reader`) never gets cleaned up: a
+  // silent fd + closure leak. Uses a REAL createTransferChannel (not a spy) so
+  // the assertion is about actual reject-on-fail behavior, not a mock call.
+  //
+  // Mutation check performed by hand: removing the `w.channel.fail('closed')`
+  // call from assembleSendFlows' close() makes `pending` never settle -- the
+  // `await expect(pending).rejects...` below then hangs until the suite's
+  // default timeout and FAILS, confirming this test actually exercises the fix.
+  test('close() fails every worker channel FIRST, so an in-flight sendBulk on it REJECTS instead of hanging forever', async () => {
+    const workers = [];
+    const { close } = assembleSendFlows({
+      flowCount: 1,
+      createWorker: () => {
+        // Real channel with an injected `on` that never fires 'ft-bulk-credit'
+        // -- exactly production: the worker window is destroyed before it
+        // could ever emit that event, so only channel.fail() can settle this.
+        const channel = createTransferChannel({ send: () => {}, on: () => {} });
+        const w = { channel, onSessionState: vi.fn(), startRendezvous: vi.fn(), close: vi.fn(async () => {}) };
+        workers.push(w);
+        return w;
+      },
+      makeParams: () => ({}),
+    });
+
+    const pending = workers[0].channel.sendBulk(new ArrayBuffer(4));
+    let settled = false;
+    pending.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(settled).toBe(false); // still in flight -- no credit has arrived, nor has close() run yet
+
+    await close();
+
+    await expect(pending).rejects.toThrow();
+    workers.forEach((w) => expect(w.close).toHaveBeenCalledTimes(1));
+  });
+
+  // Pool-level confirmation (the actual consumer of `flows[].sendBulk`): a
+  // real createSendPool().run() blocked on an in-flight send to the ONLY live
+  // flow must settle (reject no_live_flows) once that flow's channel is
+  // fail()'d via the assembly's close() -- not hang.
+  test('a createSendPool().run() blocked on an in-flight sendBulk settles (rejects) once close() fails the channel', async () => {
+    const { createSendPool } = await import('@farsight/shared/transfer-send-pool');
+    const workers = [];
+    let stateCb = null;
+    const { flows, close } = assembleSendFlows({
+      flowCount: 1,
+      createWorker: () => {
+        const channel = createTransferChannel({ send: () => {}, on: () => {} });
+        const w = {
+          channel,
+          onSessionState: (cb) => { stateCb = cb; },
+          startRendezvous: vi.fn(),
+          close: vi.fn(async () => {}),
+        };
+        workers.push(w);
+        return w;
+      },
+      makeParams: () => ({}),
+    });
+    stateCb('connected'); // mark the flow alive so the pool will dispatch to it
+
+    async function* oneChunk() {
+      yield { fileId: 0, offset: 0, length: 4, payload: new Uint8Array([1, 2, 3, 4]) };
+    }
+    const runP = createSendPool({ flows }).run(oneChunk());
+    await new Promise((r) => setTimeout(r, 0)); // let the pool dispatch onto the only flow
+
+    await close(); // the cancel path: fails the channel instead of just destroying the window
+
+    await expect(runP).rejects.toThrow('no_live_flows'); // settles -- does not hang
   });
 });
 
