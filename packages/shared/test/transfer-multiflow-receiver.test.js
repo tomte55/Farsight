@@ -2,7 +2,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createMultiFlowReceiver } from '../src/transfer-orchestrator.js';
 import { encodeBulkFrame } from '../src/transfer-chunk.js';
-import { offerFrame, fileEndFrame, jobDoneFrame, cancelFrame, parseCtrlFrame } from '../src/transfer-protocol.js';
+import { offerFrame, fileEndFrame, jobDoneFrame, cancelFrame, promptingFrame, parseCtrlFrame } from '../src/transfer-protocol.js';
 import { createCoverageTracker } from '../src/transfer-reconcile.js';
 
 const JOB = 'a'.repeat(32);
@@ -263,6 +263,12 @@ describe('createMultiFlowReceiver', () => {
         },
         verifyAndFinalize: () => Promise.resolve({ ok: true }),
         reportIntervalMs: 5000, // irrelevant — the fake clock only advances via tickOnce()
+        // Same reasoning as the periodic-tick test above: this fake clock's
+        // tickOnce() fires every currently-pending timer unconditionally, so a
+        // default-armed watchdog sharing the same clock would fire (and fail
+        // the receive) on the very first tickOnce() call below, which this
+        // test isn't about — disable it here too.
+        inactivityMs: 0,
         setTimer: fake.setTimer, clearTimer: fake.clearTimer,
         ...(reportMaxBytes !== undefined ? { reportMaxBytes } : {}),
       });
@@ -321,9 +327,13 @@ describe('createMultiFlowReceiver', () => {
     expect(unboundedTracker.coveredFor(4).toJSON()).toEqual([]);          // untouched
   });
 
-  // Mirrors createReceiver's inbound-cancel handling: a sender-initiated cancel
-  // must settle the receive as canceled, surface the event, and leave no
-  // dangling timer (reporter or watchdog) behind.
+  // Unlike single-flow createReceiver — whose ctrl handler has no `cancel`
+  // branch at all (a single-flow receive instead recovers from a vanished
+  // sender via its own inactivity watchdog, once the sender's channel
+  // teardown stops bytes arriving) — the multi-flow receiver adds EXPLICIT
+  // inbound-cancel handling: a sender-initiated cancel must settle the
+  // receive as canceled, surface the event, and leave no dangling timer
+  // (reporter or watchdog) behind.
   it('handles an inbound cancel after accept: settles canceled, emits {type:"canceled"}, and clears all timers', async () => {
     const size = 8;
     const { ctrl, toReceiver, out } = ctrlPair();
@@ -420,6 +430,55 @@ describe('createMultiFlowReceiver', () => {
       // Poke: bulk bytes arrive on a flow, just before the original deadline would elapse.
       flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: size, payload: new Uint8Array(size).fill(3) }));
       await vi.advanceTimersByTimeAsync(0); // let the bulk handler's pokeWatchdog() run
+
+      await vi.advanceTimersByTimeAsync(800); // 1600ms since accept, but only 800ms since the poke
+      expect(events.some((e) => e.type === 'interrupted')).toBe(false); // reset held — no stall yet
+
+      await vi.advanceTimersByTimeAsync(300); // now ~1100ms since the poke — past inactivityMs
+      const result = await done;
+      expect(result).toBe('stalled');
+      expect(events.some((e) => e.type === 'interrupted')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The watchdog must reset on EVERY inbound ctrl frame too, not just bulk
+  // frames — pokeWatchdog() is called at the very top of the ctrl handler,
+  // before the frame is even parsed for jobId/type. Uses a `prompting` frame
+  // as the poke: it's a valid, parseable ctrl frame for this jobId that the
+  // multi-flow receiver's ctrl handler has NO case for (unlike single-flow
+  // createReceiver, it never surfaces a 'prompting' event), so besides the
+  // watchdog reset it has no side effect at all — nothing here completes or
+  // cancels the transfer, isolating exactly the ctrl-side reset behavior.
+  it('watchdog reset: a ctrl frame delivered just before the deadline delays the stall past it', async () => {
+    const size = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const parts = new Map();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const events = [];
+    vi.useFakeTimers();
+    try {
+      const rx = createMultiFlowReceiver({
+        ctrl, flows, jobId: JOB,
+        consent: async () => true,
+        openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
+        verifyAndFinalize: () => Promise.resolve({ ok: true }),
+        onEvent: (ev) => events.push(ev),
+        reportIntervalMs: 1_000_000, // keep the reporter out of the way of this timing test
+        inactivityMs: 1000,
+      });
+      const done = rx.start().catch((e) => e.message);
+      toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'p.bin', size, mtime: 0 }], totalBytes: size, totalFiles: 1 }));
+      await vi.advanceTimersByTimeAsync(0); // let consent+accept flush
+      expect(out.some((f) => f.t === 'accept')).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(800); // 800ms since accept — inside the 1000ms window
+      // Poke: an inbound ctrl frame arrives, just before the original deadline
+      // would elapse. It must NOT complete or cancel the transfer.
+      toReceiver(promptingFrame({ jobId: JOB }));
+      await vi.advanceTimersByTimeAsync(0); // let the ctrl handler's pokeWatchdog() run
 
       await vi.advanceTimersByTimeAsync(800); // 1600ms since accept, but only 800ms since the poke
       expect(events.some((e) => e.type === 'interrupted')).toBe(false); // reset held — no stall yet
