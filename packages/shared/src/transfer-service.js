@@ -211,7 +211,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     return (target && target.linked) ? 'fleet' : 'adhoc';
   }
 
-  function saveSendRecord({ jobId, manifest, createdAt, jobState, peer, tier = 'adhoc', sourceRoots = [] }) {
+  function saveSendRecord({ jobId, manifest, createdAt, jobState, peer, tier = 'adhoc', sourceRoots = [], flowCount }) {
     return store.save({
       jobId,
       dir: 'send',
@@ -225,6 +225,12 @@ export function createTransferService({ store, transferDir, consent, openChannel
       perFile: manifest.entries.map((e) => ({ fileId: e.fileId, status: jobState === 'done' ? 'done' : jobState === 'error' ? 'error' : 'pending' })),
       jobState,
       createdAt,
+      // Persisted so an auto-resumed send re-establishes with the SAME flow
+      // count instead of silently reverting to single-flow (see reestablish()
+      // below, which reads this back into the resume target) -- undefined for
+      // a legacy/absent value, so resolveFlowCount's own fallback-to-1 still
+      // applies unchanged.
+      flowCount,
     });
   }
 
@@ -243,7 +249,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     // record), makes a durable record exist for the whole lifetime of a running
     // send. Best-effort: a store write failure here must not abort a transfer
     // that would otherwise work.
-    try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'active', peer, tier, sourceRoots }); } catch { /* best effort */ }
+    try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'active', peer, tier, sourceRoots, flowCount: target && target.flowCount }); } catch { /* best effort */ }
     let close = null;
     let onRendezvousError = null;
     let result;
@@ -314,7 +320,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
         }
         await sender.start(); // resolves with no value on success, rejects/throws on failure
         result = { jobId, ok: true };
-        await saveSendRecord({ jobId, manifest, createdAt, jobState: 'done', peer, tier, sourceRoots });
+        await saveSendRecord({ jobId, manifest, createdAt, jobState: 'done', peer, tier, sourceRoots, flowCount: target && target.flowCount });
       } else {
         result = { jobId, ok: false, canceled: true };
       }
@@ -332,7 +338,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // match above, so `recoverable` is unaffected and this can never be
       // auto-resumed by the resume watcher.
       const jobState = recoverable ? 'interrupted' : (reason === 'canceled' ? 'canceled' : 'error');
-      try { await saveSendRecord({ jobId, manifest, createdAt, jobState, peer, tier, sourceRoots }); } catch { /* best effort */ }
+      try { await saveSendRecord({ jobId, manifest, createdAt, jobState, peer, tier, sourceRoots, flowCount: target && target.flowCount }); } catch { /* best effort */ }
       if (recoverable) { emit(jobId, 'send', { type: 'interrupted' }); if (resumeWatcher) resumeWatcher.notify(); }
     } finally {
       disarmApprovalTimer();
@@ -400,7 +406,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     }
 
     try {
-      await saveSendRecord({ jobId, manifest: entry.manifest, createdAt: entry.createdAt, jobState: 'canceled', peer: peerFor(entry.target), tier: tierFor(entry.target), sourceRoots: entry.sourceRoots });
+      await saveSendRecord({ jobId, manifest: entry.manifest, createdAt: entry.createdAt, jobState: 'canceled', peer: peerFor(entry.target), tier: tierFor(entry.target), sourceRoots: entry.sourceRoots, flowCount: entry.target && entry.target.flowCount });
     } catch { /* best effort */ }
     // Emit a terminal 'canceled' so the renderer's status bar / rail / list
     // refresh and drop this transfer. Without it, an early ad-hoc cancel (before
@@ -715,7 +721,12 @@ export function createTransferService({ store, transferDir, consent, openChannel
         manifest: buildManifest(walked.entries),
         sources: walked.sources,
         sourceRoots: job.sourceRoots,
-        target: { id: signalingId, deviceId: job.peer && job.peer.deviceId, linked: true, contact: job.tier === 'contact' },
+        // Carry the original flowCount forward so an auto-resumed send re-opens
+        // with the SAME parallelism instead of silently reverting to
+        // single-flow (resolveFlowCount defaults a missing target.flowCount to
+        // 1) -- undefined on a legacy record resumes single-flow exactly as
+        // before.
+        target: { id: signalingId, deviceId: job.peer && job.peer.deviceId, linked: true, contact: job.tier === 'contact', flowCount: job.flowCount },
       });
     };
     resumeWatcher = createResumeWatcher({ listInterrupted, getFleet, reestablish, ...resumeOpts });

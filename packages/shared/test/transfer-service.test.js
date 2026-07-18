@@ -877,6 +877,52 @@ test('SP3 P4: the resume watcher preserves contact:true when re-sending an inter
   expect(capturedTarget).toMatchObject({ id: 'sig-NEW', deviceId: 'devC', linked: true, contact: true });
 });
 
+test('SP3 P4: the resume watcher preserves the original flowCount when re-sending an interrupted multi-flow own-fleet job', async () => {
+  // Bug: reestablish() rebuilt the resume target from scratch without
+  // flowCount, so resolveFlowCount defaulted it to 1 -- an 8-flow send that
+  // got interrupted (e.g. a Starlink drop) auto-resumed at single-flow speed
+  // and stayed there. saveSendRecord now persists the send's flowCount, and
+  // reestablish must read it back onto the resume target.
+  const srcDir = tmp();
+  const srcFile = join(srcDir, 'resume-multiflow.txt');
+  writeFileSync(srcFile, Buffer.from('multiflow resume payload '.repeat(20)));
+  const sendStore = createJobsStore({ dir: tmp() });
+
+  // Seed the store directly with an already-interrupted, originally 8-flow
+  // own-fleet send record (as if a prior multi-flow send dropped mid-transfer).
+  await sendStore.save({
+    jobId: '2c1f9a7e6b3d4c5a8f0e1d2c3b4a5968',
+    dir: 'send',
+    tier: 'fleet',
+    peer: { id: 'sig-OLD', deviceId: 'dev-mf' },
+    sourceRoots: [srcFile],
+    destRoot: null,
+    manifest: { entries: [] },
+    perFile: [],
+    jobState: 'interrupted',
+    createdAt: Date.now(),
+    flowCount: 8,
+  });
+
+  let capturedArgs = null;
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true, rendezvousTimeoutMs: 60,
+    getFleet: async () => [{ deviceId: 'dev-mf', signalingId: 'sig-NEW', online: true }],
+    openChannel: async (args) => { capturedArgs = args; return { channel: deadChannel(), close: async () => {} }; },
+  });
+  svc.startResumeWatcher();
+
+  await svc.resumeSweepNow();
+  svc.stopResumeWatcher();
+
+  // The multi-flow branch (flowCount > 1) is only taken when resolveFlowCount
+  // sees the persisted flowCount come back through — a regression here (the
+  // undocumented "1/1" resume bug) makes both of these fail: target.flowCount
+  // reverts to undefined and openArgs never gets a top-level flowCount at all.
+  expect(capturedArgs.target).toMatchObject({ id: 'sig-NEW', deviceId: 'dev-mf', linked: true, flowCount: 8 });
+  expect(capturedArgs.flowCount).toBe(8);
+});
+
 test('SP3 P4: a recoverable own-fleet drop records interrupted; a terminal reason records error', async () => {
   const { manifest, sources } = await oneFileSource();
   const store = createJobsStore({ dir: tmp() });
