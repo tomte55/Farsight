@@ -11,6 +11,7 @@ import path from 'node:path';
 import { describe, test, expect, vi } from 'vitest';
 import { assembleSendFlows, dispatchReceiveFlowJoin } from '../src/transfer-channel-assembly.js';
 import { createTransferChannel } from '@farsight/shared/transfer-channel';
+import { createSendPool } from '@farsight/shared/transfer-send-pool';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const main = readFileSync(path.join(dir, '../src/main.js'), 'utf8');
@@ -142,6 +143,69 @@ describe('assembleSendFlows (supervisor-backed)', () => {
     cfg.onCtrlReplaced(redial);
     expect(setCtrl).toHaveBeenCalledTimes(1);
     expect(setCtrl).toHaveBeenCalledWith(redial.channel);
+  });
+
+  // Final-review #1: onFlowUp re-fires on EVERY 'connected' (including a
+  // transient disconnected->connected blip / ICE-restart, which is NOT a re-dial
+  // and NOT bounded by maxRedialsPerSlot). Appending a wrapper each time grew
+  // `flows` unboundedly and let aliveCount()/flowsLive over-report past
+  // flowsTotal. The fix keeps EXACTLY ONE wrapper per slotIndex.
+  describe('Final-review #1: one wrapper per slot (flowsLive can\'t over-report)', () => {
+    // Fake supervisor per-worker flow: isAlive() is controllable so the test can
+    // mirror the real supervisor marking a worker not-alive on 'disconnected'.
+    const flow = (aliveRef) => ({ sendBulk: vi.fn(), isAlive: () => aliveRef.v });
+
+    test('a slot that reconnects REPLACES (not appends) its wrapper — flows.length bounded by slot count, not reconnect count', () => {
+      const { bundle, cfg } = build({ flowCount: 2 });
+      const a0 = { v: true }, b0 = { v: true };
+      // Slot 0 connects, blips, reconnects many times; slot 1 connects once.
+      cfg.onFlowUp(0, flow(a0));
+      cfg.onFlowUp(1, flow(b0));
+      for (let i = 0; i < 20; i += 1) cfg.onFlowUp(0, flow({ v: true })); // 20 reconnect blips
+      // Never more than one entry per slot: 2 slots -> at most 2 wrappers.
+      expect(bundle.flows.length).toBe(2);
+    });
+
+    test('aliveCount()/flowsLive NEVER exceeds flowsTotal across reconnect blips (mutation: revert to append -> this fails)', () => {
+      const flowCount = 3;
+      const { bundle, cfg } = build({ flowCount });
+      const pool = createSendPool({ flows: bundle.flows });
+      // Every slot connects, then every slot blips-and-reconnects repeatedly.
+      for (let i = 0; i < flowCount; i += 1) cfg.onFlowUp(i, flow({ v: true }));
+      expect(pool.aliveCount()).toBe(flowCount);
+      for (let round = 0; round < 10; round += 1) {
+        for (let i = 0; i < flowCount; i += 1) cfg.onFlowUp(i, flow({ v: true }));
+        // The whole point: with append, this climbs to 33; with dedup it stays 3.
+        expect(pool.aliveCount()).toBeLessThanOrEqual(flowCount);
+      }
+      expect(pool.aliveCount()).toBe(flowCount);
+    });
+
+    test('a slot that goes \'disconnected\' (supervisor marks not-alive, NO onFlowDown) stops counting live', () => {
+      const { bundle, cfg } = build({ flowCount: 2 });
+      const pool = createSendPool({ flows: bundle.flows });
+      const a = { v: true }, b = { v: true };
+      cfg.onFlowUp(0, flow(a));
+      cfg.onFlowUp(1, flow(b));
+      expect(pool.aliveCount()).toBe(2);
+      a.v = false; // slot 0 'disconnected' — supervisor flips per-worker aliveness
+      expect(pool.aliveCount()).toBe(1); // delegated liveness reflects it immediately
+    });
+
+    test('a slot that goes disconnected then failed is not counted live', () => {
+      const { bundle, cfg } = build({ flowCount: 2 });
+      const pool = createSendPool({ flows: bundle.flows });
+      const a = { v: true }, b = { v: true };
+      cfg.onFlowUp(0, flow(a));
+      cfg.onFlowUp(1, flow(b));
+      a.v = false;          // disconnected
+      cfg.onFlowDown(0);    // then terminal/failed
+      expect(pool.aliveCount()).toBe(1);
+      // Even if the supervisor's per-worker flow somehow reported alive again, the
+      // wrapper's own down-override keeps it dead until a fresh onFlowUp replaces it.
+      a.v = true;
+      expect(pool.aliveCount()).toBe(1);
+    });
   });
 
   test('awaitFlow delegates to the supervisor\'s waiter (feeds the send pool)', () => {

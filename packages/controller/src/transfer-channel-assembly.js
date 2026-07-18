@@ -62,7 +62,7 @@ export function assembleSendFlows({
   clearTimer,
 }) {
   const flows = [];               // LIVE array the supervisor mutates (starts empty)
-  const slotEntry = new Map();    // slotIndex -> { alive } (drives the current wrapper's isAlive)
+  const slotWrapper = new Map();  // slotIndex -> the slot's CURRENT wrapper in `flows` (at most one per slot)
   const slotWorker = new Map();   // slotIndex -> the worker handed to the supervisor
   const handed = new Set();       // every worker ever handed out (for close())
   let ctrlChannel = null;         // slot 0's current channel (initial + each re-dial)
@@ -98,18 +98,50 @@ export function assembleSendFlows({
     createWorker: wrappedCreateWorker,
     makeParams,
     onFlowUp: (slotIndex, flow) => {
-      const entry = { alive: true };
-      slotEntry.set(slotIndex, entry);
-      flows.push({
+      // Final-review #1: keep EXACTLY ONE wrapper per slotIndex. The supervisor
+      // re-fires onFlowUp on EVERY 'connected' — including a transient
+      // disconnected->connected ICE-restart blip, which is NOT a re-dial and is
+      // NOT bounded by maxRedialsPerSlot. Appending a fresh wrapper each time
+      // grew `flows` unboundedly on a flappy link AND let pool.aliveCount()
+      // (-> progress.flowsLive) count stale-but-alive duplicates, over-reporting
+      // past flowsTotal ("23/16") — and a slot's later onFlowDown only flips its
+      // CURRENT entry, so a stale duplicate stayed alive:true forever. So RETIRE
+      // the slot's prior wrapper (mark it not-live AND splice it out of `flows`)
+      // before pushing the replacement, so a slot never has more than one entry.
+      const prev = slotWrapper.get(slotIndex);
+      if (prev) {
+        prev.live = false;
+        const i = flows.indexOf(prev);
+        // Safe to splice between dispatches: createSendPool re-filters `flows`
+        // fresh on every dispatch (usableFlows()), never holding an index across
+        // the mutation — this runs synchronously in the supervisor's state
+        // callback, i.e. between the pool's dispatch turns, not during iteration.
+        if (i !== -1) flows.splice(i, 1);
+      }
+      // Liveness DELEGATES to the supervisor's authoritative per-worker aliveness
+      // (`flow.isAlive()` is true only while 'connected'; false on BOTH
+      // 'disconnected' and any terminal state) so a slot that merely goes
+      // 'disconnected' — which the supervisor marks not-alive WITHOUT firing
+      // onFlowDown — immediately stops being counted live, keeping flowsLive ==
+      // slots-currently-connected and always <= flowsTotal. `wrapper.live` is the
+      // local retired/down override (set false on retirement above and by
+      // onFlowDown below), AND-ed with the delegated liveness.
+      const wrapper = {
+        live: true,
         sendBulk: (buf) => flow.sendBulk(buf),
-        isAlive: () => entry.alive,
-      });
+        isAlive: () => wrapper.live && flow.isAlive(),
+      };
+      slotWrapper.set(slotIndex, wrapper);
+      flows.push(wrapper);
     },
     onFlowDown: (slotIndex) => {
-      const entry = slotEntry.get(slotIndex);
-      if (entry) entry.alive = false;
+      const wrapper = slotWrapper.get(slotIndex);
+      if (wrapper) wrapper.live = false;
       // C1: reject any sendBulk parked on the dead slot's channel so the pool's
-      // Promise.race(inflight) settles instead of hanging on a dead flow.
+      // Promise.race(inflight) settles instead of hanging on a dead flow. (The
+      // retirement path above never fails a channel — a transient blip re-ups the
+      // SAME live worker; only a genuine terminal death, which always routes
+      // through onFlowDown, fails the channel. C1 preserved.)
       const w = slotWorker.get(slotIndex);
       if (w) { try { w.channel.fail('failed'); } catch { /* best-effort */ } }
     },
