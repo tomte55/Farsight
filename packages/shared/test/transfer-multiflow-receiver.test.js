@@ -530,4 +530,93 @@ describe('createMultiFlowReceiver', () => {
       vi.useRealTimers();
     }
   });
+
+  // Orchestrator-level wiring for the fd-leak fix: the committed tests for
+  // createReceiveRouter.closeAll() only exercise it in isolation. This pins that
+  // createMultiFlowReceiver actually CALLS it (via closeRouterParts) when a real
+  // receive settles with a genuinely open, non-finalized part in flight — not
+  // just that closeAll() itself works when invoked directly.
+  it('closes an OPEN, non-finalized part on settle (pins the orchestrator-level closeAll() wiring)', async () => {
+    const size = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const openedParts = [];
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: () => {
+        const part = {
+          writeAt: vi.fn(() => Promise.resolve()),
+          close: vi.fn(() => Promise.resolve()),
+          liveDigest: () => null,
+        };
+        openedParts.push(part);
+        return Promise.resolve(part);
+      },
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      reportIntervalMs: 10_000,
+    });
+    const done = rx.start().catch((e) => e.message);
+    toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'leak.bin', size, mtime: 0 }], totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+    expect(out.some((f) => f.t === 'accept')).toBe(true);
+
+    // Deliver only PART of the file's bytes: the router opens the .part on the
+    // first bulk frame, but it can't finalize — no file_end has landed and the
+    // bytes are incomplete — so this part is genuinely OPEN, not finalized.
+    flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array(4).fill(9) }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(openedParts.length).toBe(1);
+    expect(openedParts[0].close).not.toHaveBeenCalled(); // still open at this point
+
+    // Settle via an inbound cancel (the `fail` path).
+    toReceiver(cancelFrame(JOB));
+    const result = await done;
+    expect(result).toBe('canceled');
+
+    expect(openedParts[0].close).toHaveBeenCalledTimes(1);
+  });
+
+  // Fix 2: the settle-path close/persist await must be bounded — a wedged
+  // part.close() (this codebase has a Windows wedged-fd history) must not hang
+  // the whole receive (and its start() caller) forever. A leaked fd on timeout
+  // is strictly better than a hung receive.
+  it('bounds the settle-path close await: a wedged part.close() does not hang start()', async () => {
+    const size = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const fake = fakeClock();
+    let closeCalled = false;
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: () => Promise.resolve({
+        writeAt: () => Promise.resolve(),
+        close: () => { closeCalled = true; return new Promise(() => {}); }, // never resolves
+        liveDigest: () => null,
+      }),
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      reportIntervalMs: 10_000,
+      inactivityMs: 0, // keep the watchdog out of the way of this timing test
+      closeTimeoutMs: 50,
+      setTimer: fake.setTimer, clearTimer: fake.clearTimer,
+    });
+    const done = rx.start().catch((e) => e.message);
+    toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'wedged.bin', size, mtime: 0 }], totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+    expect(out.some((f) => f.t === 'accept')).toBe(true);
+
+    flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array(4).fill(1) }));
+    await new Promise((r) => setTimeout(r, 0)); // part opens, partial (not finalized)
+
+    toReceiver(cancelFrame(JOB));
+    await new Promise((r) => setTimeout(r, 0)); // let the cancel handler run + arm the close-timeout timer
+
+    fake.tickOnce(); // fires the close-timeout timer — the wedged close() itself never resolves
+    const result = await done;
+    expect(result).toBe('canceled');
+    expect(closeCalled).toBe(true); // the close WAS attempted — just not awaited past the bound
+  });
 });

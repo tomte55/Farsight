@@ -827,6 +827,12 @@ export function createMultiFlowReceiver({
   inactivityMs = 25000,
   onEvent = () => {},
   setTimer = setTimeout, clearTimer = clearTimeout,
+  // Bounds the settle-path close/persist await (see boundedSettleClose below):
+  // a wedged part.close() or jobs-store write must not hang the whole receive
+  // forever. Generous default — the close/persist normally lands in well under
+  // a second — but injectable so a test can prove the bound without a real
+  // multi-second wait.
+  closeTimeoutMs = 5000,
 }) {
   let settled = false;
   let resolve, reject;
@@ -873,8 +879,30 @@ export function createMultiFlowReceiver({
     try { await lastPersist; } catch { /* best effort — a failed persist must not block settling */ }
     if (router) await router.closeAll();
   };
-  const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopReporter(); stopWatchdog(); run(closeRouterParts).then(() => resolve(v)); } };
-  const fail = (e) => { if (!settled) { settled = true; watching = false; stopReporter(); stopWatchdog(); run(closeRouterParts).then(() => reject(e)); } };
+  // Bounds the settle-path close/persist await: router.closeAll() (or the
+  // persist it awaits first) can wedge — this codebase has a Windows
+  // wedged-fd history — and without a bound that would hang the whole receive
+  // (and its start() caller) forever. A leaked fd is strictly better than a
+  // hung receive, so once closeTimeoutMs elapses, proceed to settle ANYWAY;
+  // the close keeps running in the background (best effort), it's just no
+  // longer awaited. The normal case (close/persist complete fast) is
+  // unaffected — it still settles only AFTER they land, preserving the
+  // deterministic-close-before-settle discipline that fixed the ENOTEMPTY
+  // bug. Whichever finishes first (the close, or the timeout) clears the
+  // other side, so no dangling timer and no double-settle.
+  function boundedSettleClose() {
+    return new Promise((res) => {
+      let done = false;
+      const timer = setTimer(() => { if (done) return; done = true; res(); }, closeTimeoutMs);
+      if (timer && timer.unref) timer.unref();
+      run(closeRouterParts).then(
+        () => { if (done) return; done = true; clearTimer(timer); res(); },
+        () => { if (done) return; done = true; clearTimer(timer); res(); },
+      );
+    });
+  }
+  const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopReporter(); stopWatchdog(); boundedSettleClose().then(() => resolve(v)); } };
+  const fail = (e) => { if (!settled) { settled = true; watching = false; stopReporter(); stopWatchdog(); boundedSettleClose().then(() => reject(e)); } };
   const run = serializer(fail);
 
   let manifest = null;
