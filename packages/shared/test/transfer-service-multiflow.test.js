@@ -12,10 +12,18 @@ import { join } from 'node:path';
 import { createTransferService } from '../src/transfer-service.js';
 import { createJobsStore } from '../src/jobs-store.js';
 import { createSparsePartFile } from '../src/transfer-io.js';
+import { newJobId } from '../src/transfer-queue.js';
+import { offerFrame, parseCtrlFrame } from '../src/transfer-protocol.js';
 
 const dirs = [];
 async function tmp() { const d = await mkdtemp(join(tmpdir(), 'ftsvc-mf-')); dirs.push(d); return d; }
 afterEach(async () => { await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true }))); });
+
+// Poll until a predicate holds (mirrors transfer-service.test.js:21-24).
+async function until(pred, ms = 2000) {
+  const t0 = Date.now();
+  while (!pred()) { if (Date.now() - t0 > ms) throw new Error('until: timed out'); await new Promise((r) => setTimeout(r, 1)); }
+}
 
 // Same in-memory duplex wiring as Plan 2's transfer-multiflow-service-loopback.test.js:
 // N flows, sender.sendBulk(i) -> receiver.flows round-robin onBulk. sendCtrl is
@@ -171,5 +179,160 @@ describe('transfer-service multi-flow branch (real disk + jobs-store)', () => {
 
     const recvRec = (await recvStore.list()).find((j) => j.jobId === jobId);
     expect(recvRec.jobState).toBe('done');
+  });
+});
+
+// Plan 3 Task 5: deterministic teardown. The controller's real openChannel
+// resolves assembleSendFlows/assembleReceiveGroup's {ctrl, flows, close} shape
+// (Task 4), whose close() Promise.all-closes every one of the N worker
+// windows (pinned directly in packages/controller/test/
+// openchannel-multiflow.test.js and multiflow-teardown.test.js). THIS layer
+// pins the other half of the chain: that transfer-service.js's runSend and
+// runMultiFlowReceive actually CALL that close() on every settle path
+// (completion, cancel, error) for the multi-flow branch — exactly like the
+// existing single-flow "cancel() on the active send closes its channel" /
+// "SP3 P4: cancel aborts a LIVE receive" tests in transfer-service.test.js,
+// just against the {ctrl, flows, close} shape instead of {channel, close}.
+describe('transfer-service multi-flow branch: close() teardown on every settle path', () => {
+  it('SEND completing normally calls close() exactly once', async () => {
+    const srcDir = await tmp();
+    const dstDir = await tmp();
+    const sendStore = createJobsStore({ dir: await tmp() });
+    const recvStore = createJobsStore({ dir: await tmp() });
+
+    const small = new Uint8Array(64).map((_, i) => i);
+    await writeFile(join(srcDir, 's.bin'), small);
+    const entries = [{ fileId: 0, path: 's.bin', size: small.length, mtime: 1 }];
+    const manifest = { entries, totalBytes: small.length, totalFiles: 1 };
+    const sources = new Map([[0, join(srcDir, 's.bin')]]);
+
+    const { senderCtrl, receiverCtrl, senderFlows, receiverFlows } = link({ flowCount: 3 });
+    let sendCloseCount = 0;
+    let recvCloseCount = 0;
+
+    const receiverSvc = createTransferService({
+      store: recvStore, transferDir: dstDir, consent: async () => true,
+      openChannel: async () => ({ ctrl: receiverCtrl, flows: receiverFlows, close: async () => { recvCloseCount += 1; } }),
+      receiveCloseGraceMs: 0,
+    });
+    const senderSvc = createTransferService({
+      store: sendStore, transferDir: srcDir, consent: async () => true,
+      openChannel: async () => ({ ctrl: senderCtrl, flows: senderFlows, close: async () => { sendCloseCount += 1; } }),
+    });
+
+    const jobId = newJobId();
+    const recvPromise = receiverSvc.startReceive({ rendezvous: 'r-mf-close-1' });
+    await tick(10);
+    const sendResult = await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'device-close-1', flowCount: 3 } });
+    const recvResult = await recvPromise;
+
+    expect(sendResult.ok).toBe(true);
+    expect(recvResult.ok).toBe(true);
+    // Neither side's close() is skipped, and neither fires more than once on a
+    // clean completion (a stray extra call would mean something re-tears-down
+    // an already-closed bundle for no reason; a missing call is the actual
+    // app-alive leak this whole task guards against).
+    expect(sendCloseCount).toBe(1);
+    expect(recvCloseCount).toBe(1);
+  });
+
+  it('SEND canceled mid-flight closes the multi-flow channel (all N workers, via close())', async () => {
+    const sendStore = createJobsStore({ dir: await tmp() });
+    const srcDir = await tmp();
+    await writeFile(join(srcDir, 'x.bin'), new Uint8Array(5000).fill(1));
+    const entries = [{ fileId: 0, path: 'x.bin', size: 5000, mtime: 1 }];
+    const manifest = { entries, totalBytes: 5000, totalFiles: 1 };
+    const sources = new Map([[0, join(srcDir, 'x.bin')]]);
+
+    let opened = false;
+    let closeCount = 0;
+    // A dead multi-flow channel nobody drives further (no receiver ever ACKs
+    // the OFFER) — mirrors transfer-service.test.js's single-flow "cancel() on
+    // the active send closes its channel" fixture, but with the {ctrl, flows}
+    // shape the multi-flow branch actually uses.
+    const svc = createTransferService({
+      store: sendStore, transferDir: await tmp(), consent: async () => true,
+      openChannel: async () => {
+        opened = true;
+        return {
+          ctrl: { sendCtrl() {}, onCtrl() {} },
+          flows: [
+            { isAlive: () => true, sendBulk: async () => {} },
+            { isAlive: () => true, sendBulk: async () => {} },
+          ],
+          close: async () => { closeCount += 1; },
+        };
+      },
+    });
+
+    const jobId = newJobId();
+    const p = svc.startSend({ jobId, manifest, sources, target: { id: 'device-close-2', flowCount: 2 } });
+    await until(() => opened);
+
+    const c = await svc.cancel(jobId);
+    expect(c.ok).toBe(true);
+    // close() was reached — in the real app this is assembleSendFlows' close(),
+    // which Promise.all-closes every one of the N worker windows (Task 4).
+    expect(closeCount).toBeGreaterThanOrEqual(1);
+
+    const result = await p;
+    expect(result.canceled).toBe(true);
+    const rec = (await sendStore.list()).find((j) => j.jobId === jobId);
+    expect(rec.jobState).toBe('canceled');
+  });
+
+  it('RECEIVE canceled mid-flight (multi-flow shape) really stops the receive and closes the group bundle', async () => {
+    const dest = await tmp();
+    const recvStore = createJobsStore({ dir: await tmp() });
+    let ctrlCb = null;
+    let closeCount = 0;
+    const sentToSender = [];
+    const ctrl = {
+      sendCtrl(s) { sentToSender.push(parseCtrlFrame(s)); },
+      onCtrl(cb) { ctrlCb = cb; },
+    };
+    // Two flows that never deliver any bulk data — the receive stays "active"
+    // (awaiting file bytes) until canceled, exactly like the single-flow
+    // "SP3 P4: cancel aborts a LIVE receive" fixture, but exercising
+    // runMultiFlowReceive's {ctrl, flows, close} branch instead.
+    const flows = [{ onBulk() {} }, { onBulk() {} }];
+    const svc = createTransferService({
+      store: recvStore, transferDir: dest, consent: async () => true,
+      openChannel: async () => ({ ctrl, flows, close: async () => { closeCount += 1; } }),
+      receiveCloseGraceMs: 0,
+    });
+
+    const jobId = newJobId();
+    const entries = [{ fileId: 0, path: 'y.bin', size: 16, mtime: 1 }];
+    // createMultiFlowReceiver's abort() REJECTS (unlike the single-flow
+    // receiver's resolve-with-'canceled') — mirror transfer-service.test.js's
+    // own SP3 P4 fixture, which catches it down to the reason string.
+    const recvPromise = svc.startReceive({ rendezvous: { sessionId: 'r-mf-close-3' } }).catch((e) => e.message);
+    await until(() => ctrlCb !== null);
+    ctrlCb(offerFrame({ jobId, entries, totalBytes: 16, totalFiles: 1 }));
+    await until(() => sentToSender.some((f) => f.t === 'accept'));
+
+    expect(await svc.cancel(jobId)).toEqual({ ok: true });
+    const recvResult = await recvPromise;
+    expect(recvResult).toBe('canceled');
+    expect(sentToSender.some((f) => f.t === 'cancel')).toBe(true);
+    // The group bundle's close() — which in the real app closes every one of
+    // the group's K opened flow handles (assembleReceiveGroup, Task 4/5) — was
+    // reached on this settle path, not skipped. This is the actual teardown
+    // invariant Task 5 is about; the jobs-store record's terminal state is a
+    // separate concern (see the note below) and isn't asserted here.
+    expect(closeCount).toBeGreaterThanOrEqual(1);
+    // NOTE (discovered while writing this test, out of scope for Task 5):
+    // unlike single-flow's createReceiver, which persists an 'active' record
+    // immediately on accept (transfer-orchestrator.js's saveRecord('active')),
+    // createMultiFlowReceiver only persists via the periodic persistRanges tick
+    // (default reportIntervalMs=3000) — so canceling a multi-flow receive THIS
+    // early (before the first tick) leaves no jobs-store record to flip to
+    // 'canceled' at all (cancel()'s store.load(jobId) finds nothing). The
+    // receive still stops correctly and every worker still gets torn down
+    // (asserted above) — only the Transfers-list bookkeeping for a
+    // near-instant cancel is affected. Flagged for a follow-up task, not fixed
+    // here (touches transfer-orchestrator.js's multi-flow beginReceive, outside
+    // this task's teardown scope).
   });
 });
