@@ -171,6 +171,10 @@ export function createMultiFlowSender({
   completionTimeoutMs = 120000,
   reconcileWaitMs = 3000,
   setTimer = setTimeout, clearTimer = clearTimeout,
+  // Per-chunk progress would flood IPC; throttle to a human-legible cadence,
+  // same discipline as single-flow createSender's emitProgress. Clock injected
+  // for tests.
+  progressIntervalMs = 250, now = () => Date.now(),
 }) {
   if (typeof readerFor !== 'function') throw new Error('readerFor is required');
 
@@ -201,6 +205,43 @@ export function createMultiFlowSender({
   // got read/hashed at all, so its file_end never went out and the receiver
   // could never finalize it).
   const fileHash = new Map();
+
+  // Throttled AGGREGATE progress from the coverage tracker (the sender's
+  // authoritative record of what the RECEIVER has confirmed) — mirrors
+  // single-flow createSender's emitProgress. Computed whenever a range_report
+  // is applied (tracker.applyReport), so it always reflects real, confirmed
+  // delivery, never merely-queued bytes.
+  let lastProgressAt = 0;
+  function emitProgress() {
+    const t = now();
+    if (t - lastProgressAt < progressIntervalMs) return;
+    lastProgressAt = t;
+    let sent = 0, filesSent = 0;
+    for (const file of manifest.entries) {
+      sent += Math.min(tracker.coveredFor(file.fileId).coveredBytes(), file.size);
+      if (tracker.coveredFor(file.fileId).isComplete(file.size)) filesSent += 1;
+    }
+    onEvent({
+      type: 'progress',
+      progress: {
+        sent, total: totalBytes, fraction: totalBytes > 0 ? sent / totalBytes : 1,
+        filesSent, filesTotal: totalFiles,
+      },
+    });
+  }
+
+  // Emits 'file-sent' the moment the tracker reports a file fully covered
+  // (confirmed by the RECEIVER, not merely queued) — each fileId reported once.
+  const sentFiles = new Set();
+  function checkFileSent() {
+    for (const file of manifest.entries) {
+      if (sentFiles.has(file.fileId)) continue;
+      if (tracker.coveredFor(file.fileId).isComplete(file.size)) {
+        sentFiles.add(file.fileId);
+        onEvent({ type: 'file-sent', fileId: file.fileId });
+      }
+    }
+  }
 
   // Resolves the next time a range_report updates the tracker, or after `ms` —
   // a lost/delayed final report must not stall the driver forever, so a timeout
@@ -326,7 +367,13 @@ export function createMultiFlowSender({
       fail(new Error('canceled'));
       return;
     }
-    if (f.t === 'range_report') { tracker.applyReport(f.files); if (pendingWaiterResolve) pendingWaiterResolve(); return; }
+    if (f.t === 'range_report') {
+      tracker.applyReport(f.files);
+      emitProgress();
+      checkFileSent();
+      if (pendingWaiterResolve) pendingWaiterResolve();
+      return;
+    }
     // pump() is intentionally NOT awaited here — same reasoning as createSender's
     // pump: it must run outside the serializer chain so a later `cancel` can
     // still get processed (and observed by the `canceled` flag) while pump is
@@ -335,6 +382,8 @@ export function createMultiFlowSender({
       pumped = true;
       tracker.applyReport(f.ranges || []);
       onEvent({ type: 'accepted' });
+      emitProgress();
+      checkFileSent();
       pump().catch(fail);
     }
   }));
@@ -833,6 +882,9 @@ export function createMultiFlowReceiver({
   // a second — but injectable so a test can prove the bound without a real
   // multi-second wait.
   closeTimeoutMs = 5000,
+  // Per-chunk progress would flood IPC (mirrors single-flow createReceiver's
+  // emitProgress); throttle to a human-legible cadence. Clock injected for tests.
+  progressIntervalMs = 250, now = () => Date.now(),
 }) {
   let settled = false;
   let resolve, reject;
@@ -919,6 +971,32 @@ export function createMultiFlowReceiver({
   function findEntry(fileId) { return manifest.entries.find((e) => e.fileId === fileId); }
   function pathOf(fileId) { const e = findEntry(fileId); return e ? e.path : undefined; }
 
+  // Throttled AGGREGATE progress — the per-file {fileId, coveredBytes, size} the
+  // router's onProgress used to pass straight through was the wrong shape for the
+  // UI (which wants one number for the whole job) AND unthrottled (a flood over
+  // IPC). Computed from the manifest + router's per-file coverage (a finalized
+  // file counts as fully covered via coveredBytesFor — see its doc in
+  // transfer-receive-router.js). Mirrors single-flow createReceiver's emitProgress.
+  let lastProgressAt = 0;
+  function emitProgress() {
+    if (!router || !manifest) return;
+    const t = now();
+    if (t - lastProgressAt < progressIntervalMs) return;
+    lastProgressAt = t;
+    let received = 0, total = 0;
+    for (const e of manifest.entries) {
+      total += e.size;
+      received += router.coveredBytesFor(e.fileId);
+    }
+    onEvent({
+      type: 'progress',
+      progress: {
+        received, total, fraction: total > 0 ? received / total : 1,
+        filesDone: finalizedFiles.size, filesTotal: manifest.entries.length,
+      },
+    });
+  }
+
   // router.rangesFor() OMITS finalized files entirely (transfer-receive-router.js)
   // — once a file finalizes it simply vanishes from every subsequent report. The
   // paired createMultiFlowSender's coverage tracker only REPLACES coverage for
@@ -991,6 +1069,10 @@ export function createMultiFlowReceiver({
       resolveOnce({ jobId, ok: false });
       return;
     }
+    // The receiver now has the manifest and has committed to receiving. Surface
+    // it so the UI can label the transfer (file/folder name + count) and leave
+    // "Waiting for approval" — mirrors single-flow createReceiver's `accepted`.
+    onEvent({ type: 'accepted', manifest: m });
     // Memoize each file's open partFile by fileId: the router closes its own
     // `f.part` handle before calling verifyAndFinalize (so it can't hand us the
     // handle directly), but the REAL finalizeReceivedFile({ partFile, ... }) needs
@@ -1015,7 +1097,7 @@ export function createMultiFlowReceiver({
         onEvent({ type: fileOk ? 'file-done' : 'file-failed', fileId });
         maybeComplete();
       },
-      onProgress: (p) => onEvent({ type: 'progress', ...p }),
+      onProgress: () => emitProgress(),
     });
     for (const flow of flows) flow.onBulk((buf) => run(() => { pokeWatchdog(); return router.onBulkFrame(buf); }));
     if (settled) return;

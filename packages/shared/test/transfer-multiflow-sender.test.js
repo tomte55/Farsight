@@ -86,6 +86,72 @@ describe('createMultiFlowSender', () => {
     expect(Buffer.from(rig.dest.get(1)).equals(Buffer.from(B))).toBe(true);
   });
 
+  // UI-event-wiring gap: the sender drove real bytes onto the wire but never
+  // told the app UI — no 'progress', no 'file-sent' — so the sender's progress
+  // bar never moved even though the receiver was confirming coverage the whole
+  // time. Computed from the tracker (the sender's authoritative record of what
+  // the RECEIVER has confirmed), so it only reflects real, confirmed delivery.
+  it('applying a range_report emits progress with the aggregate shape {sent,total,fraction,filesSent,filesTotal}', async () => {
+    const A = new Uint8Array(4096 * 2).map((_, i) => (i * 3) & 0xff);
+    const sources = new Map([[0, A]]);
+    const manifest = { entries: [{ fileId: 0, size: A.length }] };
+    const rig = wire({ manifest, sources, flowCount: 1 });
+    const events = [];
+    const sender = createMultiFlowSender({
+      ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
+      onEvent: (ev) => events.push(ev),
+      // Unthrottled here — this test is about the SHAPE + eventual full-coverage
+      // value, not the throttle itself (see the dedicated throttle test below).
+      progressIntervalMs: 0,
+    });
+    const r = await sender.start();
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    const progressEvents = events.filter((e) => e.type === 'progress');
+    expect(progressEvents.length).toBeGreaterThan(0);
+    for (const e of progressEvents) {
+      expect(Object.keys(e.progress).sort()).toEqual(['filesSent', 'filesTotal', 'fraction', 'sent', 'total'].sort());
+    }
+    const last = progressEvents[progressEvents.length - 1];
+    expect(last.progress).toEqual({ sent: A.length, total: A.length, fraction: 1, filesSent: 1, filesTotal: 1 });
+  });
+
+  it('throttles progress emission via progressIntervalMs', async () => {
+    const A = new Uint8Array(4096 * 2).map((_, i) => (i * 3) & 0xff);
+    const sources = new Map([[0, A]]);
+    const manifest = { entries: [{ fileId: 0, size: A.length }] };
+    const rig = wire({ manifest, sources, flowCount: 1 });
+    const events = [];
+    const sender = createMultiFlowSender({
+      ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
+      onEvent: (ev) => events.push(ev),
+      progressIntervalMs: 100_000, now: () => 0, // a clock that never advances past the interval
+    });
+    const r = await sender.start();
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    expect(events.filter((e) => e.type === 'progress').length).toBeLessThanOrEqual(1);
+  });
+
+  it('emits file-sent exactly once per file when the tracker reports it fully covered', async () => {
+    const A = new Uint8Array(4096).map((_, i) => (i * 5) & 0xff);
+    const B = new Uint8Array(2048).map((_, i) => (i * 9) & 0xff);
+    const sources = new Map([[0, A], [1, B]]);
+    const manifest = { entries: [{ fileId: 0, size: A.length }, { fileId: 1, size: B.length }] };
+    const rig = wire({ manifest, sources, flowCount: 2 });
+    const events = [];
+    const sender = createMultiFlowSender({
+      ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 2,
+      groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
+      onEvent: (ev) => events.push(ev),
+    });
+    const r = await sender.start();
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    const fileSentEvents = events.filter((e) => e.type === 'file-sent');
+    expect(fileSentEvents.map((e) => e.fileId).sort()).toEqual([0, 1]);
+    expect(fileSentEvents.length).toBe(2); // exactly once each, not re-emitted on later reports
+  });
+
   it('reconciles: a dropped chunk in pass 1 is re-sent until coverage completes', async () => {
     const A = new Uint8Array(4096 * 4).map((_, i) => (i * 11) & 0xff);
     const sources = new Map([[0, A]]);

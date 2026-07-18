@@ -496,9 +496,10 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // construct the real receiver with that jobId, then flush the buffer into it.
   // While we're already tapping every frame, opportunistically reassemble the
   // manifest too (from offer/offer_begin/offer_entries/offer_end) purely for our
-  // OWN bookkeeping -- createMultiFlowReceiver never surfaces its manifest via
-  // onEvent (unlike single-flow's 'accepted' event), but the jobs-store record
-  // needs it.
+  // OWN bookkeeping -- this reassembly runs BEFORE the real receiver even
+  // exists (jobId isn't known yet), so it can't wait for createMultiFlowReceiver's
+  // own 'accepted' event (which does now carry the manifest, mirroring
+  // single-flow's) -- the jobs-store record needs the manifest sooner than that.
   async function runMultiFlowReceive({ ctrl, flows, close, peerAuth }) {
     let currentJobId = null;
     let currentManifest = null;

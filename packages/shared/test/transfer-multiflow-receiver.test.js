@@ -88,6 +88,115 @@ describe('createMultiFlowReceiver', () => {
     expect(openedParts[0].closed).toBe(true);
   });
 
+  // UI-event-wiring gap: the receiver drove real bytes onto disk but never told
+  // the app UI the transfer had moved off "Waiting for approval" (no 'accepted')
+  // nor that any bytes had arrived (no aggregate 'progress') — a WORKING
+  // transfer looked frozen. Mirrors single-flow createReceiver's onEvent({type:
+  // 'accepted', manifest: m}), emitted right after consent, before the accept
+  // frame goes out.
+  it('emits an accepted event carrying the manifest right after consent (mirrors single-flow)', async () => {
+    const size = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const flows = [{ onBulk: () => {} }];
+    const events = [];
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null }),
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      onEvent: (ev) => events.push(ev),
+      reportIntervalMs: 10_000,
+    });
+    rx.start().catch(() => {});
+    const entries = [{ fileId: 0, path: 'm.bin', size, mtime: 0 }];
+    toReceiver(offerFrame({ jobId: JOB, entries, totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+
+    expect(out.some((f) => f.t === 'accept')).toBe(true);
+    const accepted = events.find((e) => e.type === 'accepted');
+    expect(accepted).toBeTruthy();
+    expect(accepted.manifest).toBeTruthy();
+    expect(accepted.manifest.entries.map((e) => e.fileId)).toEqual([0]);
+  });
+
+  // Aggregate progress shape + movement: NOT the per-file {fileId,coveredBytes,
+  // size} the router's own onProgress used to pass straight through (wrong
+  // shape for the UI, which wants ONE number for the whole job).
+  it('emits throttled aggregate progress with shape {received,total,fraction,filesDone,filesTotal} as bytes arrive', async () => {
+    const size = 4000;
+    const { ctrl, toReceiver } = ctrlPair();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const events = [];
+    let clock = 0;
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: () => { const b = new Uint8Array(size); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      onEvent: (ev) => events.push(ev),
+      reportIntervalMs: 10_000,
+      progressIntervalMs: 100, now: () => clock,
+    });
+    const done = rx.start();
+    const entries = [{ fileId: 0, path: 'p.bin', size, mtime: 0 }];
+    toReceiver(offerFrame({ jobId: JOB, entries, totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+
+    // Four 1000-byte chunks, each a throttle-interval apart on the injected clock.
+    for (let i = 0; i < 4; i += 1) {
+      clock += 100;
+      flowCbs[0](encodeBulkFrame({ fileId: 0, offset: i * 1000, length: 1000, payload: new Uint8Array(1000).fill(i + 1) }));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const progressEvents = events.filter((e) => e.type === 'progress');
+    expect(progressEvents.length).toBeGreaterThan(1); // movement, not one snapshot
+    for (const e of progressEvents) {
+      expect(Object.keys(e.progress).sort()).toEqual(['filesDone', 'filesTotal', 'fraction', 'received', 'total'].sort());
+      expect(e.progress.total).toBe(size);
+      expect(e.progress.filesTotal).toBe(1);
+    }
+    const receivedVals = progressEvents.map((e) => e.progress.received);
+    expect(receivedVals).toEqual([...receivedVals].sort((a, b) => a - b)); // monotonic
+
+    toReceiver(fileEndFrame({ jobId: JOB, fileId: 0, hash: 'H' }));
+    toReceiver(jobDoneFrame({ jobId: JOB }));
+    const r = await done;
+    expect(r).toEqual({ jobId: JOB, ok: true });
+  });
+
+  it('throttles aggregate progress emission via progressIntervalMs (a chunk-per-frame flood would otherwise reach IPC)', async () => {
+    const size = 16;
+    const { ctrl, toReceiver } = ctrlPair();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const events = [];
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: () => { const b = new Uint8Array(size); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      onEvent: (ev) => events.push(ev),
+      reportIntervalMs: 10_000,
+      progressIntervalMs: 100_000, now: () => 0, // a clock that never advances past the interval
+    });
+    const done = rx.start();
+    const entries = [{ fileId: 0, path: 'q.bin', size, mtime: 0 }];
+    toReceiver(offerFrame({ jobId: JOB, entries, totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+
+    for (let i = 0; i < 4; i += 1) {
+      flowCbs[0](encodeBulkFrame({ fileId: 0, offset: i * 4, length: 4, payload: new Uint8Array(4).fill(i + 1) }));
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect(events.filter((e) => e.type === 'progress').length).toBeLessThanOrEqual(1);
+
+    toReceiver(fileEndFrame({ jobId: JOB, fileId: 0, hash: 'H' }));
+    toReceiver(jobDoneFrame({ jobId: JOB }));
+    const r = await done;
+    expect(r).toEqual({ jobId: JOB, ok: true });
+  });
+
   it('declines when consent says no', async () => {
     const { ctrl, toReceiver, out } = ctrlPair();
     const rx = createMultiFlowReceiver({ ctrl, flows: [], jobId: JOB, consent: async () => false, openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve() }), verifyAndFinalize: () => Promise.resolve({ ok: true }) });

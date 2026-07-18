@@ -63,6 +63,14 @@ export function createReceiveRouter({ manifest, initialRanges = {}, openPart, ve
       for (const [fileId, f] of files) if (!f.finalized) out.push({ fileId, ivals: f.ranges.toJSON() });
       return out;
     },
+    // Covered-bytes for ONE file, finalized or not — lets a caller (the
+    // multi-flow receiver driver) build an aggregate progress figure without
+    // reconstructing it from rangesFor() (which omits finalized files entirely).
+    coveredBytesFor(fileId) {
+      const f = files.get(fileId);
+      if (!f) return 0;
+      return f.finalized ? f.size : f.ranges.coveredBytes();
+    },
     isComplete() {
       for (const f of files.values()) if (!f.finalized) return false;
       return true;
