@@ -47,6 +47,7 @@
     "./transfer-resume": "./src/transfer-resume.js",
     "./transfer-resume-watcher": "./src/transfer-resume-watcher.js",
     "./transfer-report-batch": "./src/transfer-report-batch.js",
+    "./transfer-group-rendezvous": "./src/transfer-group-rendezvous.js",
     "./update-policy": "./src/update-policy.js",
     "./updater": "./src/updater.js",
     "./log": "./src/log.js",
