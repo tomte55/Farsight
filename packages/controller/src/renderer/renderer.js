@@ -1428,6 +1428,10 @@ function jobRow(j) {
   detailAgg.className = 'xfer-detail-agg';
   const detailFailedWrap = document.createElement('div');
   detailFailedWrap.className = 'xfer-detail-failed';
+  // Defensive: don't rely on the .xfer-detail parent starting hidden — set this
+  // panel's own hidden state explicitly at creation too (renderJobDetail is the
+  // only other place that touches it, and only reactively once populated).
+  detailFailedWrap.hidden = true;
   const detailFailedLabel = document.createElement('div');
   detailFailedLabel.className = 'xfer-detail-label';
   detailFailedLabel.textContent = 'Failed files';
