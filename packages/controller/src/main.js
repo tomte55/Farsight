@@ -16,7 +16,7 @@ import { listDisplays } from './capture.js';
 import { generateSessionPassword } from '@farsight/shared/password';
 import { windowAttentionPlan } from './window-attention.js';
 import { createAppLogger } from '@farsight/shared/app-log';
-import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl } from '@farsight/shared/config';
+import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl, resolveParallelConnections } from '@farsight/shared/config';
 import { createUpdater } from '@farsight/shared/updater';
 import { shouldConverge } from '@farsight/shared/update-policy';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from './account.js';
@@ -421,14 +421,22 @@ ipcMain.handle('transfer:send', async (_e, input) => {
     const { entries, sources } = await walkSource(paths.map((p) => ({ path: p })));
     const manifest = buildManifest(entries);
     const jobId = newJobId();
-    log?.child('transfer').info(`send start job=${jobId} target=${target.id} files=${manifest.totalFiles} bytes=${manifest.totalBytes}`);
+    // Plan 3 Task 6: the configured "Parallel connections" setting drives this
+    // send's flowCount, unless the caller already asked for a specific one
+    // (no caller does today, but a future per-send override should win over
+    // the ambient setting — same precedence resolveFlowCount already gives
+    // target.flowCount over the service-level default in transfer-service.js).
+    const flowCount = Number.isInteger(target.flowCount) && target.flowCount > 0
+      ? target.flowCount : parallelConnections();
+    const sendTarget = { ...target, flowCount };
+    log?.child('transfer').info(`send start job=${jobId} target=${target.id} files=${manifest.totalFiles} bytes=${manifest.totalBytes} flowCount=${flowCount}`);
     // Fire-and-forget: startSend()'s promise only resolves once the WHOLE
     // transfer finishes, so awaiting it here would block the renderer's
     // transferSend() call for the entire transfer. Progress is instead
     // delivered incrementally via the 'transfer:event' push above.
     // `sourceRoots: paths` is persisted so an interrupted own-fleet send can be
     // re-walked and auto-resumed after an app restart (SP3 Phase 4).
-    getTransferService().startSend({ jobId, manifest, sources, target, sourceRoots: paths })
+    getTransferService().startSend({ jobId, manifest, sources, target: sendTarget, sourceRoots: paths })
       .catch((err) => log?.child('transfer').warn(`send failed: ${err?.message || err}`));
     return { jobId, manifest };
   } catch (err) {
@@ -540,6 +548,24 @@ function writeControlAllowed(allowed) {
 }
 ipcMain.handle('control-allowed:get', () => readControlAllowed());
 ipcMain.handle('control-allowed:set', (_e, v) => writeControlAllowed(!!v));
+
+// "Parallel connections" (Plan 3 Task 6) — how many parallel WebRTC flows a
+// send opens, plumbed to the send's `flowCount` (see the transfer:send handler
+// below). Default 8, clamped 1-16 by resolveParallelConnections (shared with
+// config.js's parse/serialize so the clamp/default logic lives in ONE place).
+// `flowCount === 1` reproduces the pre-Task-3 single-flow path exactly — the
+// multi-flow branch in getTransferService()'s openChannel above only triggers
+// when flowCount > 1.
+function parallelConnections() {
+  return resolveParallelConnections(readStoredConfig().parallelConnections);
+}
+ipcMain.handle('parallel-connections:get', () => parallelConnections());
+ipcMain.handle('parallel-connections:set', (_e, v) => {
+  const n = resolveParallelConnections(v);
+  // Merge onto the existing stored config — see the set-signaling-url note above.
+  writeFileSync(configFilePath(), serializeConfig({ ...readStoredConfig(), parallelConnections: n }), { encoding: 'utf8', mode: 0o600 });
+  return { ok: true, parallelConnections: n };
+});
 
 // Provide the primary screen source id to the renderer on request.
 ipcMain.handle('get-screen-source', async () => {

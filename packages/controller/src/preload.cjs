@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   // receiver-side (enforcement wiring lands in Task 6/7).
   getControlAllowed: () => ipcRenderer.invoke('control-allowed:get'),
   setControlAllowed: (v) => ipcRenderer.invoke('control-allowed:set', v),
+  // Parallel connections (Settings): configurable flowCount for a send
+  // (default 8, clamped 1-16 — see resolveParallelConnections in @farsight/shared/config).
+  getParallelConnections: () => ipcRenderer.invoke('parallel-connections:get'),
+  setParallelConnections: (n) => ipcRenderer.invoke('parallel-connections:set', n),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   setSessionActive: (active) => ipcRenderer.send('updater:set-session-active', active),

@@ -197,6 +197,12 @@
             <button id="menu-change-received-dir" class="btn btn-ghost">Change folder…</button>
             <button id="menu-reset-received-dir" class="btn btn-ghost">Reset to default</button>
           </div>
+          <div class="lbl">Parallel connections</div>
+          <div class="statusline u-tight">How many parallel connections a send uses (1–16). 1 uses the single-connection path.</div>
+          <div class="u-row settings-actions">
+            <input id="settings-parallel-connections" class="input u-num" type="number" min="1" max="16" step="1" />
+            <button id="menu-save-parallel-connections" class="btn btn-ghost">Save</button>
+          </div>
           <div class="u-row settings-actions">
             <button id="menu-open-logs" class="btn btn-ghost">Open logs folder</button>
             <button id="menu-send-diagnostics" class="btn btn-ghost" hidden>Send diagnostics to support…</button>

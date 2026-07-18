@@ -14,6 +14,10 @@
 #fleet-refresh, #acct-signout, #contacts-refresh, #transfers-refresh { padding: 6px 12px; }
 .settings-actions { margin-top: 10px; }
 #settings-signaling { word-break: break-all; }
+/* Parallel-connections setting: a short numeric field (1-16), not a full-width
+   .input — sits inline with its Save button in the same .u-row. */
+.u-num { width: 72px; flex: none; margin-bottom: 0; }
+#menu-save-parallel-connections { margin-bottom: 11px; }
 
 /* Home page: this-computer credentials card + the "Allow this computer to be
    controlled" toggle (unification step 3, task 6). */

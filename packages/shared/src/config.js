@@ -3,6 +3,32 @@
 // the single configurable knob; TURN follows it at runtime.
 import { assertSecureSignalingUrl } from './signaling-url.js';
 
+// parallelConnections: the "Parallel connections" send setting (Plan 3 Task 6)
+// — how many parallel WebRTC flows a send opens; plumbed to the sender's
+// `flowCount` (main.js). Unlike signalingUrl/controlAllowed/receivedFilesDir
+// (which are DROPPED when invalid, leaving the reader to apply its own
+// default), a bad parallelConnections value is instead CLAMPED/DEFAULTED right
+// here — a send always needs a concrete flowCount to proceed, so there's no
+// useful "absent" state to preserve once the key is present at all.
+export const DEFAULT_PARALLEL_CONNECTIONS = 8;
+const MIN_PARALLEL_CONNECTIONS = 1;
+const MAX_PARALLEL_CONNECTIONS = 16;
+
+// Effective parallel-connections count for ANY input: a real number or a
+// non-blank numeric string coerces and clamps into [1,16]; anything else
+// (absent, null, boolean, object, blank/non-numeric string, NaN) falls back to
+// the default. This is the single place the clamp/default logic lives —
+// parseConfig below and main.js's read-site both call it, mirroring how
+// resolveSignalingUrl is the one place signalingUrl's env/config/null
+// precedence lives.
+export function resolveParallelConnections(value) {
+  const n = typeof value === 'number' ? value
+    : (typeof value === 'string' && value.trim() !== '') ? Number(value)
+      : NaN;
+  if (!Number.isFinite(n)) return DEFAULT_PARALLEL_CONNECTIONS;
+  return Math.min(MAX_PARALLEL_CONNECTIONS, Math.max(MIN_PARALLEL_CONNECTIONS, Math.round(n)));
+}
+
 // Tolerant parse: bad/missing/corrupt input yields an empty config, never throws.
 export function parseConfig(text) {
   try {
@@ -22,6 +48,14 @@ export function parseConfig(text) {
       if (typeof obj.receivedFilesDir === 'string' && obj.receivedFilesDir.trim() !== '') {
         out.receivedFilesDir = obj.receivedFilesDir;
       }
+      // parallelConnections: only included when the KEY is present at all (an
+      // absent key stays absent, same as the other fields above — main.js's
+      // read-site applies the default for that case via resolveParallelConnections
+      // too), but a PRESENT-and-invalid value resolves to the default instead
+      // of being dropped — see resolveParallelConnections's doc comment.
+      if (Object.prototype.hasOwnProperty.call(obj, 'parallelConnections')) {
+        out.parallelConnections = resolveParallelConnections(obj.parallelConnections);
+      }
       return out;
     }
   } catch { /* fall through to empty */ }
@@ -39,6 +73,13 @@ export function serializeConfig(cfg) {
   }
   if (cfg && typeof cfg.receivedFilesDir === 'string' && cfg.receivedFilesDir.trim() !== '') {
     out.receivedFilesDir = cfg.receivedFilesDir.trim();
+  }
+  // parallelConnections: serialize whenever the key is set at all (including a
+  // value equal to the default — matches receivedFilesDir's "no special-casing
+  // the default value" style), always through resolveParallelConnections so an
+  // out-of-range/invalid in-memory value can never be persisted verbatim.
+  if (cfg && cfg.parallelConnections !== undefined) {
+    out.parallelConnections = resolveParallelConnections(cfg.parallelConnections);
   }
   return JSON.stringify(out, null, 2);
 }

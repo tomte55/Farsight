@@ -657,6 +657,15 @@ document.getElementById('menu-reset-received-dir').addEventListener('click', asy
   await window.farsightIpc.resetReceivedDir();
   refreshSettingsView();
 });
+const parallelConnectionsInput = document.getElementById('settings-parallel-connections');
+document.getElementById('menu-save-parallel-connections').addEventListener('click', async () => {
+  // Clamp/validate in the UI too (main.js's parallel-connections:set handler
+  // clamps again via resolveParallelConnections, so a bad value here is never
+  // actually persisted out of range — this just keeps the field itself sane).
+  const n = Math.min(16, Math.max(1, Math.round(Number(parallelConnectionsInput.value)) || 8));
+  await window.farsightIpc.setParallelConnections(n);
+  refreshSettingsView();
+});
 
 // Cache our own version for the SP1 version-aware handshake (sent on CONNECT and
 // compared against the host's relayed version), and feed it to the status bar
@@ -1673,6 +1682,9 @@ function refreshSettingsView() {
   document.getElementById('settings-signaling').textContent = signalingUrl || 'not configured';
   window.farsightIpc.getReceivedDir().then((p) => {
     document.getElementById('settings-received-dir').textContent = p || '';
+  });
+  window.farsightIpc.getParallelConnections().then((n) => {
+    parallelConnectionsInput.value = n;
   });
 }
 
