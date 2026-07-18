@@ -278,6 +278,65 @@ describe('transfer-flow-supervisor', () => {
     await expect(sup.awaitFlow()).rejects.toThrow();
   });
 
+  // CRITICAL regression: the waiter must NOT reject while ANY slot is still
+  // mid-recovery. With flowCount>=2, one slot can fully exhaust and go terminal
+  // while ANOTHER slot's final-attempt re-dial timer is still pending (or its
+  // final worker is still connecting) — that other flow may yet carry the whole
+  // transfer, so `all_slots_exhausted` fired here would abort a recoverable
+  // transfer (the exact Starlink scenario). Timeline (flowCount=2, max=1,
+  // backoff=[500], stagger=250): slot 0's FINAL worker fails at t=500 while
+  // slot 1's single allowed re-dial timer is still pending (fires t=750).
+  it('does not reject the waiter while another slot is still mid-recovery; resolves when it connects', async () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 2, backoff: [500], maxRedialsPerSlot: 1 });
+    const sup = createFlowSupervisor(args);
+    sup.start();
+
+    const p = sup.awaitFlow();
+    let rejected = false;
+    let resolved = false;
+    p.then(() => { resolved = true; }, () => { rejected = true; });
+
+    // t=0: slot 0 dialed. Fail it -> schedules its ONE allowed re-dial at t=500.
+    createWorker.latestFor(0).emit('failed');
+    clock.advance(250); // t=250: slot 1's staggered initial dial fires
+    // Fail slot 1's initial worker -> schedules its ONE allowed re-dial at t=750.
+    createWorker.latestFor(1).emit('failed');
+
+    clock.advance(250); // t=500: slot 0's FINAL re-dial fires
+    createWorker.latestFor(0).emit('failed'); // slot 0 now permanently dead...
+    await Promise.resolve();
+    // ...but slot 1's final re-dial timer is still pending — MUST NOT reject.
+    expect(rejected).toBe(false);
+    expect(resolved).toBe(false);
+
+    clock.advance(250); // t=750: slot 1's FINAL re-dial fires
+    createWorker.latestFor(1).emit('connected'); // the flow that carries the transfer
+    await expect(p).resolves.toBeUndefined();
+    expect(sup.liveCount()).toBe(1);
+  });
+
+  it('rejects all_slots_exhausted only once EVERY slot is permanently dead (multi-slot)', async () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 2, backoff: [500], maxRedialsPerSlot: 1 });
+    const sup = createFlowSupervisor(args);
+    sup.start();
+
+    const p = sup.awaitFlow();
+    createWorker.latestFor(0).emit('failed');    // slot 0 -> re-dial @500
+    clock.advance(250);                          // slot 1 dialed
+    createWorker.latestFor(1).emit('failed');    // slot 1 -> re-dial @750
+
+    clock.advance(250);                          // t=500: slot 0 final worker
+    createWorker.latestFor(0).emit('failed');    // slot 0 dead; slot 1 still pending -> no reject yet
+    let rejectedEarly = false;
+    p.catch(() => { rejectedEarly = true; });
+    await Promise.resolve();
+    expect(rejectedEarly).toBe(false);
+
+    clock.advance(250);                          // t=750: slot 1 final worker
+    createWorker.latestFor(1).emit('failed');    // slot 1 now dead too -> ALL dead
+    await expect(p).rejects.toThrow('all_slots_exhausted');
+  });
+
   it('stop(): cancels pending re-dial timers and closes live workers; no re-dials afterward', () => {
     const { clock, createWorker, args } = baseArgs({ flowCount: 2, backoff: [500] });
     const sup = createFlowSupervisor(args);

@@ -50,13 +50,17 @@ export function createFlowSupervisor({
     worker: null,
     attempt: 0,
     timer: null,
+    dead: false, // set ONLY once this slot's re-dial budget is spent AND its
+                 // final worker went terminal — see scheduleRedial. A slot with
+                 // a pending final-attempt timer, or a final worker still
+                 // connecting, is NOT dead (it may still recover the transfer).
   }));
   // Per-worker aliveness (a re-dial replaces slot.worker, so keying on the
   // worker keeps an OLD flow object's isAlive() honest after re-dial).
   const alive = new Map();
   const starvedCbs = [];
   let active = false;        // start() -> true, stop() -> false; hard kill-switch
-  let allExhausted = false;  // every slot ran out of re-dials with none alive
+  let allExhausted = false;  // every slot reached slot.dead — no recovery possible
   let waiter = null;         // pending { promise, resolve, reject } for awaitFlow
 
   const backoffFor = (attempt) => backoff[Math.min(attempt, backoff.length - 1)];
@@ -88,14 +92,18 @@ export function createFlowSupervisor({
     return ensureWaiter().promise;
   }
 
-  // A slot is exhausted when it can never produce another dial: it has used up
-  // its re-dial budget (attempt >= max) and its current worker is not alive.
-  function slotExhausted(slot) {
-    return slot.attempt >= maxRedialsPerSlot && !(slot.worker && alive.get(slot.worker));
-  }
+  // A slot is PERMANENTLY dead only once `scheduleRedial` has confirmed its
+  // re-dial budget is spent AND its final worker went terminal (the `slot.dead`
+  // flag is set there, at that exact point). Do NOT infer death from
+  // `attempt >= max && !alive`: a slot in that state can still be MID-RECOVERY —
+  // its final-attempt re-dial timer may be pending, or its final worker may be
+  // dialed and still *connecting* (alive=false, not yet terminal). Counting
+  // those as dead let the waiter reject `all_slots_exhausted` the instant the
+  // last slot went terminal, aborting a transfer that was about to recover
+  // (the exact Starlink scenario this module exists to fix).
   function checkAllExhausted() {
     if (allExhausted) return;
-    if (liveCount() === 0 && slots.every((s) => slotExhausted(s))) {
+    if (slots.every((s) => s.dead)) {
       allExhausted = true;
       rejectWaiter(new Error('all_slots_exhausted'));
     }
@@ -154,8 +162,14 @@ export function createFlowSupervisor({
 
   function scheduleRedial(slotIndex) {
     const slot = slots[slotIndex];
-    if (!active || !isRunning() || slot.attempt >= maxRedialsPerSlot) {
-      // No further dial for this slot — it may have just become exhausted.
+    // A stopped/paused supervisor is NOT exhaustion — it must not reject the
+    // waiter as `all_slots_exhausted`; it simply declines to re-dial for now.
+    if (!active || !isRunning()) return;
+    if (slot.attempt >= maxRedialsPerSlot) {
+      // Budget spent and we reached here FROM the terminal handler, so the
+      // current worker is terminal and no timer is pending: this slot is now
+      // permanently dead. That is the only place `dead` is set.
+      slot.dead = true;
       checkAllExhausted();
       return;
     }
@@ -165,7 +179,10 @@ export function createFlowSupervisor({
   }
 
   function fireStarved() {
-    starvedCbs.forEach((cb) => cb());
+    // Guarded/best-effort: a throwing callback must not abort the terminal/
+    // disconnected handler partway (mirrors the codebase's guarded-callback
+    // pattern).
+    starvedCbs.forEach((cb) => { try { cb(); } catch { /* best-effort */ } });
   }
 
   // --- public API ------------------------------------------------------------
