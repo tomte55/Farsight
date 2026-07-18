@@ -279,6 +279,11 @@ const groupRendezvous = createGroupRendezvous({
     const sink = getTransferService().getReceiveFlowSink(handle && handle.groupId);
     if (sink) {
       dispatchReceiveFlowJoin(sink, handle.channel, flowIndex);
+      // Important #2: hand the joined handle's close to the active receive so its
+      // hidden worker window is swept on teardown (it is NOT one of the
+      // assembleReceiveGroup handles the receive already closes) — else every
+      // rolling-join leaks a BrowserWindow that keeps the app alive.
+      if (handle && typeof handle.close === 'function' && typeof sink.retain === 'function') sink.retain(handle.close);
       log?.child('transfer').info(`rolling-join flow=${flowIndex} group=${handle.groupId}`);
     } else {
       log?.child('transfer').warn(`rolling-join dropped (no active receive) flow=${flowIndex} group=${handle && handle.groupId}`);

@@ -70,6 +70,7 @@ export function assembleSendFlows({
   let rendezvousErrorCb = null;   // sender surfaces this as onRendezvousError
   let ctrlReplacedCb = null;      // transfer-service wires this to sender.setCtrl
   let bufferedCtrl = null;        // a ctrl swap that fired before ctrlReplacedCb registered
+  let forwardedCtrl = null;       // the channel the sender currently holds (seeded below)
 
   function wrappedCreateWorker(slotIndex) {
     const worker = createWorker(slotIndex);
@@ -114,6 +115,18 @@ export function assembleSendFlows({
     },
     onCtrlReplaced: (worker) => {
       ctrlChannel = worker.channel;
+      // Minor #3: the supervisor fires onCtrlReplaced on EVERY slot-0 'connected',
+      // including the initial one — but the sender was already seeded with that
+      // exact channel via the get ctrl() getter at construction, so forwarding it
+      // as a setCtrl would needlessly re-send the OFFER AND append a duplicate
+      // onCtrl listener on the still-live flow-0 channel. Skip the swap whenever
+      // the connecting channel is the one the sender already holds; forward only a
+      // genuine re-dial (a DISTINCT channel object — Task 6). This is correct even
+      // if the INITIAL dial never connected and a re-dial connects first: the
+      // sender still holds the initial (dead) channel, which differs from the
+      // re-dial's, so the swap fires.
+      if (worker.channel === forwardedCtrl) return;
+      forwardedCtrl = worker.channel;
       if (ctrlReplacedCb) ctrlReplacedCb(worker.channel);
       else bufferedCtrl = worker.channel; // registered late — replay on register
     },
@@ -126,6 +139,10 @@ export function assembleSendFlows({
   });
 
   supervisor.start();
+  // Seed with the initial slot-0 channel (set synchronously by start()'s dial) —
+  // the exact channel createMultiFlowSender reads from get ctrl() at construction.
+  // onCtrlReplaced skips forwarding this one (Minor #3), forwarding only re-dials.
+  forwardedCtrl = ctrlChannel;
 
   return {
     // Getter, not a captured value: slot 0's channel is set on the synchronous
@@ -162,19 +179,25 @@ export function assembleSendFlows({
 /**
  * RECEIVE rolling-join dispatch: route a late/replacement flow (delivered by the
  * group rendezvous' onFlowJoin once the group has already fired) into the active
- * receiver. flowIndex 0 is the ctrl flow — swap the receiver's ctrl channel
- * (setCtrl); any other flowIndex is a bulk flow — wire it into the router
- * (addFlow). `sink` is the receiver's { addFlow, setCtrl } face (null when no
+ * receiver. `sink` is the receiver's { addFlow, setCtrl } face (null when no
  * receive is active yet — the caller then closes the handle). Returns whether it
  * dispatched.
+ *
+ * Important #1: flow 0 is BOTH the ctrl channel AND a bulk flow — the sender
+ * pushes a sendBulk wrapper for slot 0 (the pool dispatches bulk to it) and the
+ * initial receive wires flow 0 as a bulk flow too (createMultiFlowReceiver
+ * iterates ALL flows including ordered[0]). `setCtrl` only re-attaches the ctrl
+ * handler; it never wires onBulk. So a re-dialed replacement flow 0 must be wired
+ * BOTH ways — setCtrl (control plane) AND addFlow(channel, 0) (bulk routing) —
+ * or every bulk chunk the sender puts on it lands nowhere (wasted bandwidth each
+ * gap pass, and a hard stall to no_confirmation if it is the sole live flow).
+ * There is no double-wire: setCtrl doesn't touch onBulk, and addFlow is
+ * flow-agnostic (fileId+offset self-addressed bytes).
  */
 export function dispatchReceiveFlowJoin(sink, channel, flowIndex) {
   if (!sink) return false;
-  if (flowIndex === 0) {
-    if (typeof sink.setCtrl === 'function') sink.setCtrl(channel);
-  } else if (typeof sink.addFlow === 'function') {
-    sink.addFlow(channel, flowIndex);
-  }
+  if (flowIndex === 0 && typeof sink.setCtrl === 'function') sink.setCtrl(channel);
+  if (typeof sink.addFlow === 'function') sink.addFlow(channel, flowIndex);
   return true;
 }
 

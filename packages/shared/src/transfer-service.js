@@ -545,6 +545,12 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // own 'accepted' event (which does now carry the manifest, mirroring
   // single-flow's) -- the jobs-store record needs the manifest sooner than that.
   async function runMultiFlowReceive({ ctrl, flows, close, peerAuth, sessionId }) {
+    // Important #2: a rolling-joined flow's worker is a hidden BrowserWindow that
+    // is NOT one of the `close`-swept assembleReceiveGroup handles, so its close
+    // must be retained here and swept on teardown or it leaks a window (holds the
+    // app alive / single-instance lock — CLAUDE.md). Each retained close is the
+    // idempotent worker.close(), so a double-sweep is harmless.
+    const joinedHandleCloses = [];
     let currentJobId = null;
     let currentManifest = null;
     let offerAccum = null;
@@ -635,6 +641,9 @@ export function createTransferService({ store, transferDir, consent, openChannel
           if (sessionId) receiveFlowSinks.set(sessionId, {
             addFlow: (ch, idx) => receiver.addFlow(ch, idx),
             setCtrl: (ch) => receiver.setCtrl(ch),
+            // main registers a rolling-joined handle's close here so this
+            // receive's teardown sweep closes its hidden worker window too.
+            retain: (closeFn) => { if (typeof closeFn === 'function') joinedHandleCloses.push(closeFn); },
           });
         }
         if (ev.type === 'file-failed' && ev.reason === 'io_error') failedFileIds.add(ev.fileId);
@@ -672,10 +681,17 @@ export function createTransferService({ store, transferDir, consent, openChannel
       return result;
     } finally {
       activeReceives.delete(jobId);
+      // Deregister the sink BEFORE the grace/close so no further rolling-join can
+      // race in against a receiver that's tearing down.
       if (sessionId) receiveFlowSinks.delete(sessionId);
       // Same completion-ack grace as the single-flow path (see startReceive).
       if (receiveCloseGraceMs > 0) { try { await delay(receiveCloseGraceMs); } catch { /* ignore */ } }
       try { await close(); } catch { /* ignore close errors */ }
+      // Important #2: close every rolling-joined handle's worker window too. The
+      // close is idempotent, so this can't double-crash even if one already went.
+      await Promise.all(joinedHandleCloses.splice(0).map((c) => {
+        try { return Promise.resolve(c()).catch(() => {}); } catch { return undefined; }
+      }));
     }
   }
 

@@ -123,6 +123,24 @@ describe('assembleSendFlows (supervisor-backed)', () => {
     expect(setCtrl).toHaveBeenCalledWith(redialed.channel);
   });
 
+  // Minor #3: the supervisor fires onCtrlReplaced on the INITIAL slot-0 connect
+  // too, but the sender is already seeded with that channel via get ctrl() — so
+  // forwarding it would re-send the OFFER and append a duplicate onCtrl listener.
+  // Skip it; forward only a genuine re-dial (a DISTINCT channel object).
+  test('the INITIAL slot-0 connect does NOT re-fire setCtrl (only a re-dial swaps)', () => {
+    const { bundle, cfg, workers } = build();
+    const setCtrl = vi.fn();
+    bundle.onCtrlReplaced((ch) => setCtrl(ch));
+    // Initial connect: same channel the sender already holds (bundle.ctrl).
+    cfg.onCtrlReplaced(workers[0]);
+    expect(setCtrl).not.toHaveBeenCalled();
+    // A genuine re-dial (distinct channel) DOES swap.
+    const redial = fakeWorker();
+    cfg.onCtrlReplaced(redial);
+    expect(setCtrl).toHaveBeenCalledTimes(1);
+    expect(setCtrl).toHaveBeenCalledWith(redial.channel);
+  });
+
   test('awaitFlow delegates to the supervisor\'s waiter (feeds the send pool)', () => {
     const { bundle, sup } = build();
     bundle.awaitFlow();
@@ -185,12 +203,15 @@ describe('dispatchReceiveFlowJoin (receiver rolling-join dispatch)', () => {
     expect(sink.setCtrl).not.toHaveBeenCalled();
   });
 
-  test('flowIndex === 0 routes to receiver.setCtrl(channel) (ctrl swap)', () => {
+  // Important #1: flow 0 is BOTH ctrl AND bulk, so a re-dialed replacement flow 0
+  // must be wired BOTH ways — setCtrl (control plane) AND addFlow(channel, 0)
+  // (bulk routing) — or every bulk chunk on it lands nowhere (stall).
+  test('flowIndex === 0 wires BOTH setCtrl AND addFlow(channel, 0) (ctrl + bulk)', () => {
     const sink = { addFlow: vi.fn(), setCtrl: vi.fn() };
-    const ch = { onCtrl: vi.fn() };
+    const ch = { onCtrl: vi.fn(), onBulk: vi.fn() };
     dispatchReceiveFlowJoin(sink, ch, 0);
     expect(sink.setCtrl).toHaveBeenCalledWith(ch);
-    expect(sink.addFlow).not.toHaveBeenCalled();
+    expect(sink.addFlow).toHaveBeenCalledWith(ch, 0);
   });
 
   test('a null sink (no active receive) is a no-op and returns false', () => {
