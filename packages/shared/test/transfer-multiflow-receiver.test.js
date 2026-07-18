@@ -2,7 +2,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createMultiFlowReceiver } from '../src/transfer-orchestrator.js';
 import { encodeBulkFrame } from '../src/transfer-chunk.js';
-import { offerFrame, fileEndFrame, jobDoneFrame, cancelFrame, promptingFrame, parseCtrlFrame } from '../src/transfer-protocol.js';
+import { offerFrame, offerBeginFrame, offerEntriesFrame, offerEndFrame, fileEndFrame, jobDoneFrame, cancelFrame, promptingFrame, parseCtrlFrame } from '../src/transfer-protocol.js';
 import { createCoverageTracker } from '../src/transfer-reconcile.js';
 
 const JOB = 'a'.repeat(32);
@@ -966,5 +966,103 @@ describe('createMultiFlowReceiver', () => {
     toReceiver(jobDoneFrame({ jobId: JOB }));
     const r = await done;
     expect(r).toEqual({ jobId: JOB, ok: true });
+  });
+
+  // Task 5 review fold-in: the committed duplicate-OFFER test only pinned the
+  // simple single `offer` frame. A many-file re-dial re-sync re-sends the CHUNKED
+  // OFFER (offer_begin -> offer_entries* -> offer_end), which must be equally
+  // idempotent — the whole thing re-sent for an already-active jobId must not
+  // re-prompt consent or reset state. This pins exactly the idempotency the
+  // sender's setCtrl re-send relies on.
+  it('ignores a duplicate CHUNKED OFFER for the already-active jobId: no re-prompt, no state reset', async () => {
+    const size = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const consent = vi.fn(async () => true);
+    const events = [];
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB, consent,
+      openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null }),
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      onEvent: (ev) => events.push(ev),
+      reportIntervalMs: 10_000,
+    });
+    const done = rx.start();
+    const entries = [{ fileId: 0, path: 'd.bin', size, mtime: 0 }];
+    const sendChunkedOffer = () => {
+      toReceiver(offerBeginFrame({ jobId: JOB, totalBytes: size, totalFiles: 1 }));
+      toReceiver(offerEntriesFrame({ jobId: JOB, entries }));
+      toReceiver(offerEndFrame({ jobId: JOB }));
+    };
+
+    // Full chunked OFFER once → consent + accept + beginReceive.
+    sendChunkedOffer();
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+    expect(out.some((f) => f.t === 'accept')).toBe(true);
+    expect(consent).toHaveBeenCalledTimes(1);
+    const acceptFramesBefore = out.filter((f) => f.t === 'accept').length;
+    const acceptedEventsBefore = events.filter((e) => e.type === 'accepted').length;
+
+    // The WHOLE chunked OFFER is re-sent for the SAME jobId (a ctrl re-dial re-sync).
+    sendChunkedOffer();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(consent).toHaveBeenCalledTimes(1); // beginReceive fired only ONCE
+    expect(out.filter((f) => f.t === 'accept').length).toBe(acceptFramesBefore); // no second accept
+    expect(events.filter((e) => e.type === 'accepted').length).toBe(acceptedEventsBefore); // no state reset
+
+    // Finish the transfer normally so the promise settles cleanly.
+    flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: size, payload: new Uint8Array(size).fill(3) }));
+    await new Promise((r) => setTimeout(r, 0));
+    toReceiver(fileEndFrame({ jobId: JOB, fileId: 0, hash: 'H' }));
+    toReceiver(jobDoneFrame({ jobId: JOB }));
+    const r = await done;
+    expect(r).toEqual({ jobId: JOB, ok: true });
+  });
+
+  // Task 6: the ctrl channel is SWAPPABLE on the receiver too. After setCtrl(ch2)
+  // — the supervisor re-dialed a dead slot 0 — inbound ctrl on the new channel is
+  // handled (accept/range_report/complete continue) AND the receiver's own emitted
+  // ctrl frames go out on the new channel. The old channel no longer drives state.
+  it('setCtrl swaps the ctrl channel: emitted ctrl goes out on the new channel, inbound ctrl on it is handled, and the old channel is ignored', async () => {
+    const size = 8;
+    const p1 = ctrlPair();
+    const p2 = ctrlPair();
+    const parts = new Map();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const rx = createMultiFlowReceiver({
+      ctrl: p1.ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      reportIntervalMs: 10_000,
+    });
+    const done = rx.start();
+    p1.toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'x.bin', size, mtime: 0 }], totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+    expect(p1.out.some((f) => f.t === 'accept')).toBe(true); // accept went out on the ORIGINAL channel
+
+    // Bytes land on the bulk flow (flow-agnostic — unaffected by the ctrl swap).
+    flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: size, payload: new Uint8Array(size).fill(7) }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Slot 0 (ctrl flow) died and was re-dialed: swap.
+    const emittedOnCh1BeforeSwap = p1.out.length;
+    rx.setCtrl(p2.ctrl);
+
+    // The OLD channel no longer drives state: a cancel on ch1 must be ignored.
+    p1.toReceiver(cancelFrame(JOB));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Inbound completion arrives on the NEW channel and is handled.
+    p2.toReceiver(fileEndFrame({ jobId: JOB, fileId: 0, hash: 'H' }));
+    p2.toReceiver(jobDoneFrame({ jobId: JOB }));
+    const r = await done;
+    expect(r).toEqual({ jobId: JOB, ok: true }); // driven to completion by inbound ctrl on ch2 (ch1 cancel ignored)
+
+    expect(p2.out.some((f) => f.t === 'complete' && f.ok === true)).toBe(true); // receiver-emitted ctrl goes out on ch2
+    expect(p1.out.length).toBe(emittedOnCh1BeforeSwap); // nothing more emitted on the old channel after swap
   });
 });

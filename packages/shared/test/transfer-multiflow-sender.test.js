@@ -328,4 +328,66 @@ describe('createMultiFlowSender', () => {
     expect(completed.ok).toBe(false);
     expect(events.some((e) => e.type === 'error')).toBe(false); // no 'receiver_incomplete' error event
   });
+
+  // Task 6: the ctrl channel (flow 0's ft-ctrl) is SWAPPABLE. When the supervisor
+  // re-dials a dead slot 0, setCtrl(newChannel) hands the control plane over: the
+  // new channel gets a re-sent OFFER (re-sync — idempotent on the receiver per
+  // Task 5), the range_report handler re-attaches to it (reconciliation continues),
+  // and the OLD channel's handler no longer drives state. Exercised only AFTER the
+  // receive is active (a realistic re-dial happens mid-transfer, not before accept).
+  it('setCtrl swaps the ctrl channel: new channel gets a re-sent OFFER, a range_report on it drives coverage, and the old channel no longer drives state', async () => {
+    const size = 4096 * 2;
+    const A = new Uint8Array(size).map((_, i) => (i * 7) & 0xff);
+    const sources = new Map([[0, A]]);
+    const manifest = { entries: [{ fileId: 0, size }] };
+
+    // Two independent ctrl channels; `fire` is a no-op if no handler was attached
+    // (so a mutation that skips re-attaching onCtrl fails cleanly, not by throwing).
+    function manualCtrl() {
+      let cb = null; const out = [];
+      return { ch: { sendCtrl: (s) => out.push(parseCtrlFrame(s)), onCtrl: (c) => { cb = c; } }, fire: (f) => cb && cb(f), out };
+    }
+    const c1 = manualCtrl();
+    const c2 = manualCtrl();
+    const flows = [{ isAlive: () => true, sendBulk: () => Promise.resolve() }];
+    const events = [];
+    const sender = createMultiFlowSender({
+      ctrl: c1.ch, flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
+      onEvent: (ev) => events.push(ev),
+      progressIntervalMs: 0,
+      reconcileWaitMs: 100_000, // keep a spurious gap pass from interfering with the swap
+    });
+    const flush = () => new Promise((r) => setTimeout(r, 0));
+
+    const done = sender.start();
+    expect(c1.out.some((f) => f.t === 'offer')).toBe(true); // initial OFFER on the original channel
+    // Accept on ch1 → pump runs the initial pass (file_end + job_done go out on ch1).
+    c1.fire(acceptFrame({ jobId: JOB, resume: [], ranges: [] }));
+    await flush(); await flush(); await flush();
+
+    // Slot 0 died and was re-dialed: swap the ctrl channel.
+    sender.setCtrl(c2.ch);
+    expect(c2.out.some((f) => f.t === 'offer')).toBe(true); // re-sent OFFER (re-sync) on the new channel
+
+    // A range_report on the NEW channel drives the coverage tracker (progress +
+    // file-sent), proving reconciliation continues on ch2.
+    const progressBefore = events.filter((e) => e.type === 'progress').length;
+    c2.fire(rangeReportFrame({ jobId: JOB, files: [{ fileId: 0, ivals: [[0, size]] }] }));
+    await flush();
+    const progressAfter = events.filter((e) => e.type === 'progress');
+    expect(progressAfter.length).toBeGreaterThan(progressBefore);
+    expect(progressAfter[progressAfter.length - 1].progress.sent).toBe(size);
+    expect(events.some((e) => e.type === 'file-sent' && e.fileId === 0)).toBe(true);
+
+    // The OLD channel no longer drives state: a complete on ch1 is ignored.
+    c1.fire(completeFrame({ jobId: JOB, ok: false }));
+    await flush();
+    expect(events.some((e) => e.type === 'completed')).toBe(false); // ch1 ignored — not settled
+
+    // The NEW channel carries completion.
+    c2.fire(completeFrame({ jobId: JOB, ok: true }));
+    const r = await done;
+    expect(r).toEqual({ jobId: JOB, ok: true }); // resolved by ch2's complete, not ch1's
+  });
 });

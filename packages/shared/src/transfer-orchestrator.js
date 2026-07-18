@@ -164,7 +164,7 @@ export function createSender({
 // tracker says every byte is covered, and even then the driver doesn't resolve
 // until the receiver's `complete` ack lands (same discipline as createSender).
 export function createMultiFlowSender({
-  ctrl, flows, jobId, manifest, chunkSize = 131072, flowCount, groupId,
+  ctrl: ctrl0, flows, jobId, manifest, chunkSize = 131072, flowCount, groupId,
   readerFor, newHash = () => createHash('sha256'),
   onEvent = () => {},
   offerBatchBytes = 49152,
@@ -177,6 +177,13 @@ export function createMultiFlowSender({
   progressIntervalMs = 250, now = () => Date.now(),
 }) {
   if (typeof readerFor !== 'function') throw new Error('readerFor is required');
+
+  // The ctrl channel (flow 0's ft-ctrl) is held in a MUTABLE ref, not a fixed
+  // capture: when the supervisor re-dials a dead slot 0, setCtrl(newChannel)
+  // reassigns it so every ctrl.sendCtrl(...) site below (file_end, job_done, the
+  // OFFER, and setCtrl's re-send) goes out on the live channel, and the range_report
+  // handler re-attaches to it. See setCtrl / attachCtrl below.
+  let ctrl = ctrl0;
 
   const tracker = createCoverageTracker({ manifest });
   // The test manifests (and any minimal caller) may omit totalBytes/totalFiles —
@@ -351,7 +358,14 @@ export function createMultiFlowSender({
     }
   }
 
-  ctrl.onCtrl((str) => run(async () => {
+  // Attach the range_report/complete/reject/cancel/accept handler to a ctrl
+  // channel. The handler is gated on `ch === ctrl` (the current live channel), so
+  // once setCtrl swaps to a re-dialed channel, the OLD channel's handler — still
+  // wired to a now-dead data channel — can no longer drive state even if a late
+  // frame arrives on it.
+  function attachCtrl(ch) {
+    ch.onCtrl((str) => run(async () => {
+    if (ch !== ctrl) return;
     const f = parseCtrlFrame(str);
     if (!f || f.jobId !== jobId) return;
     if (f.t === 'prompting') { onEvent({ type: 'prompting' }); return; }
@@ -394,19 +408,41 @@ export function createMultiFlowSender({
       checkFileSent();
       pump().catch(fail);
     }
-  }));
+    }));
+  }
+  attachCtrl(ctrl);
+
+  // Send the OFFER on the CURRENT ctrl channel — a small manifest as one legacy
+  // `offer` frame (an older receiver understands it), a large one chunked so no
+  // single ft-ctrl message exceeds the channel limit. Reused by both start() and
+  // setCtrl (the re-send is idempotent on the receiver per Task 5).
+  function sendOffer() {
+    const batches = batchEntriesBySize(manifest.entries, offerBatchBytes);
+    if (batches.length <= 1) {
+      ctrl.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes, totalFiles, flowCount, groupId }));
+    } else {
+      ctrl.sendCtrl(offerBeginFrame({ jobId, totalBytes, totalFiles, flowCount, groupId }));
+      for (const b of batches) ctrl.sendCtrl(offerEntriesFrame({ jobId, entries: b }));
+      ctrl.sendCtrl(offerEndFrame({ jobId }));
+    }
+  }
 
   return {
     start() {
-      const batches = batchEntriesBySize(manifest.entries, offerBatchBytes);
-      if (batches.length <= 1) {
-        ctrl.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes, totalFiles, flowCount, groupId }));
-      } else {
-        ctrl.sendCtrl(offerBeginFrame({ jobId, totalBytes, totalFiles, flowCount, groupId }));
-        for (const b of batches) ctrl.sendCtrl(offerEntriesFrame({ jobId, entries: b }));
-        ctrl.sendCtrl(offerEndFrame({ jobId }));
-      }
+      sendOffer();
       return finished;
+    },
+    // Hand the control plane over to a re-dialed replacement ctrl channel (the
+    // supervisor re-dials a dead slot 0 in a later task; this is the sender-side
+    // hook it calls). Reassign the mutable ref so all subsequent ctrl.sendCtrl
+    // sites use it, re-attach the range_report handler (attachCtrl's stale-channel
+    // gate then makes the OLD channel's handler inert), and re-send the OFFER on
+    // the new channel to re-sync the receiver — idempotent per Task 5. Used only
+    // once a receive is active (a real re-dial happens mid-transfer).
+    setCtrl(newChannel) {
+      ctrl = newChannel;
+      attachCtrl(newChannel);
+      sendOffer();
     },
     // Mirrors createSender's abort. Also wakes a pump() parked in waitForReport
     // so the pass loop observes `canceled` promptly instead of idling out the
@@ -858,7 +894,7 @@ export function createReceiver({
 // single-flow createReceiver where it's learned from the wire OFFER — so every
 // ctrl frame here (including the OFFER itself) is filtered by jobId match.
 export function createMultiFlowReceiver({
-  ctrl, flows, jobId, consent,
+  ctrl: ctrl0, flows, jobId, consent,
   // Accepted for forward interface compatibility with the paired sender's
   // constructor shape; this control flow only ever builds the manifest from the
   // wire OFFER (see beginReceive below) — there is no alternate entries source.
@@ -899,6 +935,11 @@ export function createMultiFlowReceiver({
   // retry/terminal-failure path without waiting through real backoff delays.
   retryDelays, delay,
 }) {
+  // The ctrl channel is held in a MUTABLE ref (mirrors createMultiFlowSender): a
+  // re-dialed slot 0 is handed over via setCtrl, so every ctrl.sendCtrl(...) site
+  // (accept, range_report, complete, reject, cancel) uses the live channel and the
+  // inbound handler re-attaches to it. See setCtrl / attachCtrl below.
+  let ctrl = ctrl0;
   let settled = false;
   let resolve, reject;
   const finished = new Promise((res, rej) => { resolve = res; reject = rej; });
@@ -1191,7 +1232,12 @@ export function createMultiFlowReceiver({
     watching = true; pokeWatchdog(); // now expecting a steady stream of ctrl/bulk traffic
   }
 
-  ctrl.onCtrl((str) => run(async () => {
+  // Attach the inbound ctrl handler (offer/accept/file_end/job_done/cancel) to a
+  // ctrl channel, gated on `ch === ctrl` so a superseded channel's late frames
+  // can't drive state once setCtrl swaps to a re-dialed one.
+  function attachCtrl(ch) {
+    ch.onCtrl((str) => run(async () => {
+    if (ch !== ctrl) return;
     pokeWatchdog(); // fresh ctrl frame — the transfer is alive
     if (settled) return;
     const f = parseCtrlFrame(str);
@@ -1241,10 +1287,22 @@ export function createMultiFlowReceiver({
       maybeComplete();
       return;
     }
-  }));
+    }));
+  }
+  attachCtrl(ctrl);
 
   return {
     start() { return finished; },
+    // Hand the control plane over to a re-dialed replacement ctrl channel (the
+    // supervisor re-dials a dead slot 0 in a later task; this is the receiver-side
+    // hook it calls). Reassign the mutable ref so the receiver's own emitted ctrl
+    // (range_report/complete/…) goes out on the new channel, and re-attach the
+    // inbound handler — attachCtrl's stale-channel gate then makes the OLD
+    // channel's handler inert. No OFFER re-send here (that's the sender's job).
+    setCtrl(newChannel) {
+      ctrl = newChannel;
+      attachCtrl(newChannel);
+    },
     // Mirrors createReceiver's abort: tell the sender to stop, then fail. The
     // paired createMultiFlowSender already honors an inbound `cancel` frame.
     abort(reason = 'aborted') {
