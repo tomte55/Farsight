@@ -621,10 +621,24 @@ document.getElementById('menu-open-logs').addEventListener('click', () => { wind
 // and the resume-session call near the bottom of this file, which both keep
 // this in sync with the real signed-in state).
 const menuSendDiagnostics = document.getElementById('menu-send-diagnostics');
+// The diagnostics reference id is the ONLY handle support has on an uploaded
+// bundle, and it's read off-device (e.g. a contact reads it to the maintainer),
+// so make it one-tap copyable via the shared .cbtn[data-copy] handler instead of
+// forcing anyone to transcribe an 8-char code. The raw id lives in the hidden
+// menu-diag-id span (the copy handler reads its textContent); the button is
+// revealed only on a successful upload.
+const menuCopyDiagId = document.getElementById('menu-copy-diag-id');
+const menuDiagId = document.getElementById('menu-diag-id');
 menuSendDiagnostics.addEventListener('click', async () => {
+  menuCopyDiagId.hidden = true; // a fresh attempt hides any prior id's copy button
   const res = await window.farsightIpc.sendDiagnostics();
-  if (res.ok) menuStatus.textContent = `Diagnostics sent (id ${res.id}).`;
-  else if (res.error !== 'cancelled') menuStatus.textContent = `Diagnostics upload failed: ${res.error}`;
+  if (res.ok) {
+    menuStatus.textContent = `Diagnostics sent (id ${res.id}).`;
+    menuDiagId.textContent = res.id;
+    menuCopyDiagId.hidden = false;
+  } else if (res.error !== 'cancelled') {
+    menuStatus.textContent = `Diagnostics upload failed: ${res.error}`;
+  }
 });
 
 async function refreshSignalingUrl() {
