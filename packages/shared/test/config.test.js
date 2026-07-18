@@ -64,27 +64,28 @@ test('serializeConfig round-trips receivedFilesDir alongside other keys', () => 
   expect(JSON.parse(serializeConfig({ receivedFilesDir: '   ' }))).toEqual({});
 });
 
-test('resolveParallelConnections defaults to 8 for absent/invalid/NaN-ish input', () => {
-  expect(resolveParallelConnections(undefined)).toBe(8);
-  expect(DEFAULT_PARALLEL_CONNECTIONS).toBe(8);
-  expect(resolveParallelConnections(null)).toBe(8);
-  expect(resolveParallelConnections(true)).toBe(8);
-  expect(resolveParallelConnections({})).toBe(8);
-  expect(resolveParallelConnections([])).toBe(8);
-  expect(resolveParallelConnections('')).toBe(8);
-  expect(resolveParallelConnections('   ')).toBe(8);
-  expect(resolveParallelConnections('not-a-number')).toBe(8);
-  expect(resolveParallelConnections(NaN)).toBe(8);
+test('resolveParallelConnections defaults to 16 for absent/invalid/NaN-ish input', () => {
+  expect(resolveParallelConnections(undefined)).toBe(16);
+  expect(DEFAULT_PARALLEL_CONNECTIONS).toBe(16);
+  expect(resolveParallelConnections(null)).toBe(16);
+  expect(resolveParallelConnections(true)).toBe(16);
+  expect(resolveParallelConnections({})).toBe(16);
+  expect(resolveParallelConnections([])).toBe(16);
+  expect(resolveParallelConnections('')).toBe(16);
+  expect(resolveParallelConnections('   ')).toBe(16);
+  expect(resolveParallelConnections('not-a-number')).toBe(16);
+  expect(resolveParallelConnections(NaN)).toBe(16);
 });
 
-test('resolveParallelConnections clamps to [1,16] and rounds/coerces numeric strings', () => {
+test('resolveParallelConnections clamps to [1,32] and rounds/coerces numeric strings', () => {
   expect(resolveParallelConnections(1)).toBe(1);
-  expect(resolveParallelConnections(16)).toBe(16);
+  expect(resolveParallelConnections(32)).toBe(32);
   expect(resolveParallelConnections(4)).toBe(4);
   expect(resolveParallelConnections(0)).toBe(1);
   expect(resolveParallelConnections(-5)).toBe(1);
-  expect(resolveParallelConnections(17)).toBe(16);
-  expect(resolveParallelConnections(1000)).toBe(16);
+  expect(resolveParallelConnections(33)).toBe(32);
+  expect(resolveParallelConnections(100)).toBe(32);
+  expect(resolveParallelConnections(1000)).toBe(32);
   expect(resolveParallelConnections(3.6)).toBe(4);
   expect(resolveParallelConnections('12')).toBe(12);
   expect(resolveParallelConnections('  6  ')).toBe(6);
@@ -98,19 +99,19 @@ test('parseConfig omits parallelConnections when the key is absent', () => {
 test('parseConfig reads a valid parallelConnections', () => {
   expect(parseConfig('{"parallelConnections":4}')).toEqual({ parallelConnections: 4 });
   expect(parseConfig('{"parallelConnections":1}')).toEqual({ parallelConnections: 1 });
-  expect(parseConfig('{"parallelConnections":16}')).toEqual({ parallelConnections: 16 });
+  expect(parseConfig('{"parallelConnections":32}')).toEqual({ parallelConnections: 32 });
 });
 
 test('parseConfig clamps an out-of-range parallelConnections instead of dropping it', () => {
   expect(parseConfig('{"parallelConnections":0}')).toEqual({ parallelConnections: 1 });
   expect(parseConfig('{"parallelConnections":-3}')).toEqual({ parallelConnections: 1 });
-  expect(parseConfig('{"parallelConnections":100}')).toEqual({ parallelConnections: 16 });
+  expect(parseConfig('{"parallelConnections":100}')).toEqual({ parallelConnections: 32 });
 });
 
-test('parseConfig defaults an invalid/NaN parallelConnections to 8 instead of dropping it', () => {
-  expect(parseConfig('{"parallelConnections":"garbage"}')).toEqual({ parallelConnections: 8 });
-  expect(parseConfig('{"parallelConnections":null}')).toEqual({ parallelConnections: 8 });
-  expect(parseConfig('{"parallelConnections":true}')).toEqual({ parallelConnections: 8 });
+test('parseConfig defaults an invalid/NaN parallelConnections to 16 instead of dropping it', () => {
+  expect(parseConfig('{"parallelConnections":"garbage"}')).toEqual({ parallelConnections: 16 });
+  expect(parseConfig('{"parallelConnections":null}')).toEqual({ parallelConnections: 16 });
+  expect(parseConfig('{"parallelConnections":true}')).toEqual({ parallelConnections: 16 });
 });
 
 test('serializeConfig round-trips parallelConnections alongside other keys and drops when unset', () => {
@@ -118,7 +119,7 @@ test('serializeConfig round-trips parallelConnections alongside other keys and d
   expect(JSON.parse(out)).toEqual({ signalingUrl: 'wss://x.example', parallelConnections: 3 });
   expect(parseConfig(serializeConfig({ parallelConnections: 8 }))).toEqual({ parallelConnections: 8 });
   expect(serializeConfig({})).toBe('{}');
-  expect(JSON.parse(serializeConfig({ parallelConnections: 100 }))).toEqual({ parallelConnections: 16 });
+  expect(JSON.parse(serializeConfig({ parallelConnections: 100 }))).toEqual({ parallelConnections: 32 });
 });
 
 test('resolveSignalingUrl: env wins, then config, then null', () => {

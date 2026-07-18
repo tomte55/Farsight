@@ -566,7 +566,7 @@ ipcMain.handle('control-allowed:set', (_e, v) => writeControlAllowed(!!v));
 
 // "Parallel connections" (Plan 3 Task 6) — how many parallel WebRTC flows a
 // send opens, plumbed to the send's `flowCount` (see the transfer:send handler
-// below). Default 8, clamped 1-16 by resolveParallelConnections (shared with
+// below). Default 16, clamped 1-32 by resolveParallelConnections (shared with
 // config.js's parse/serialize so the clamp/default logic lives in ONE place).
 // `flowCount === 1` reproduces the pre-Task-3 single-flow path exactly — the
 // multi-flow branch in getTransferService()'s openChannel above only triggers

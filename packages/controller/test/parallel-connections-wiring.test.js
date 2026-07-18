@@ -38,7 +38,7 @@ describe('main.js: parallel-connections setting', () => {
     expect(main).toMatch(/startSend\(\{\s*jobId,\s*manifest,\s*sources,\s*target:\s*sendTarget,\s*sourceRoots:\s*paths\s*\}\)/);
   });
   // Task 6 review fix: a target.flowCount override must be routed through the
-  // SAME [1,16] clamp (resolveParallelConnections) the ambient setting uses —
+  // SAME [1,32] clamp (resolveParallelConnections) the ambient setting uses —
   // not passed through raw — so a stray/adversarial value (e.g. 1000) can never
   // reach the multi-flow branch un-clamped from this earlier call site either
   // (transfer-service.js's resolveFlowCount is the other, last-line choke point).
@@ -55,17 +55,17 @@ describe('preload: parallel-connections bridge', () => {
 });
 
 describe('renderer: parallel-connections settings field', () => {
-  test('settings has a 1-16 numeric field + Save button', () => {
+  test('settings has a 1-32 numeric field + Save button', () => {
     expect(html).toMatch(/id="settings-parallel-connections"[^>]*type="number"/);
     expect(html).toMatch(/id="settings-parallel-connections"[^>]*min="1"/);
-    expect(html).toMatch(/id="settings-parallel-connections"[^>]*max="16"/);
+    expect(html).toMatch(/id="settings-parallel-connections"[^>]*max="32"/);
     expect(html).toMatch(/id="menu-save-parallel-connections"/);
   });
   test('renderer wires Save to setParallelConnections and refreshes from getParallelConnections', () => {
     expect(renderer).toMatch(/setParallelConnections\(n\)/);
     expect(renderer).toMatch(/getParallelConnections\(\)\.then/);
   });
-  test('renderer clamps the field value into [1,16] before saving', () => {
-    expect(renderer).toMatch(/Math\.min\(16,\s*Math\.max\(1,/);
+  test('renderer clamps the field value into [1,32] before saving', () => {
+    expect(renderer).toMatch(/Math\.min\(32,\s*Math\.max\(1,/);
   });
 });

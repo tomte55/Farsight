@@ -676,7 +676,7 @@ document.getElementById('menu-save-parallel-connections').addEventListener('clic
   // Clamp/validate in the UI too (main.js's parallel-connections:set handler
   // clamps again via resolveParallelConnections, so a bad value here is never
   // actually persisted out of range — this just keeps the field itself sane).
-  const n = Math.min(16, Math.max(1, Math.round(Number(parallelConnectionsInput.value)) || 8));
+  const n = Math.min(32, Math.max(1, Math.round(Number(parallelConnectionsInput.value)) || 16));
   await window.farsightIpc.setParallelConnections(n);
   refreshSettingsView();
 });

@@ -64,14 +64,14 @@ function isTerminalReason(reason) {
 // to 1 (single-flow) -- never silently coerces a bad value into "multi-flow".
 //
 // Task 6 review fix: whatever falls out of preferred/fallback/1 above is then
-// run through resolveParallelConnections (config.js) -- the SAME [1,16] clamp
+// run through resolveParallelConnections (config.js) -- the SAME [1,32] clamp
 // the "Parallel connections" setting itself uses -- so this is the LAST-line
 // choke point. No caller-supplied value (target.flowCount, an out-of-range
 // serviceFlowCount, or anything else routed here) can ever reach the
-// multi-flow branch above 16 or below 1, regardless of what earlier call
+// multi-flow branch above 32 or below 1, regardless of what earlier call
 // sites (e.g. main.js's override) did or didn't clamp. resolveParallelConnections
-// is a no-op on an already-valid integer in [1,16] (including 1, so single-flow
-// routing is unaffected), so this doesn't duplicate the literal 16 anywhere.
+// is a no-op on an already-valid integer in [1,32] (including 1, so single-flow
+// routing is unaffected), so this doesn't duplicate the literal 32 anywhere.
 export function resolveFlowCount(preferred, fallback) {
   const p = Number.isInteger(preferred) && preferred > 0 ? preferred : undefined;
   const f = Number.isInteger(fallback) && fallback > 0 ? fallback : undefined;

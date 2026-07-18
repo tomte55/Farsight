@@ -1514,19 +1514,19 @@ test('removeJob refuses while a send is still in flight (must cancel first)', as
 });
 
 // Task 6 review fix: resolveFlowCount is the LAST-line-of-defense choke point
-// for the multi-flow flowCount -- it must clamp into [1,16] via
+// for the multi-flow flowCount -- it must clamp into [1,32] via
 // resolveParallelConnections regardless of source (an explicit per-send
 // override, the service-level default, or a stray/adversarial value like
 // 1000), never just reject non-positive-integers as it used to.
-test('resolveFlowCount clamps an out-of-range preferred value into [1,16]', () => {
-  expect(resolveFlowCount(1000, undefined)).toBe(16); // way over max -> clamped, not passed through
-  expect(resolveFlowCount(17, undefined)).toBe(16); // just over max
-  expect(resolveFlowCount(16, undefined)).toBe(16); // exactly max -> unaffected
+test('resolveFlowCount clamps an out-of-range preferred value into [1,32]', () => {
+  expect(resolveFlowCount(1000, undefined)).toBe(32); // way over max -> clamped, not passed through
+  expect(resolveFlowCount(33, undefined)).toBe(32); // just over max
+  expect(resolveFlowCount(32, undefined)).toBe(32); // exactly max -> unaffected
   expect(resolveFlowCount(1, undefined)).toBe(1); // exactly 1 -> single-flow preserved
-  expect(resolveFlowCount(8, undefined)).toBe(8); // in-range -> unaffected
+  expect(resolveFlowCount(16, undefined)).toBe(16); // in-range -> unaffected
 });
 
-test('resolveFlowCount: non-positive-integer preferred/fallback still fall through to 1 (single-flow), not to the default 8', () => {
+test('resolveFlowCount: non-positive-integer preferred/fallback still fall through to 1 (single-flow), not to the default 16', () => {
   expect(resolveFlowCount(0, undefined)).toBe(1);
   expect(resolveFlowCount(-5, undefined)).toBe(1);
   expect(resolveFlowCount(1.5, undefined)).toBe(1);
@@ -1534,11 +1534,11 @@ test('resolveFlowCount: non-positive-integer preferred/fallback still fall throu
 });
 
 test('resolveFlowCount: an out-of-range fallback (service default) is clamped too, not just the preferred value', () => {
-  expect(resolveFlowCount(undefined, 1000)).toBe(16);
-  expect(resolveFlowCount(0, 1000)).toBe(16); // preferred rejected -> falls to fallback -> still clamped
+  expect(resolveFlowCount(undefined, 1000)).toBe(32);
+  expect(resolveFlowCount(0, 1000)).toBe(32); // preferred rejected -> falls to fallback -> still clamped
 });
 
-test('a send with target.flowCount=1000 opens at most 16 flows (openChannel never sees the raw 1000)', async () => {
+test('a send with target.flowCount=1000 opens at most 32 flows (openChannel never sees the raw 1000)', async () => {
   const { manifest, sources } = await oneFileSource();
   let sendOpenArgs = null;
   const svc = createTransferService({
@@ -1548,7 +1548,7 @@ test('a send with target.flowCount=1000 opens at most 16 flows (openChannel neve
   });
   await svc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'sig-over', flowCount: 1000 } });
   expect(sendOpenArgs).toBeTruthy();
-  expect(sendOpenArgs.flowCount).toBe(16); // clamped, never the raw 1000
+  expect(sendOpenArgs.flowCount).toBe(32); // clamped, never the raw 1000
 });
 
 test('a send with target.flowCount=0 (or negative) falls back to single-flow, not multi-flow', async () => {
