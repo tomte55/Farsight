@@ -85,3 +85,25 @@
 .xfer-tree { padding-left: 0; }
 .xfer-tree-dir { font-weight: 600; margin: 5px 0; }
 .xfer-tree-file { color: var(--sub); margin: 3px 0; font-family: var(--mono); font-size: 11.5px; }
+
+/* Task 10: the expandable transfer detail panel — flow health, terminally-
+   failed files, and the aggregate bytes/rate/ETA/files line. farsight.css's
+   .xfer-row sets flex-wrap:nowrap (summary line only); re-enable wrap here so
+   the detail block (flex-basis:100%) drops to its own line only when shown,
+   without disturbing the single-line summary layout otherwise. Loaded after
+   farsight.css, so this wins on equal specificity. */
+.xfer-row { flex-wrap: wrap; }
+/* A plain <span> wrapper (holds the swapped-in-place Cancel/Remove button)
+   would otherwise become its own flex box; display:contents keeps the button
+   itself as the direct flex child, matching pre-Task-10 layout exactly. */
+.xfer-action-slot { display: contents; }
+.xfer-toggle { font-size: 11px; padding: 4px 10px; }
+.xfer-detail { flex-basis: 100%; margin-top: 6px; padding: 10px 12px; background: var(--bg2); border: 1px solid var(--line); border-radius: 9px; font-size: 12px; color: var(--sub); display: flex; flex-direction: column; gap: 6px; }
+.xfer-detail[hidden] { display: none; }
+.xfer-detail-flow[hidden] { display: none; }
+.xfer-detail-agg { color: var(--ink); }
+.xfer-detail-failed[hidden] { display: none; }
+.xfer-detail-label { font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: .07em; color: var(--danger-ink); margin-bottom: 2px; }
+.xfer-failed-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.xfer-failed-name { font-family: var(--mono); color: var(--ink); }
+.xfer-failed-reason { color: var(--sub); }

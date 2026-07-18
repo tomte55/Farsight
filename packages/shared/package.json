@@ -44,6 +44,7 @@
     "./transfer-queue": "./src/transfer-queue.js",
     "./transfer-rate": "./src/transfer-rate.js",
     "./transfer-label": "./src/transfer-label.js",
+    "./transfer-detail": "./src/transfer-detail.js",
     "./transfer-auth-gate": "./src/transfer-auth-gate.js",
     "./transfer-resume": "./src/transfer-resume.js",
     "./transfer-resume-watcher": "./src/transfer-resume-watcher.js",

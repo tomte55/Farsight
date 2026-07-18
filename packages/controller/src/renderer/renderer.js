@@ -6,6 +6,10 @@ import { createRateEstimator, etaSeconds, bytesDone, filesDone, formatBytes, for
 import { railItems, activeTransferCount, TERMINAL_TRANSFER_STATES, isShellPage, SHELL_PAGES } from '@farsight/shared/shell-nav';
 import { buildStatusSegments } from '@farsight/shared/status-bar';
 import { transferLabel } from '@farsight/shared/transfer-label';
+// Task 10: the expandable transfer detail panel's pure helpers — flow health,
+// the failed-file dedupe accumulator, filename resolution, and the verify-tail
+// rate/ETA fix. Pure/runtime-agnostic, unit-tested in packages/shared/test.
+import { reasonLabel, flowHealthLabel, upsertFailedFile, fileNameFor, aggregateDetail } from '@farsight/shared/transfer-detail';
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
@@ -1362,49 +1366,110 @@ function sendDetailText(j) {
   return parts.join(' · ');
 }
 
+// Task 10: which jobs currently have their detail panel open. A plain Set
+// outside the DOM — expand/collapse state survives any rebuild of the list
+// (structural or not), keyed by jobId rather than by row element.
+const expandedJobs = new Set();
+
+// jobId -> its live row's element refs, valid only while the ROW IDENTITY LIST
+// (transferRowIds) is unchanged from the previous render. Mirrors
+// renderStatusBar's statusbarSegs/renderRail's railButtons pattern (see their
+// comments): onTransferEvent fires renderTransfers() per-file and UNTHROTTLED, so
+// a plain rebuild-every-time (replaceChildren()) would blur focus on a row's
+// Cancel/Details button AND — new in Task 10 — collapse an OPEN detail panel
+// back closed on every tick, since expandedJobs.has() would still say "open" but
+// the freshly-recreated row would start from its default (hidden) DOM state. A
+// progress tick never changes WHICH jobs exist, only their text/bar/detail
+// content — so the hot path mutates existing nodes in place and never removes
+// them. Only a genuine structural change (job added/removed) rebuilds the list
+// from scratch; jobRow()+applyExpanded() below restore each row to its correct
+// open/closed state from expandedJobs on that rarer path too.
+let transferRowIds = [];
+const transferRowEls = new Map();
+
+// Builds a row's DOM ONCE — the summary line (name/bar/state), its Details
+// toggle + Cancel/Remove action, and the (initially hidden) detail panel.
+// Returns the element refs updateJobRow()/applyExpanded() mutate in place on
+// every later tick, per the transferRowEls comment above.
 function jobRow(j) {
   const row = document.createElement('div');
   row.className = 'host-row xfer-row';
 
   const main = document.createElement('div');
   main.className = 'host-main';
-
   const title = document.createElement('div');
   title.className = 'host-name';
-  const arrow = j.direction === 'recv' ? '↓' : '↑';
-  // Label by WHAT is being transferred (file/folder name) — the peer id is often
-  // unknown (not persisted for receives; lost across a restart). fmtCount adds the
-  // file count for context.
-  title.textContent = `${arrow} ${transferLabel(j)} · ${fmtCount(j.manifest)}`;
-
   const barWrap = document.createElement('div');
   barWrap.className = 'xfer-bar';
   const barFill = document.createElement('div');
   barFill.className = 'xfer-bar-fill';
-  const fraction = sendFraction(j);
-  barFill.style.width = `${Math.round(Math.min(1, Math.max(0, fraction)) * 100)}%`;
   barWrap.appendChild(barFill);
-
   const meta = document.createElement('div');
   meta.className = 'host-meta';
-  meta.textContent = stateLabel(j);
-
   main.append(title, barWrap, meta);
 
   const right = document.createElement('div');
   right.className = 'host-right';
-  const active = !TERMINAL_TRANSFER_STATES.includes(j.state);
+  const toggleBtn = document.createElement('button');
+  toggleBtn.className = 'btn btn-ghost xfer-toggle';
+  toggleBtn.setAttribute('aria-expanded', 'false');
+  const actionSlot = document.createElement('span');
+  actionSlot.className = 'xfer-action-slot';
+  right.append(toggleBtn, actionSlot);
+
+  row.append(main, right);
+
+  const detail = document.createElement('div');
+  detail.className = 'xfer-detail';
+  detail.hidden = true;
+  const detailFlow = document.createElement('div');
+  detailFlow.className = 'xfer-detail-flow';
+  const detailAgg = document.createElement('div');
+  detailAgg.className = 'xfer-detail-agg';
+  const detailFailedWrap = document.createElement('div');
+  detailFailedWrap.className = 'xfer-detail-failed';
+  const detailFailedLabel = document.createElement('div');
+  detailFailedLabel.className = 'xfer-detail-label';
+  detailFailedLabel.textContent = 'Failed files';
+  const detailFailedList = document.createElement('ul');
+  detailFailedList.className = 'xfer-failed-list';
+  detailFailedWrap.append(detailFailedLabel, detailFailedList);
+  detail.append(detailFlow, detailAgg, detailFailedWrap);
+  row.appendChild(detail);
+
+  const entry = {
+    row, title, barFill, meta, toggleBtn, actionSlot,
+    detail, detailFlow, detailAgg, detailFailedWrap, detailFailedList,
+    jobId: j.jobId, activeState: null,
+  };
+
+  toggleBtn.onclick = () => {
+    if (expandedJobs.has(entry.jobId)) expandedJobs.delete(entry.jobId);
+    else expandedJobs.add(entry.jobId);
+    applyExpanded(entry, transferJobs.get(entry.jobId) || j);
+  };
+
+  return entry;
+}
+
+// Builds a Cancel (active) or Remove (terminal) button for jobId. Looked up by
+// jobId at CLICK time (transferJobs.get), not captured by reference at build
+// time — a row is only rebuilt when its active/terminal-ness flips (see
+// updateJobRow), so a stale captured job object could otherwise survive past a
+// refreshTransfersList() that replaced the map entry with a new object.
+function buildActionButton(jobId, active) {
   if (active) {
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'btn btn-ghost';
     cancelBtn.textContent = 'Cancel';
     cancelBtn.onclick = async () => {
       cancelBtn.disabled = true;
-      try { await window.farsightIpc.transferCancel(j.jobId); } catch { /* best effort */ }
-      j.state = 'canceled';
+      try { await window.farsightIpc.transferCancel(jobId); } catch { /* best effort */ }
+      const cur = transferJobs.get(jobId);
+      if (cur) cur.state = 'canceled';
       renderTransfers();
     };
-    right.appendChild(cancelBtn);
+    return cancelBtn;
   } else {
     // A finished/failed/canceled job: let it be removed from the list (deletes
     // its persisted record). Drop it from the local map so the row disappears
@@ -1414,16 +1479,79 @@ function jobRow(j) {
     removeBtn.textContent = 'Remove';
     removeBtn.onclick = async () => {
       removeBtn.disabled = true;
-      try { await window.farsightIpc.transferRemove(j.jobId); } catch { /* best effort */ }
-      transferJobs.delete(j.jobId);
-      sendRateEstimators.delete(j.jobId);
+      try { await window.farsightIpc.transferRemove(jobId); } catch { /* best effort */ }
+      transferJobs.delete(jobId);
+      sendRateEstimators.delete(jobId);
+      expandedJobs.delete(jobId);
       renderTransfers();
     };
-    right.appendChild(removeBtn);
+    return removeBtn;
+  }
+}
+
+// Show/hide a row's detail panel per expandedJobs, and (when opening) refresh
+// its content immediately rather than waiting for the next tick.
+function applyExpanded(entry, j) {
+  const expanded = expandedJobs.has(entry.jobId);
+  entry.detail.hidden = !expanded;
+  entry.toggleBtn.textContent = expanded ? 'Hide details' : 'Details';
+  entry.toggleBtn.setAttribute('aria-expanded', String(expanded));
+  if (expanded) renderJobDetail(entry, j);
+}
+
+// Fills in the detail panel: (a) flow health, (b) terminally-failed files (name
+// + human reason), (c) the aggregate bytes/rate/ETA/files line — the last with
+// the verify-tail fix (aggregateDetail suppresses a stale rate/ETA once the
+// state is 'finishing'/'verifying').
+function renderJobDetail(entry, j) {
+  const flowText = flowHealthLabel(j.progress || {});
+  entry.detailFlow.hidden = !flowText;
+  entry.detailFlow.textContent = flowText;
+
+  const agg = aggregateDetail({ progress: j.progress, rate: j.rate, state: j.state });
+  const parts = [agg.bytesText];
+  if (agg.rateText) parts.push(agg.rateText);
+  if (agg.etaText) parts.push(agg.etaText);
+  if (agg.filesText) parts.push(agg.filesText);
+  entry.detailAgg.textContent = parts.join(' · ');
+
+  const failed = j.failedFiles || [];
+  entry.detailFailedWrap.hidden = failed.length === 0;
+  entry.detailFailedList.replaceChildren();
+  for (const f of failed) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'xfer-failed-name';
+    name.textContent = fileNameFor(j.manifest, f.fileId);
+    const reason = document.createElement('span');
+    reason.className = 'xfer-failed-reason';
+    reason.textContent = reasonLabel(f.reason);
+    li.append(name, document.createTextNode(' — '), reason);
+    entry.detailFailedList.appendChild(li);
+  }
+}
+
+// Updates an existing row's text/bar/action-button/detail content from the
+// CURRENT job record — the hot path a progress tick runs, never touching the
+// row's own DOM identity (so focus and the open/closed detail panel survive).
+function updateJobRow(entry, j) {
+  const arrow = j.direction === 'recv' ? '↓' : '↑';
+  // Label by WHAT is being transferred (file/folder name) — the peer id is often
+  // unknown (not persisted for receives; lost across a restart). fmtCount adds the
+  // file count for context.
+  entry.title.textContent = `${arrow} ${transferLabel(j)} · ${fmtCount(j.manifest)}`;
+
+  const fraction = sendFraction(j);
+  entry.barFill.style.width = `${Math.round(Math.min(1, Math.max(0, fraction)) * 100)}%`;
+  entry.meta.textContent = stateLabel(j);
+
+  const active = !TERMINAL_TRANSFER_STATES.includes(j.state);
+  if (entry.activeState !== active) {
+    entry.actionSlot.replaceChildren(buildActionButton(j.jobId, active));
+    entry.activeState = active;
   }
 
-  row.append(main, right);
-  return row;
+  if (expandedJobs.has(entry.jobId)) renderJobDetail(entry, j);
 }
 
 // Remove every finished/failed/canceled job in one go. Active transfers are left
@@ -1434,15 +1562,36 @@ async function clearFinishedTransfers() {
     try { await window.farsightIpc.transferRemove(j.jobId); } catch { /* best effort */ }
     transferJobs.delete(j.jobId);
     sendRateEstimators.delete(j.jobId);
+    expandedJobs.delete(j.jobId);
   }
   renderTransfers();
 }
 
 function renderTransfers() {
   const jobs = [...transferJobs.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  transfersListEl.replaceChildren();
   transfersEmptyEl.hidden = jobs.length > 0;
-  for (const j of jobs) transfersListEl.appendChild(jobRow(j));
+
+  const ids = jobs.map((j) => j.jobId);
+  const structureChanged = ids.length !== transferRowIds.length || ids.some((id, i) => id !== transferRowIds[i]);
+
+  if (!structureChanged) {
+    for (const j of jobs) {
+      const entry = transferRowEls.get(j.jobId);
+      if (entry) updateJobRow(entry, j);
+    }
+    return;
+  }
+
+  transferRowEls.clear();
+  transfersListEl.replaceChildren();
+  transferRowIds = ids;
+  for (const j of jobs) {
+    const entry = jobRow(j);
+    updateJobRow(entry, j);
+    applyExpanded(entry, j); // restore this job's prior open/closed state
+    transfersListEl.appendChild(entry.row);
+    transferRowEls.set(j.jobId, entry);
+  }
 }
 
 async function refreshTransfersList() {
@@ -1522,6 +1671,12 @@ window.farsightIpc.onTransferEvent((ev) => {
     // live ETA, which is meaningless once bytes have stopped and hashing began.
     if (ev.progress) existing.progress = ev.progress;
     existing.state = 'verifying';
+  } else if (ev.type === 'file-failed') {
+    // Task 10 (transfer detail UI): accumulate TERMINALLY-failed files for the
+    // detail panel's failed-files list. A file-failed carrying no `reason` is
+    // retryable (transfer-service.js only treats a reason-carrying one as
+    // terminal) — not a real failure yet, so it must not show up here.
+    if (ev.reason) existing.failedFiles = upsertFailedFile(existing.failedFiles, { fileId: ev.fileId, reason: ev.reason });
   } else if (ev.progress) {
     // Progress implies the peer accepted (bytes are flowing). Completion is
     // signaled by 'completed', NOT by fraction hitting 1 (that's "all sent", not
