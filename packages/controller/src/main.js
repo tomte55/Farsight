@@ -426,8 +426,12 @@ ipcMain.handle('transfer:send', async (_e, input) => {
     // (no caller does today, but a future per-send override should win over
     // the ambient setting — same precedence resolveFlowCount already gives
     // target.flowCount over the service-level default in transfer-service.js).
+    // Review fix: an override is routed through resolveParallelConnections too
+    // (belt-and-suspenders — transfer-service.js's resolveFlowCount is the last
+    // line of defense) so a stray/adversarial target.flowCount (e.g. 1000) can
+    // never reach the multi-flow branch un-clamped even at this earlier point.
     const flowCount = Number.isInteger(target.flowCount) && target.flowCount > 0
-      ? target.flowCount : parallelConnections();
+      ? resolveParallelConnections(target.flowCount) : parallelConnections();
     const sendTarget = { ...target, flowCount };
     log?.child('transfer').info(`send start job=${jobId} target=${target.id} files=${manifest.totalFiles} bytes=${manifest.totalBytes} flowCount=${flowCount}`);
     // Fire-and-forget: startSend()'s promise only resolves once the WHOLE

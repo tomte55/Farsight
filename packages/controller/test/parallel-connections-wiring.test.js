@@ -33,9 +33,17 @@ describe('main.js: parallel-connections setting', () => {
     expect(main).toMatch(/serializeConfig\(\s*\{\s*\.\.\.readStoredConfig\(\),\s*parallelConnections:\s*n\s*\}\s*\)/);
   });
   test('transfer:send resolves flowCount from the setting unless the caller already gave one, and never sends a bare target', () => {
-    expect(main).toMatch(/Number\.isInteger\(target\.flowCount\)\s*&&\s*target\.flowCount\s*>\s*0\s*\n\s*\?\s*target\.flowCount\s*:\s*parallelConnections\(\)/);
+    expect(main).toMatch(/Number\.isInteger\(target\.flowCount\)\s*&&\s*target\.flowCount\s*>\s*0\s*\n\s*\?\s*resolveParallelConnections\(target\.flowCount\)\s*:\s*parallelConnections\(\)/);
     expect(main).toMatch(/const sendTarget = \{ \.\.\.target, flowCount \};/);
     expect(main).toMatch(/startSend\(\{\s*jobId,\s*manifest,\s*sources,\s*target:\s*sendTarget,\s*sourceRoots:\s*paths\s*\}\)/);
+  });
+  // Task 6 review fix: a target.flowCount override must be routed through the
+  // SAME [1,16] clamp (resolveParallelConnections) the ambient setting uses —
+  // not passed through raw — so a stray/adversarial value (e.g. 1000) can never
+  // reach the multi-flow branch un-clamped from this earlier call site either
+  // (transfer-service.js's resolveFlowCount is the other, last-line choke point).
+  test('an explicit target.flowCount override is clamped via resolveParallelConnections, not passed through raw', () => {
+    expect(main).toMatch(/Number\.isInteger\(target\.flowCount\)\s*&&\s*target\.flowCount\s*>\s*0\s*\n\s*\?\s*resolveParallelConnections\(target\.flowCount\)\s*:\s*parallelConnections\(\)/);
   });
 });
 

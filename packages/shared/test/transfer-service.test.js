@@ -5,7 +5,7 @@ import { expect, test, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createTransferService } from '../src/transfer-service.js';
+import { createTransferService, resolveFlowCount } from '../src/transfer-service.js';
 import { createReceiver, createSender } from '@farsight/shared/transfer-orchestrator';
 import { walkSource } from '@farsight/shared/transfer-io';
 import { buildManifest as buildManifestReal } from '@farsight/shared/transfer-manifest';
@@ -1465,4 +1465,57 @@ test('removeJob refuses while a send is still in flight (must cancel first)', as
 
   expect(await svc.removeJob(jobId)).toEqual({ ok: false, error: 'active' });
   await svc.cancel(jobId); // teardown so afterEach can clean up
+});
+
+// Task 6 review fix: resolveFlowCount is the LAST-line-of-defense choke point
+// for the multi-flow flowCount -- it must clamp into [1,16] via
+// resolveParallelConnections regardless of source (an explicit per-send
+// override, the service-level default, or a stray/adversarial value like
+// 1000), never just reject non-positive-integers as it used to.
+test('resolveFlowCount clamps an out-of-range preferred value into [1,16]', () => {
+  expect(resolveFlowCount(1000, undefined)).toBe(16); // way over max -> clamped, not passed through
+  expect(resolveFlowCount(17, undefined)).toBe(16); // just over max
+  expect(resolveFlowCount(16, undefined)).toBe(16); // exactly max -> unaffected
+  expect(resolveFlowCount(1, undefined)).toBe(1); // exactly 1 -> single-flow preserved
+  expect(resolveFlowCount(8, undefined)).toBe(8); // in-range -> unaffected
+});
+
+test('resolveFlowCount: non-positive-integer preferred/fallback still fall through to 1 (single-flow), not to the default 8', () => {
+  expect(resolveFlowCount(0, undefined)).toBe(1);
+  expect(resolveFlowCount(-5, undefined)).toBe(1);
+  expect(resolveFlowCount(1.5, undefined)).toBe(1);
+  expect(resolveFlowCount(undefined, undefined)).toBe(1);
+});
+
+test('resolveFlowCount: an out-of-range fallback (service default) is clamped too, not just the preferred value', () => {
+  expect(resolveFlowCount(undefined, 1000)).toBe(16);
+  expect(resolveFlowCount(0, 1000)).toBe(16); // preferred rejected -> falls to fallback -> still clamped
+});
+
+test('a send with target.flowCount=1000 opens at most 16 flows (openChannel never sees the raw 1000)', async () => {
+  const { manifest, sources } = await oneFileSource();
+  let sendOpenArgs = null;
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async (args) => { sendOpenArgs = args; return { channel: deadChannel(), close: async () => {} }; },
+    rendezvousTimeoutMs: 60,
+  });
+  await svc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'sig-over', flowCount: 1000 } });
+  expect(sendOpenArgs).toBeTruthy();
+  expect(sendOpenArgs.flowCount).toBe(16); // clamped, never the raw 1000
+});
+
+test('a send with target.flowCount=0 (or negative) falls back to single-flow, not multi-flow', async () => {
+  const { manifest, sources } = await oneFileSource();
+  let sendOpenArgs = null;
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async (args) => { sendOpenArgs = args; return { channel: deadChannel(), close: async () => {} }; },
+    rendezvousTimeoutMs: 60,
+  });
+  await svc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'sig-zero', flowCount: 0 } });
+  expect(sendOpenArgs).toBeTruthy();
+  // Single-flow openArgs never carries a flowCount key at all (see runSend's
+  // `flowCount > 1 ? { ..., flowCount } : { role: 'initiate', target }`).
+  expect(sendOpenArgs.flowCount).toBeUndefined();
 });
