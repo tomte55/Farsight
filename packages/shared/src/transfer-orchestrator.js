@@ -192,11 +192,13 @@ export function createMultiFlowSender({
   const fail = (e) => { if (!settled) { settled = true; clearCompletion(); reject(e); } };
   const run = serializer(fail);
 
-  // Each file's hash is finalized over a single sequential read of the whole
-  // file (createChunkProducer feeds hashUpdate for every byte, covered or not),
-  // so file_end is ready the first time gapChunks walks that file to completion
-  // — later reconcile passes re-walk the file for gaps but must NOT re-send it.
-  const hashSent = new Set();
+  // Each file's hash, computed once by the initial full-file read (below) and
+  // reused by any later gap pass's re-sent file_end — a resumed, already
+  // byte-complete file still gets hashed+file_end here (the bug this fixes: a
+  // file the accept-time coverage already reports complete previously never
+  // got read/hashed at all, so its file_end never went out and the receiver
+  // could never finalize it).
+  const fileHash = new Map();
 
   // Resolves the next time a range_report updates the tracker, or after `ms` —
   // a lost/delayed final report must not stall the driver forever, so a timeout
@@ -218,10 +220,15 @@ export function createMultiFlowSender({
     });
   }
 
-  async function* gapChunks() {
+  // Initial pass: read+hash EVERY file exactly once, in manifest order — even
+  // one the accept-time tracker already reports byte-complete (the resume
+  // case) — yielding only its currently-uncovered chunks, then send its
+  // file_end. This is what fixes the hang: without a full read here, a
+  // resumed-complete file never gets hashed and its file_end never goes out,
+  // so the receiver has every byte but nothing to finalize against.
+  async function* initialPass() {
     for (const file of manifest.entries) {
       if (canceled) return;
-      if (tracker.coveredFor(file.fileId).isComplete(file.size)) continue;
       const reader = readerFor(file.fileId);
       const hasher = newHash();
       const producer = createChunkProducer({
@@ -230,32 +237,58 @@ export function createMultiFlowSender({
         chunkSize,
       });
       for await (const c of producer.produce(file, tracker.coveredFor(file.fileId))) {
-        if (canceled) { reader.close(); return; }
+        if (canceled) { await reader.close(); return; }
         yield c;
       }
-      reader.close();
+      await reader.close();
       if (canceled) return;
-      if (!hashSent.has(file.fileId)) {
-        hashSent.add(file.fileId);
-        ctrl.sendCtrl(fileEndFrame({ jobId, fileId: file.fileId, hash: hasher.digest('hex') }));
+      const h = hasher.digest('hex');
+      fileHash.set(file.fileId, h);
+      ctrl.sendCtrl(fileEndFrame({ jobId, fileId: file.fileId, hash: h }));
+    }
+  }
+
+  // Later passes: for each file the receiver still reports incomplete, re-send
+  // ONLY its gap byte-ranges (no whole-file re-read/re-hash — the hash was
+  // already computed once, above) and RE-SEND its file_end — idempotent on the
+  // receiver, and needed for a file the receiver reset after a verify failure.
+  async function* gapPass() {
+    for (const file of manifest.entries) {
+      if (canceled) return;
+      if (tracker.coveredFor(file.fileId).isComplete(file.size)) continue;
+      const reader = readerFor(file.fileId);
+      for (const gap of tracker.gapsFor(file.fileId)) {
+        let off = gap.offset; const end = gap.offset + gap.length;
+        while (off < end) {
+          if (canceled) { await reader.close(); return; }
+          const len = Math.min(chunkSize, end - off);
+          const payload = await reader.readAt(off, len);
+          yield { fileId: file.fileId, offset: off, length: len, payload };
+          off += len;
+        }
+      }
+      await reader.close();
+      if (canceled) return;
+      if (fileHash.has(file.fileId)) {
+        ctrl.sendCtrl(fileEndFrame({ jobId, fileId: file.fileId, hash: fileHash.get(file.fileId) }));
       }
     }
   }
 
   async function pump() {
-    for (;;) {
-      if (canceled) return;
-      try {
-        await createSendPool({ flows }).run(gapChunks());
-      } catch (e) {
-        fail(e); // includes 'no_live_flows' — never spin against a dead flow set
-        return;
+    try {
+      await createSendPool({ flows }).run(initialPass());
+      for (;;) {
+        if (canceled) return;
+        if (tracker.isComplete()) break;
+        await waitForReport(reconcileWaitMs);
+        if (canceled) return;
+        if (tracker.isComplete()) break;
+        await createSendPool({ flows }).run(gapPass());
       }
-      if (canceled) return;
-      if (tracker.isComplete()) break;
-      await waitForReport(reconcileWaitMs);
-      if (canceled) return;
-      if (tracker.isComplete()) break;
+    } catch (e) {
+      fail(e); // includes 'no_live_flows' — never spin against a dead flow set
+      return;
     }
     ctrl.sendCtrl(jobDoneFrame({ jobId }));
     onEvent({ type: 'all-sent' });

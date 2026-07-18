@@ -101,4 +101,31 @@ describe('createMultiFlowSender', () => {
     expect(r.ok).toBe(true);
     expect(Buffer.from(rig.dest.get(0)).equals(Buffer.from(A))).toBe(true);
   });
+
+  it('sends file_end for a file already byte-complete on accept (resume) and completes', async () => {
+    const size = 4096 * 2;
+    const A = new Uint8Array(size).map((_, i) => (i * 5) & 0xff);
+    let onCtrl = null; const sent = [];
+    const ctrl = {
+      sendCtrl: (s) => {
+        const f = parseCtrlFrame(s);
+        sent.push(f);
+        if (f.t === 'offer' || f.t === 'offer_end') onCtrl(acceptFrame({ jobId: JOB, resume: [], ranges: [{ fileId: 0, ivals: [[0, size]] }] }));
+        if (f.t === 'file_end') onCtrl(rangeReportFrame({ jobId: JOB, files: [{ fileId: 0, ivals: [[0, size]] }] }));
+        if (f.t === 'job_done') onCtrl(completeFrame({ jobId: JOB, ok: true }));
+      },
+      onCtrl: (cb) => { onCtrl = cb; },
+    };
+    const flows = [{ isAlive: () => true, sendBulk: () => Promise.resolve() }];
+    const sender = createMultiFlowSender({
+      ctrl, flows, jobId: JOB, manifest: { entries: [{ fileId: 0, size }] }, chunkSize: 4096, flowCount: 1,
+      groupId: 'b'.repeat(32),
+      readerFor: () => ({ readAt: (o, l) => Promise.resolve(A.subarray(o, o + l)), close: () => {} }),
+      newHash: () => ({ update() {}, digest: () => 'H' }),
+      reconcileWaitMs: 50,
+    });
+    const r = await sender.start();
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    expect(sent.some((f) => f.t === 'file_end' && f.fileId === 0)).toBe(true); // file_end sent despite full resume coverage
+  });
 });
