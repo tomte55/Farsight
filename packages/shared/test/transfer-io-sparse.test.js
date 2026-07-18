@@ -1,9 +1,34 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, readFile, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSparsePartFile, openSourceReader, finalizeReceivedFile, finalizeReceivedPath, confineDestPath } from '../src/transfer-io.js';
 import { createHash } from 'node:crypto';
+
+// A passthrough mock of node:fs/promises' `stat` that lets a couple of
+// sentinel-named tests inject a non-ENOENT failure (e.g. a Windows AV-scanner
+// transient lock), while every other stat call in this file (mkdtemp, rm,
+// readFile, writeFile, and every other test's stat) goes to the real fs.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    stat: async (path, ...rest) => {
+      const p = String(path);
+      if (p.includes('trigger-eperm-part') && p.endsWith('.part')) {
+        const err = new Error('EPERM: operation not permitted, stat');
+        err.code = 'EPERM';
+        throw err;
+      }
+      if (p.includes('trigger-eperm-final') && !p.endsWith('.part')) {
+        const err = new Error('EPERM: operation not permitted, stat');
+        err.code = 'EPERM';
+        throw err;
+      }
+      return actual.stat(path, ...rest);
+    },
+  };
+});
 
 let dir;
 beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'fs-sparse-')); });
@@ -68,6 +93,18 @@ describe('finalizeReceivedPath', () => {
   it('neither .part nor final exists returns not-ok', async () => {
     const r = await finalizeReceivedPath({ destRoot: dir, relPath: 'nope.bin', expectedHash: 'x', mtime: 1 });
     expect(r.ok).toBe(false);
+  });
+
+  it('a non-ENOENT error statting the .part propagates instead of being treated as absent', async () => {
+    await expect(
+      finalizeReceivedPath({ destRoot: dir, relPath: 'trigger-eperm-part.bin', expectedHash: 'x', mtime: 1 })
+    ).rejects.toMatchObject({ code: 'EPERM' });
+  });
+
+  it('a non-ENOENT error statting the final (with no .part present) propagates instead of returning not-ok', async () => {
+    await expect(
+      finalizeReceivedPath({ destRoot: dir, relPath: 'trigger-eperm-final.bin', expectedHash: 'x', mtime: 1 })
+    ).rejects.toMatchObject({ code: 'EPERM' });
   });
 });
 

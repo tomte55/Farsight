@@ -136,9 +136,9 @@ export async function finalizeReceivedPath({ destRoot, relPath, expectedHash, mt
   const finalPath = confineDestPath(destRoot, relPath);
   const partPath = `${finalPath}.part`;
   let partExists = true;
-  try { await stat(partPath); } catch { partExists = false; }
+  try { await stat(partPath); } catch (e) { if (e && e.code === 'ENOENT') partExists = false; else throw e; }
   if (!partExists) {
-    try { await stat(finalPath); return { ok: true }; } catch { return { ok: false }; }
+    try { await stat(finalPath); return { ok: true }; } catch (e) { if (e && e.code === 'ENOENT') return { ok: false }; throw e; }
   }
   const actual = await hashFile(partPath);
   if (actual !== expectedHash) { await rm(partPath, { force: true }); return { ok: false }; }
