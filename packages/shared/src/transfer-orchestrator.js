@@ -27,6 +27,10 @@ import { buildManifest, skipExisting } from './transfer-manifest.js';
 import { createSendJob, createReceiveJob } from './transfer-engine.js';
 import { sendFile, createPartFile, finalizeReceivedFile, hasFreeSpace, confineDestPath, publishFullyReceivedFile } from './transfer-io.js';
 import { stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createChunkProducer } from './transfer-producer.js';
+import { createSendPool } from './transfer-send-pool.js';
+import { createCoverageTracker } from './transfer-reconcile.js';
 
 // Serialize async event handlers so awaited writes never interleave. Handler
 // exceptions are surfaced to onErr (a `fail(err)`) instead of being swallowed —
@@ -146,6 +150,170 @@ export function createSender({
     // failed or the peer never accepted before the timeout. Rejects start()'s
     // promise (idempotent via `settled`); a no-op once the send has settled.
     abort(reason = 'aborted') { canceled = true; fail(new Error(reason)); },
+  };
+}
+
+// Multi-flow sender: stripes chunks across N bulk flows (Plan 1's send-pool),
+// tracks the RECEIVER's confirmed coverage (Plan 1's reconcile tracker) rather
+// than a local send-queue, and re-drives any gap the tracker still shows after
+// each pass — so a dropped chunk on a dead/rejecting flow gets re-sent without
+// the sender ever needing to know WHICH flow failed. Coverage-defined completion
+// (not queue-defined) is the whole point: `job_done` only goes out once the
+// tracker says every byte is covered, and even then the driver doesn't resolve
+// until the receiver's `complete` ack lands (same discipline as createSender).
+export function createMultiFlowSender({
+  ctrl, flows, jobId, manifest, chunkSize = 131072, flowCount, groupId,
+  readerFor, newHash = () => createHash('sha256'),
+  onEvent = () => {},
+  offerBatchBytes = 49152,
+  completionTimeoutMs = 120000,
+  reconcileWaitMs = 3000,
+  setTimer = setTimeout, clearTimer = clearTimeout,
+}) {
+  if (typeof readerFor !== 'function') throw new Error('readerFor is required');
+
+  const tracker = createCoverageTracker({ manifest });
+  // The test manifests (and any minimal caller) may omit totalBytes/totalFiles —
+  // the wire's `offer`/`offer_begin` frames require them to be integers (protocol
+  // validation in transfer-protocol.js's parseCtrlFrame), so derive them from the
+  // entries when a full buildManifest() output wasn't provided.
+  const totalBytes = Number.isInteger(manifest.totalBytes) ? manifest.totalBytes
+    : manifest.entries.reduce((s, e) => s + e.size, 0);
+  const totalFiles = Number.isInteger(manifest.totalFiles) ? manifest.totalFiles : manifest.entries.length;
+
+  let canceled = false;
+  let settled = false;
+  let pumped = false;
+  let resolve, reject;
+  const finished = new Promise((res, rej) => { resolve = res; reject = rej; });
+  let completionTimer = null;
+  const clearCompletion = () => { if (completionTimer) { clearTimer(completionTimer); completionTimer = null; } };
+  const resolveOnce = (v) => { if (!settled) { settled = true; clearCompletion(); resolve(v); } };
+  const fail = (e) => { if (!settled) { settled = true; clearCompletion(); reject(e); } };
+  const run = serializer(fail);
+
+  // Each file's hash is finalized over a single sequential read of the whole
+  // file (createChunkProducer feeds hashUpdate for every byte, covered or not),
+  // so file_end is ready the first time gapChunks walks that file to completion
+  // — later reconcile passes re-walk the file for gaps but must NOT re-send it.
+  const hashSent = new Set();
+
+  // Resolves the next time a range_report updates the tracker, or after `ms` —
+  // a lost/delayed final report must not stall the driver forever, so a timeout
+  // just re-drives another pass (which is a correctness no-op if nothing's left).
+  let pendingWaiterResolve = null;
+  function waitForReport(ms) {
+    return new Promise((res) => {
+      let done = false;
+      const timer = setTimer(() => {
+        if (done) return;
+        done = true; pendingWaiterResolve = null;
+        res();
+      }, ms);
+      pendingWaiterResolve = () => {
+        if (done) return;
+        done = true; clearTimer(timer); pendingWaiterResolve = null;
+        res();
+      };
+    });
+  }
+
+  async function* gapChunks() {
+    for (const file of manifest.entries) {
+      if (canceled) return;
+      if (tracker.coveredFor(file.fileId).isComplete(file.size)) continue;
+      const reader = readerFor(file.fileId);
+      const hasher = newHash();
+      const producer = createChunkProducer({
+        readChunk: (o, l) => reader.readAt(o, l),
+        hashUpdate: (b) => hasher.update(b),
+        chunkSize,
+      });
+      for await (const c of producer.produce(file, tracker.coveredFor(file.fileId))) {
+        if (canceled) { reader.close(); return; }
+        yield c;
+      }
+      reader.close();
+      if (canceled) return;
+      if (!hashSent.has(file.fileId)) {
+        hashSent.add(file.fileId);
+        ctrl.sendCtrl(fileEndFrame({ jobId, fileId: file.fileId, hash: hasher.digest('hex') }));
+      }
+    }
+  }
+
+  async function pump() {
+    for (;;) {
+      if (canceled) return;
+      try {
+        await createSendPool({ flows }).run(gapChunks());
+      } catch (e) {
+        fail(e); // includes 'no_live_flows' — never spin against a dead flow set
+        return;
+      }
+      if (canceled) return;
+      if (tracker.isComplete()) break;
+      await waitForReport(reconcileWaitMs);
+      if (canceled) return;
+      if (tracker.isComplete()) break;
+    }
+    ctrl.sendCtrl(jobDoneFrame({ jobId }));
+    onEvent({ type: 'all-sent' });
+    if (!settled && completionTimeoutMs > 0) {
+      completionTimer = setTimer(() => fail(new Error('no_confirmation')), completionTimeoutMs);
+      if (completionTimer && completionTimer.unref) completionTimer.unref();
+    }
+  }
+
+  ctrl.onCtrl((str) => run(async () => {
+    const f = parseCtrlFrame(str);
+    if (!f || f.jobId !== jobId) return;
+    if (f.t === 'prompting') { onEvent({ type: 'prompting' }); return; }
+    if (f.t === 'complete') {
+      if (f.ok) { onEvent({ type: 'completed' }); resolveOnce({ jobId, ok: true }); }
+      else { onEvent({ type: 'error', reason: 'receiver_incomplete' }); fail(new Error('receiver_incomplete')); }
+      return;
+    }
+    if (f.t === 'reject') { onEvent({ type: 'declined', reason: f.reason }); fail(new Error(`rejected: ${f.reason}`)); return; }
+    if (f.t === 'cancel') {
+      onEvent({ type: 'canceled' }); canceled = true;
+      if (pendingWaiterResolve) pendingWaiterResolve();
+      fail(new Error('canceled'));
+      return;
+    }
+    if (f.t === 'range_report') { tracker.applyReport(f.files); if (pendingWaiterResolve) pendingWaiterResolve(); return; }
+    // pump() is intentionally NOT awaited here — same reasoning as createSender's
+    // pump: it must run outside the serializer chain so a later `cancel` can
+    // still get processed (and observed by the `canceled` flag) while pump is
+    // mid-flight, rather than queuing behind it.
+    if (f.t === 'accept' && !pumped) {
+      pumped = true;
+      tracker.applyReport(f.ranges || []);
+      onEvent({ type: 'accepted' });
+      pump().catch(fail);
+    }
+  }));
+
+  return {
+    start() {
+      const batches = batchEntriesBySize(manifest.entries, offerBatchBytes);
+      if (batches.length <= 1) {
+        ctrl.sendCtrl(offerFrame({ jobId, entries: manifest.entries, totalBytes, totalFiles, flowCount, groupId }));
+      } else {
+        ctrl.sendCtrl(offerBeginFrame({ jobId, totalBytes, totalFiles, flowCount, groupId }));
+        for (const b of batches) ctrl.sendCtrl(offerEntriesFrame({ jobId, entries: b }));
+        ctrl.sendCtrl(offerEndFrame({ jobId }));
+      }
+      return finished;
+    },
+    // Mirrors createSender's abort. Also wakes a pump() parked in waitForReport
+    // so the pass loop observes `canceled` promptly instead of idling out the
+    // full reconcileWaitMs before it gets a chance to check.
+    abort(reason = 'aborted') {
+      canceled = true;
+      if (pendingWaiterResolve) pendingWaiterResolve();
+      fail(new Error(reason));
+    },
   };
 }
 
