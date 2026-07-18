@@ -180,3 +180,41 @@ export function sendFile({ sourcePath, offset, chunkSize, onChunk }) {
     rs.on('end', () => { chain.then(() => res({ hash: h.digest('hex') })).catch(fail); });
   });
 }
+
+// Positional (sparse) .part writer for the multi-flow receiver: chunks arrive out
+// of order on many flows and are written at their byte offset, so the .part is
+// sparse and its size is NOT the resume offset (received-ranges are; see the
+// orchestrator). liveDigest() is always null — an out-of-order file can only be
+// verified by a completion read at finalize. Shape matches finalizeReceivedFile.
+export async function createSparsePartFile({ destRoot, relPath }) {
+  const finalPath = confineDestPath(destRoot, relPath);
+  const partPath = `${finalPath}.part`;
+  await mkdir(dirname(finalPath), { recursive: true });
+  // Open for positional read+write: create-if-absent without truncating an
+  // existing .part (resume keeps prior bytes), and allow writing at arbitrary offsets.
+  let exists = false;
+  try { await stat(partPath); exists = true; } catch { /* doesn't exist */ }
+  const fh = await open(partPath, exists ? 'r+' : 'w+');
+  return {
+    partPath,
+    finalPath,
+    async writeAt(offset, buf) { await fh.write(buf, 0, buf.length, offset); },
+    liveDigest() { return null; },
+    async fsync() { await fh.sync(); },
+    async close() { await fh.close(); },
+  };
+}
+
+// Positional source reader for the sender's producer: reads exactly the bytes
+// present (clamped at EOF), at an arbitrary offset, without a streaming cursor.
+export async function openSourceReader(sourcePath) {
+  const fh = await open(sourcePath, 'r');
+  return {
+    async readAt(offset, length) {
+      const buf = Buffer.allocUnsafe(length);
+      const { bytesRead } = await fh.read(buf, 0, length, offset);
+      return new Uint8Array(buf.subarray(0, bytesRead));
+    },
+    async close() { await fh.close(); },
+  };
+}
