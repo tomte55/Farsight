@@ -33,7 +33,7 @@ const renderer = readFileSync(path.join(dir, '../src/renderer/renderer.js'), 'ut
 function fakeWorker() {
   let stateCb = null;
   return {
-    channel: { sendCtrl: vi.fn(), onCtrl: vi.fn(), sendBulk: vi.fn(), onBulk: vi.fn() },
+    channel: { sendCtrl: vi.fn(), onCtrl: vi.fn(), sendBulk: vi.fn(), onBulk: vi.fn(), fail: vi.fn() },
     onSessionState: vi.fn((cb) => { stateCb = cb; }),
     startRendezvous: vi.fn(),
     close: vi.fn(async () => {}),
@@ -95,6 +95,56 @@ describe('assembleSendFlows (SEND multi-flow assembly)', () => {
     expect(flows[1].isAlive()).toBe(false);
   });
 
+  // C1 (critical deadlock fix): a flow reporting a TERMINAL state must not
+  // just stop being dispatched new work (isAlive()->false) -- any sendBulk
+  // ALREADY in flight on it has to be forced to reject too (via
+  // channel.fail()), or the send pool's Promise.race(inflight) waits forever
+  // on a promise the dead worker will never credit. 'disconnected' is
+  // deliberately excluded -- it's transient (may ICE-restart); only 'failed',
+  // 'closed', and 'error:*' are terminal here.
+  test("'failed' marks the flow not-alive AND calls channel.fail(state) (Fix B + Fix A wiring)", () => {
+    const workers = [];
+    const { flows } = assembleSendFlows({
+      flowCount: 1,
+      createWorker: () => { const w = fakeWorker(); workers.push(w); return w; },
+      makeParams: () => ({}),
+    });
+    workers[0].__emit('connected');
+    expect(flows[0].isAlive()).toBe(true);
+    expect(workers[0].channel.fail).not.toHaveBeenCalled();
+
+    workers[0].__emit('failed');
+    expect(flows[0].isAlive()).toBe(false);
+    expect(workers[0].channel.fail).toHaveBeenCalledTimes(1);
+    expect(workers[0].channel.fail).toHaveBeenCalledWith('failed');
+  });
+
+  test("'closed' also calls channel.fail(state) (terminal, not just 'not alive')", () => {
+    const workers = [];
+    const { flows } = assembleSendFlows({
+      flowCount: 1,
+      createWorker: () => { const w = fakeWorker(); workers.push(w); return w; },
+      makeParams: () => ({}),
+    });
+    workers[0].__emit('connected');
+    workers[0].__emit('closed');
+    expect(flows[0].isAlive()).toBe(false);
+    expect(workers[0].channel.fail).toHaveBeenCalledWith('closed');
+  });
+
+  test("'disconnected' marks not-alive but does NOT call channel.fail() (transient — may ICE-restart)", () => {
+    const workers = [];
+    const { flows } = assembleSendFlows({
+      flowCount: 1,
+      createWorker: () => { const w = fakeWorker(); workers.push(w); return w; },
+      makeParams: () => ({}),
+    });
+    workers[0].__emit('connected');
+    workers[0].__emit('disconnected');
+    expect(flows[0].isAlive()).toBe(false);
+    expect(workers[0].channel.fail).not.toHaveBeenCalled();
+  });
+
   test('an error: state marks that worker not-alive, and (worker 0 only) forwards to onRendezvousError', () => {
     const workers = [];
     const { flows, onRendezvousError } = assembleSendFlows({
@@ -112,6 +162,7 @@ describe('assembleSendFlows (SEND multi-flow assembly)', () => {
     workers[1].__emit('error:host_offline');
     expect(flows[1].isAlive()).toBe(false);
     expect(errors).toEqual([]);
+    expect(workers[1].channel.fail).toHaveBeenCalledWith('error:host_offline');
     workers[0].__emit('error:bad_password');
     expect(flows[0].isAlive()).toBe(false);
     expect(errors).toEqual(['bad_password']);
@@ -145,6 +196,19 @@ describe('assembleReceiveGroup (RECEIVE multi-flow assembly)', () => {
     expect(bundle.ctrl).toBe(h0.channel);
     expect(bundle.peerAuth).toBe(h0.peerAuth);
     expect(bundle.flows).toEqual([h0.channel, h1.channel, h2.channel]);
+  });
+
+  // C1 (I1): createGroupRendezvous can fire onGroupReady with a PARTIAL group
+  // (its join-window timeout fires with whatever flows connected -- exactly
+  // the Starlink-handover scenario: flow 0 died before ever connecting). The
+  // paired sender ALWAYS sends the manifest OFFER on ITS flow 0, so silently
+  // anchoring ctrl on the lowest-CONNECTED flow (flow 1 here) would listen for
+  // that OFFER on the wrong data channel forever -- a silent hang, not a
+  // clean failure. Must abort (return null) instead.
+  test('a partial group with NO flowIndex-0 handle aborts instead of anchoring ctrl on flow 1', () => {
+    const h1 = fakeHandle(1), h2 = fakeHandle(2);
+    const bundle = assembleReceiveGroup([h1, h2]);
+    expect(bundle).toBeNull();
   });
 
   test('close() closes every handle', async () => {
@@ -228,6 +292,18 @@ describe('main.js: SEND assembly wiring (text-based — main.js imports electron
     // re-open the "group map leak" bug this line exists to close. Require the
     // actual .finally(...) wiring so moving the call out of it fails this test.
     expect(main).toMatch(/\.finally\(\(\)\s*=>\s*groupRendezvous\.cancel\(groupId\)\)/);
+  });
+
+  // C1 (I1): assembleReceiveGroup returns null for a partial group missing
+  // flowIndex 0. onGroupReady must check for that and bail out BEFORE ever
+  // calling startReceive/populating pendingGroupReceives (both of which the
+  // "assembles the bundle" test above already anchors on `bundle`) -- and
+  // still release the group's resources (close the flows that DID connect,
+  // cancel the group) instead of leaking them.
+  test('onGroupReady aborts (does not call startReceive) when the bundle is null, and still releases the group', () => {
+    expect(main).toMatch(/if\s*\(\s*!bundle\s*\)\s*\{/);
+    expect(main).toMatch(/Promise\.all\(flows\.map\(\(f\)\s*=>\s*f\.close\(\)\)\)/);
+    expect(main).toMatch(/if\s*\(\s*!bundle\s*\)\s*\{[\s\S]*?groupRendezvous\.cancel\(groupId\);[\s\S]*?return;[\s\S]*?\}/);
   });
 
   test('openChannel(attach) looks up the pre-opened bundle from pendingGroupReceives by sessionId', () => {

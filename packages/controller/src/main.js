@@ -264,6 +264,17 @@ const groupRendezvous = createGroupRendezvous({
   onGroupReady: ({ groupId, flowCount, flows }) => {
     const linked = !!(flows[0] && flows[0].linked);
     const bundle = flowCount > 1 ? assembleReceiveGroup(flows) : flows[0];
+    // C1 (I1): assembleReceiveGroup returns null for a partial group with no
+    // flowIndex-0 handle -- there is no channel the manifest OFFER could ever
+    // arrive on, so starting the receive would hang forever waiting for it.
+    // Fail clean instead: close whatever DID connect and release the group
+    // (never call startReceive, never populate pendingGroupReceives).
+    if (!bundle) {
+      log?.child('transfer').warn(`transfer group aborted (no flow 0) group=${groupId} flows=${flows.length}/${flowCount}`);
+      Promise.all(flows.map((f) => f.close())).catch(() => {});
+      groupRendezvous.cancel(groupId);
+      return;
+    }
     const sessionId = groupId; // correlates with the openChannel(attach) lookup below
     pendingGroupReceives.set(sessionId, bundle);
     log?.child('transfer').info(`transfer group ready group=${groupId} flows=${flows.length}/${flowCount}`);

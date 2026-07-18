@@ -111,3 +111,38 @@ test('createTransferChannel registers the credit listener exactly once, not per 
   const creditRegistrations = bus.on.mock.calls.filter(([topic]) => topic === 'ft-bulk-credit');
   expect(creditRegistrations.length).toBe(1);
 });
+
+// C1 (critical deadlock fix): the REAL worker only emits ft-bulk-credit for an
+// OPEN data channel — if the flow dies mid-send there is no credit coming, so
+// a pending sendBulk would otherwise hang forever. fail() must reject it.
+test('fail() rejects a pending sendBulk instead of leaving it hanging forever', async () => {
+  const bus = fakeBus();
+  const channel = createTransferChannel({ send: bus.send, on: bus.on });
+  const p = channel.sendBulk(new ArrayBuffer(1));
+  let settled = null;
+  p.then(() => { settled = 'resolved'; }, () => { settled = 'rejected'; });
+
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(settled).toBe(null); // no credit fired yet — still pending
+
+  channel.fail('closed');
+  await expect(p).rejects.toThrow();
+  expect(settled).toBe('rejected');
+});
+
+test('sendBulk after fail() rejects immediately and never calls send()', async () => {
+  const bus = fakeBus();
+  const channel = createTransferChannel({ send: bus.send, on: bus.on });
+  channel.fail('failed');
+  bus.send.mockClear();
+  await expect(channel.sendBulk(new ArrayBuffer(1))).rejects.toThrow();
+  expect(bus.send).not.toHaveBeenCalled();
+});
+
+test('fail() is idempotent and does not throw when called twice, or with no pending sends', () => {
+  const bus = fakeBus();
+  const channel = createTransferChannel({ send: bus.send, on: bus.on });
+  expect(() => channel.fail('closed')).not.toThrow();
+  expect(() => channel.fail('closed')).not.toThrow();
+});

@@ -18,12 +18,29 @@
 // per worker here has to do both jobs: track aliveness for createSendPool, and
 // (flow 0 only, mirroring the single-flow openChannel's onRendezvousError)
 // forward a rendezvous-level error.
+//
+// C1 (critical deadlock fix): a flow that dies must not just stop being
+// dispatched NEW chunks (isAlive()->false) — any sendBulk ALREADY in flight on
+// it has to be forced to settle too, or the send pool's Promise.race(inflight)
+// waits forever on a promise nothing will ever resolve (the worker only
+// credits an open data channel). So on a TERMINAL state ('failed', 'closed',
+// or any 'error:*') we both mark not-alive AND call channel.fail(state) to
+// reject any pending sendBulk. 'disconnected' is deliberately treated as only
+// transient here — wireConnectionState() in transfer-worker/worker.js debounces
+// a single ICE-restart attempt on it, so it may recover; if it truly dies the
+// connection escalates to 'failed', which IS terminal and calls fail().
 function wireAliveness(worker, aliveMap, onError) {
   worker.onSessionState((state) => {
     if (state === 'connected') { aliveMap.set(worker, true); return; }
-    if (state === 'disconnected' || state === 'closed') { aliveMap.set(worker, false); return; }
+    if (state === 'disconnected') { aliveMap.set(worker, false); return; } // transient — may ICE-restart
+    if (state === 'failed' || state === 'closed') {
+      aliveMap.set(worker, false);
+      worker.channel.fail(state);
+      return;
+    }
     if (typeof state === 'string' && state.startsWith('error:')) {
       aliveMap.set(worker, false);
+      worker.channel.fail(state);
       if (onError) onError(state.slice('error:'.length));
     }
   });
@@ -71,11 +88,21 @@ export function assembleSendFlows({ flowCount, createWorker, makeParams }) {
  *
  * Handles are NOT guaranteed to arrive index-ordered (each flow is an
  * independent WebRTC/signaling race — see transfer-group-rendezvous.js), so
- * this sorts by flowIndex before picking flows[0]'s channel as `ctrl`: the
+ * this sorts by flowIndex before picking flowIndex-0's channel as `ctrl`: the
  * paired sender ALWAYS uses its flowIndex-0 worker as ctrl (assembleSendFlows
  * above builds workers in order), so the receiver must line up the same flow
  * or it listens for the manifest OFFER on the wrong data channel and the
  * transfer hangs at 0.
+ *
+ * C1 (I1): `createGroupRendezvous` can fire a PARTIAL group — its join-window
+ * timeout fires `onGroupReady` with whichever flows arrived, even if fewer
+ * than `flowCount` (exactly the Starlink-handover scenario: a flow died before
+ * ever connecting). If that partial group has NO flowIndex-0 handle at all,
+ * there is nothing to anchor `ctrl` on: the sender will send its manifest
+ * OFFER on ITS flow 0 regardless, so silently substituting the lowest
+ * connected flow (e.g. flow 1) as ctrl means the OFFER never arrives on the
+ * channel we're listening on — a silent hang, not a clean failure. Returns
+ * `null` in that case so the caller aborts the receive instead of hanging.
  */
 export function assembleReceiveGroup(handles) {
   const ordered = [...handles].sort((a, b) => {
@@ -83,6 +110,7 @@ export function assembleReceiveGroup(handles) {
     const bi = Number.isInteger(b.flowIndex) ? b.flowIndex : 0;
     return ai - bi;
   });
+  if (!ordered.some((h) => h.flowIndex === 0)) return null;
   return {
     ctrl: ordered[0].channel,
     flows: ordered.map((h) => h.channel),

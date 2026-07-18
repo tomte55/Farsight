@@ -46,7 +46,7 @@ afterEach(() => { vi.useRealTimers(); });
 function fakeWorker() {
   let stateCb = null;
   return {
-    channel: { sendCtrl: vi.fn(), onCtrl: vi.fn(), sendBulk: vi.fn(), onBulk: vi.fn() },
+    channel: { sendCtrl: vi.fn(), onCtrl: vi.fn(), sendBulk: vi.fn(), onBulk: vi.fn(), fail: vi.fn() },
     onSessionState: vi.fn((cb) => { stateCb = cb; }),
     startRendezvous: vi.fn(),
     close: vi.fn(async () => {}),
@@ -63,7 +63,7 @@ function idempotentFakeWorker() {
   let closed = false;
   let destroyCount = 0;
   return {
-    channel: { sendCtrl: vi.fn(), onCtrl: vi.fn(), sendBulk: vi.fn(), onBulk: vi.fn() },
+    channel: { sendCtrl: vi.fn(), onCtrl: vi.fn(), sendBulk: vi.fn(), onBulk: vi.fn(), fail: vi.fn() },
     onSessionState: vi.fn(),
     startRendezvous: vi.fn(),
     close: vi.fn(async () => { if (closed) return; closed = true; destroyCount += 1; }),
