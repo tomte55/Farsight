@@ -77,5 +77,23 @@ export function createReceiveRouter({ manifest, initialRanges = {}, openPart, ve
       f.finalizing = false;
       f.ranges = createRangeSet();
     },
+    // Fd-leak fix: release every file's open .part handle when a multi-flow
+    // receive settles WITHOUT every file finalizing (canceled/stalled/errored)
+    // — a finalized file already closed its own part in maybeFinalize (and left
+    // `f.part` pointing at the now-closed handle, not null), so this skips
+    // those and only closes ones still genuinely open. Best-effort (mirrors
+    // resetFile): a close() failure must not stop the rest from releasing.
+    // Nulls part/partPromise so a stray later access reopens rather than
+    // touching a closed handle, and so a second closeAll() call is a no-op
+    // (idempotent — safe to call from more than one settle path).
+    async closeAll() {
+      for (const f of files.values()) {
+        if (f.part && !f.finalized) {
+          try { await f.part.close(); } catch { /* best effort */ }
+          f.part = null;
+          f.partPromise = null;
+        }
+      }
+    },
   };
 }

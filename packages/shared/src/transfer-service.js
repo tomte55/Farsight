@@ -553,7 +553,14 @@ export function createTransferService({ store, transferDir, consent, openChannel
       initialRangesFor: () => persistedRanges,
       persistRanges: (files) => {
         if (!currentManifest) return; // no OFFER reassembled yet; nothing to persist against
-        saveReceiveRecordWithRanges({
+        // Returning the write's promise (not fire-and-forget) lets
+        // createMultiFlowReceiver's `lastPersist` track it, so a settle
+        // (cancel/stall/error) landing while this write is still in flight
+        // waits for it before resolving/rejecting — otherwise a caller that
+        // deletes destRoot/the store dir right after cancel can race an
+        // open tmp-file fd on Windows (ENOTEMPTY/EBUSY), the same class of
+        // bug as the .part fd leak this all guards against.
+        return saveReceiveRecordWithRanges({
           store, jobId, tier: getTier(), peer: {}, destRoot,
           manifest: currentManifest, jobState: 'active', files,
         }).catch(() => { /* best effort, matches single-flow saveRecord's discipline */ });

@@ -850,8 +850,31 @@ export function createMultiFlowReceiver({
     if (inactive && inactive.unref) inactive.unref();
   };
 
-  const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopReporter(); stopWatchdog(); resolve(v); } };
-  const fail = (e) => { if (!settled) { settled = true; watching = false; stopReporter(); stopWatchdog(); reject(e); } };
+  // Fd-leak fix: mirrors createReceiver's closeOpenPartFiles-on-settle discipline
+  // (see its doc above it) for the multi-flow router. A receive that settles
+  // (cancel/stall/error) while a file is still mid-flight leaves that file's
+  // sparse .part fd open (only a FINALIZED file's part gets closed, by
+  // maybeFinalize) — on Windows this blocks deleting the temp/dest dir
+  // (ENOTEMPTY) until the fd is released. Routed through run() (not called
+  // directly) so it's queued behind any in-flight onBulkFrame/onFileHash
+  // handler on the shared serializer — closing a fd mid-write would race it.
+  //
+  // Related (same class of bug, found while verifying the above deterministically):
+  // beginReceive's accept-time persistRanges() write and tick()'s periodic one are
+  // both fire-and-forget — nothing here previously awaited them. A cancel landing
+  // immediately after accept could settle (and a caller could then delete the
+  // destRoot/store dir) WHILE that write's tmp file was still open, the same
+  // Windows fd-blocks-rmdir failure as the .part leak, just for the jobs-store
+  // record instead of a part handle. `lastPersist` tracks whichever persistRanges
+  // call was most recent (from either call site); the settle path below awaits it
+  // before closing router parts, so neither write ever straddles the settle.
+  let lastPersist = Promise.resolve();
+  const closeRouterParts = async () => {
+    try { await lastPersist; } catch { /* best effort — a failed persist must not block settling */ }
+    if (router) await router.closeAll();
+  };
+  const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopReporter(); stopWatchdog(); run(closeRouterParts).then(() => resolve(v)); } };
+  const fail = (e) => { if (!settled) { settled = true; watching = false; stopReporter(); stopWatchdog(); run(closeRouterParts).then(() => reject(e)); } };
   const run = serializer(fail);
 
   let manifest = null;
@@ -905,7 +928,7 @@ export function createMultiFlowReceiver({
   function tick() {
     if (settled || !router) return;
     sendReport();
-    persistRanges(reportFiles());
+    lastPersist = Promise.resolve(persistRanges(reportFiles()));
     reportTimer = setTimer(tick, reportIntervalMs);
     if (reportTimer && reportTimer.unref) reportTimer.unref();
   }
@@ -975,7 +998,10 @@ export function createMultiFlowReceiver({
     // default 3s), so a receive canceled/interrupted within that window leaves
     // NO store record at all: it vanishes from the Transfers list and can never
     // be resumed. This call is independent of (and precedes) the first tick.
-    persistRanges(reportFiles());
+    // Tracked in `lastPersist` (not awaited here — this fire-and-forget write
+    // must not block accepting bulk traffic) so a settle landing before it
+    // finishes still waits for it in closeRouterParts, above.
+    lastPersist = Promise.resolve(persistRanges(reportFiles()));
     sendReport();
     startReporter();
     watching = true; pokeWatchdog(); // now expecting a steady stream of ctrl/bulk traffic

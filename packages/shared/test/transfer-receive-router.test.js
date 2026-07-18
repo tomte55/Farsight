@@ -108,4 +108,53 @@ describe('transfer-receive-router', () => {
       expect(opens).toBe(2);                            // reopened after reset
     });
   });
+
+  describe('closeAll (fd-leak fix)', () => {
+    it('closes an open, non-finalized part handle and is idempotent', async () => {
+      const size = 12;
+      let closeCalls = 0;
+      const part = {
+        writeAt: () => Promise.resolve(),
+        close: () => { closeCalls += 1; return Promise.resolve(); },
+      };
+      const router = createReceiveRouter({
+        manifest: { entries: [{ fileId: 0, size }] },
+        openPart: () => Promise.resolve(part),
+        verifyAndFinalize: () => Promise.resolve({ ok: true }),
+        onFileDone: () => {},
+        onProgress: () => {},
+      });
+      // Mid-flight: a partial (not last-byte) bulk frame opens the part but never
+      // finalizes it — this is exactly the state a canceled/stalled receive is
+      // left in, and the fd leak this whole fix is about.
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array([1, 1, 1, 1]) }));
+      expect(closeCalls).toBe(0); // still open — not complete, nothing finalized it
+      await router.closeAll();
+      expect(closeCalls).toBe(1);
+      // Idempotent: a second call must not re-close an already-released handle.
+      await router.closeAll();
+      expect(closeCalls).toBe(1);
+    });
+
+    it('no-ops on an already-finalized file (its part was closed by finalize, not closeAll)', async () => {
+      const size = 4;
+      let closeCalls = 0;
+      const part = {
+        writeAt: () => Promise.resolve(),
+        close: () => { closeCalls += 1; return Promise.resolve(); },
+      };
+      const router = createReceiveRouter({
+        manifest: { entries: [{ fileId: 0, size }] },
+        openPart: () => Promise.resolve(part),
+        verifyAndFinalize: () => Promise.resolve({ ok: true }),
+        onFileDone: () => {}, onProgress: () => {},
+      });
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array([1, 1, 1, 1]) }));
+      await router.onFileHash(0, 'HASH'); // completes -> finalizes -> closes part itself
+      expect(closeCalls).toBe(1);
+      expect(router.isComplete()).toBe(true);
+      await router.closeAll(); // must not touch the already-finalized file's part again
+      expect(closeCalls).toBe(1);
+    });
+  });
 });
