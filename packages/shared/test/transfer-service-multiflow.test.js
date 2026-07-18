@@ -581,3 +581,60 @@ describe('transfer-service multi-flow: rolling-joined handle teardown', () => {
     expect(receiverSvc.getReceiveFlowSink(SESSION)).toBeNull(); // deregistered
   });
 });
+
+// Final-review #3: a phantom late group (a re-dial's TRANSFER_REQUEST arriving
+// just after a receive tore down forms a fresh group whose sender is already
+// gone) reaches runMultiFlowReceive with no OFFER ever coming. The `await
+// jobIdKnown` was unbounded -> the receive hangs forever, leaking the attach
+// worker's hidden BrowserWindow. The fix bounds it with a timeout that closes
+// the attach worker(s) and rejects cleanly.
+describe('Final-review #3: runMultiFlowReceive bounds await jobIdKnown', () => {
+  function fakeClock() {
+    let now = 0, id = 0; const timers = new Map();
+    return {
+      setTimer: (fn, ms) => { const t = ++id; timers.set(t, { fn, at: now + ms }); return { __t: t, unref() {} }; },
+      clearTimer: (h) => { if (h && h.__t) timers.delete(h.__t); },
+      advance: async (ms) => { now += ms; for (const [t, e] of [...timers.entries()]) if (e.at <= now) { timers.delete(t); e.fn(); } await Promise.resolve(); },
+    };
+  }
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it('an OFFER that never arrives -> rejects (no_offer) after the timeout AND closes the attach worker(s)', async () => {
+    const clk = fakeClock();
+    let closeCount = 0;
+    // ctrl registers the tap but NEVER emits a frame (no sender), flows never deliver.
+    const ctrl = { sendCtrl() {}, onCtrl() {} };
+    const flows = [{ onBulk() {} }, { onBulk() {} }];
+    const svc = createTransferService({
+      store: createJobsStore({ dir: await tmp() }), transferDir: await tmp(), consent: async () => true,
+      openChannel: async () => ({ ctrl, flows, close: async () => { closeCount += 1; } }),
+      receiveCloseGraceMs: 0, jobIdTimeoutMs: 10000, setTimer: clk.setTimer, clearTimer: clk.clearTimer,
+    });
+
+    const recvPromise = svc.startReceive({ rendezvous: { sessionId: 'phantom-group' } }).catch((e) => e.message);
+    await flush(); await flush(); // openChannel resolved, jobIdKnown parked, timeout armed
+    expect(closeCount).toBe(0);   // nothing settled/closed before the bound
+    await clk.advance(10000);     // reach the jobId timeout
+    expect(await recvPromise).toBe('no_offer');
+    expect(closeCount).toBe(1);   // attach worker(s) closed, not leaked
+  });
+
+  it('mutation: without reaching the bound the receive stays pending (the timeout is what settles it)', async () => {
+    const clk = fakeClock();
+    let closeCount = 0;
+    const ctrl = { sendCtrl() {}, onCtrl() {} };
+    const flows = [{ onBulk() {} }];
+    const svc = createTransferService({
+      store: createJobsStore({ dir: await tmp() }), transferDir: await tmp(), consent: async () => true,
+      openChannel: async () => ({ ctrl, flows, close: async () => { closeCount += 1; } }),
+      receiveCloseGraceMs: 0, jobIdTimeoutMs: 10000, setTimer: clk.setTimer, clearTimer: clk.clearTimer,
+    });
+    let settled = false;
+    svc.startReceive({ rendezvous: { sessionId: 'phantom-2' } }).then(() => { settled = true; }, () => { settled = true; });
+    await flush(); await flush();
+    await clk.advance(9999); // just under the bound
+    await flush();
+    expect(settled).toBe(false); // still hung -> proves the timeout (not something else) settles it
+    expect(closeCount).toBe(0);
+  });
+});

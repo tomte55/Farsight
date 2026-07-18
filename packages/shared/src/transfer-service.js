@@ -154,6 +154,13 @@ async function saveReceiveRecordWithRanges({ store, jobId, tier, peer, destRoot,
 }
 
 export function createTransferService({ store, transferDir, consent, openChannel, onEvent = () => {}, rendezvousTimeoutMs = 30000, receiveCloseGraceMs = 2000, consentClassifyTimeoutMs = 8000, delay = (ms) => new Promise((r) => setTimeout(r, ms)),
+  // Final-review #3: bound runMultiFlowReceive's `await jobIdKnown`. A phantom
+  // group (a re-dial's TRANSFER_REQUEST arriving just after a receive tore down,
+  // forming a fresh group whose sender is already gone) fires onGroupReady and
+  // reaches runMultiFlowReceive with no OFFER ever coming — the unbounded await
+  // then hangs the receive and leaks the attach worker's hidden BrowserWindow.
+  // Timer injected so a fake clock can prove the bound without a real wait.
+  jobIdTimeoutMs = 30000, setTimer = setTimeout, clearTimer = clearTimeout,
   // SP3 Phase 4 auto-resume: when provided, an own-fleet interrupted send is
   // re-established via the resume watcher (getFleet resolves the peer's current
   // signalingId by deviceId). resumeOpts injects the watcher's timers for tests.
@@ -594,7 +601,32 @@ export function createTransferService({ store, transferDir, consent, openChannel
       },
     };
 
-    const jobId = await jobIdKnown;
+    // Final-review #3: bound the wait for the sender's OFFER (which carries the
+    // jobId). A phantom late group has no sender on the other end, so jobIdKnown
+    // would never resolve and this receive would hang forever — leaking the
+    // attach worker's hidden BrowserWindow (holds the app alive / single-instance
+    // lock). On timeout, close the attach worker(s) + any rolling-joined handles
+    // and reject cleanly. (Nothing else has been registered yet — activeReceives/
+    // receiveFlowSinks are populated only AFTER the receiver is constructed below,
+    // and joinedHandleCloses is empty until a post-accept rolling-join — so this
+    // cleanup is complete.)
+    let jobId;
+    let jobIdTimer = null;
+    const jobIdTimeout = new Promise((_res, reject) => {
+      jobIdTimer = setTimer(() => reject(new Error('no_offer')), jobIdTimeoutMs);
+      if (jobIdTimer && jobIdTimer.unref) jobIdTimer.unref();
+    });
+    try {
+      jobId = await Promise.race([jobIdKnown, jobIdTimeout]);
+    } catch (err) {
+      try { await close(); } catch { /* ignore close errors */ }
+      await Promise.all(joinedHandleCloses.splice(0).map((c) => {
+        try { return Promise.resolve(c()).catch(() => {}); } catch { return undefined; }
+      }));
+      throw err;
+    } finally {
+      if (jobIdTimer) clearTimer(jobIdTimer);
+    }
     // Sparse/positional resume state (see readPersistedRanges) -- fetched ONCE,
     // synchronously handed to the receiver: createReceiveRouter reads
     // initialRanges as a plain object (`initialRanges[e.fileId]`), not a
