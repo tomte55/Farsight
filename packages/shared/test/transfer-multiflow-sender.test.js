@@ -128,4 +128,55 @@ describe('createMultiFlowSender', () => {
     expect(r).toEqual({ jobId: JOB, ok: true });
     expect(sent.some((f) => f.t === 'file_end' && f.fileId === 0)).toBe(true); // file_end sent despite full resume coverage
   });
+
+  // Livelock regression: a raw createReceiveRouter-backed receiver (the real
+  // paired implementation) OMITS a finalized file from every range_report from
+  // then on (see transfer-receive-router.js's rangesFor()) — this fake mirrors
+  // that exactly instead of ever reporting the file as covered. The tracker
+  // therefore NEVER converges via tracker.isComplete(); only the receiver's own
+  // `complete{ok:true}` frame (sent here right after the first pass) settles
+  // the driver. pump()'s reconcile loop must still terminate once settled, or
+  // it re-reads/re-sends the whole payload forever.
+  it('pump stops re-sending once the receiver settles the transfer, even if its reports never mark the tracker complete', async () => {
+    const size = 4096 * 2;
+    const A = new Uint8Array(size).map((_, i) => i & 0xff);
+    let onCtrl = null;
+    let sendBulkCalls = 0;
+    const ctrl = {
+      sendCtrl: (s) => {
+        const f = parseCtrlFrame(s);
+        if (f.t === 'offer' || f.t === 'offer_end') {
+          onCtrl(acceptFrame({ jobId: JOB, resume: [], ranges: [] }));
+        } else if (f.t === 'file_end') {
+          // Simulate the real receiver finalizing the file: its range_report
+          // OMITS the file entirely (never reports it covered), then it settles
+          // the sender via `complete` — mirroring createMultiFlowReceiver's
+          // maybeComplete()/router.isComplete() path, WITHOUT this task's
+          // receiver-side fix (reportFiles()).
+          onCtrl(rangeReportFrame({ jobId: JOB, files: [] }));
+          onCtrl(completeFrame({ jobId: JOB, ok: true }));
+        }
+      },
+      onCtrl: (cb) => { onCtrl = cb; },
+    };
+    const flows = [{
+      isAlive: () => true,
+      sendBulk: () => { sendBulkCalls += 1; return Promise.resolve(); },
+    }];
+    const sender = createMultiFlowSender({
+      ctrl, flows, jobId: JOB, manifest: { entries: [{ fileId: 0, size }] }, chunkSize: 4096, flowCount: 1,
+      groupId: 'b'.repeat(32),
+      readerFor: () => ({ readAt: (o, l) => Promise.resolve(A.subarray(o, o + l)), close: () => {} }),
+      newHash: () => ({ update() {}, digest: () => 'H' }),
+      reconcileWaitMs: 30,
+    });
+    const r = await sender.start();
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    const callsAtResolve = sendBulkCalls;
+    // Wait a few reconcile intervals — pre-fix, pump() never observes
+    // tracker.isComplete() (the report always omits the file) and keeps
+    // calling gapPass -> sendBulk every reconcileWaitMs forever.
+    await new Promise((res) => setTimeout(res, 30 * 4));
+    expect(sendBulkCalls).toBe(callsAtResolve); // pump terminated — no further sends
+  });
 });

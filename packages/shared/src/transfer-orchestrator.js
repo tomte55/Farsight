@@ -213,6 +213,7 @@ export function createMultiFlowSender({
         done = true; pendingWaiterResolve = null;
         res();
       }, ms);
+      if (timer && timer.unref) timer.unref();
       pendingWaiterResolve = () => {
         if (done) return;
         done = true; clearTimer(timer); pendingWaiterResolve = null;
@@ -280,10 +281,19 @@ export function createMultiFlowSender({
     try {
       await createSendPool({ flows }).run(initialPass());
       for (;;) {
-        if (canceled) return;
+        // `settled` is the backstop: the receiver's own `complete`/`reject`/
+        // `cancel` frame settles this driver directly (see the ctrl handler
+        // below), but router.rangesFor() omits finalized files from every
+        // report (fixed on the receiver side too — see reportFiles() in
+        // createMultiFlowReceiver), so tracker.isComplete() alone is not
+        // guaranteed reachable against every receiver implementation. Without
+        // this check the loop would keep re-reading/re-sending the whole
+        // payload every reconcileWaitMs forever, even after the transfer has
+        // already resolved.
+        if (canceled || settled) return;
         if (tracker.isComplete()) break;
         await waitForReport(reconcileWaitMs);
-        if (canceled) return;
+        if (canceled || settled) return;
         if (tracker.isComplete()) break;
         await createSendPool({ flows }).run(gapPass());
       }
@@ -814,11 +824,35 @@ export function createMultiFlowReceiver({
   let manifest = null;
   let router = null;
   let jobDoneSeen = false; // noted for observability; completion is driven by router.isComplete(), not this flag
+  // Files the router has fully finalized (verified+fsync'd+renamed). Per receive
+  // (this whole createMultiFlowReceiver instance handles exactly one receive —
+  // beginReceive is guarded against re-entry — so a fresh Set at construction is
+  // already "per receive").
+  const finalizedFiles = new Set();
   // Reassembly buffer for a chunked OFFER (offer_begin -> offer_entries* -> offer_end).
   let offerAccum = null;
 
   function findEntry(fileId) { return manifest.entries.find((e) => e.fileId === fileId); }
   function pathOf(fileId) { const e = findEntry(fileId); return e ? e.path : undefined; }
+
+  // router.rangesFor() OMITS finalized files entirely (transfer-receive-router.js)
+  // — once a file finalizes it simply vanishes from every subsequent report. The
+  // paired createMultiFlowSender's coverage tracker only REPLACES coverage for
+  // files present in a report (never clears missing ones), so a finalized file's
+  // last-known coverage freezes at whatever partial state it had before
+  // finalizing — the sender's tracker.isComplete() then never converges, and its
+  // pump() would spin forever re-reading/re-sending the whole payload every
+  // reconcileWaitMs. Reporting EVERY manifest file on every report — finalized
+  // ones as fully covered `[[0, size]]`, others from the router's live ranges —
+  // keeps the sender's tracker moving toward real completion. (Plan 3's
+  // paginated-range_report requirement — see the NOTE below — applies to this
+  // full per-file list too.)
+  function reportFiles() {
+    const live = new Map(router.rangesFor().map((r) => [r.fileId, r.ivals]));
+    return manifest.entries.map((e) => (finalizedFiles.has(e.fileId)
+      ? { fileId: e.fileId, ivals: [[0, e.size]] }
+      : { fileId: e.fileId, ivals: live.get(e.fileId) || [] }));
+  }
 
   // Sends the receiver's current per-file coverage so the paired
   // createMultiFlowSender's reconciliation loop can see what's still missing.
@@ -830,13 +864,13 @@ export function createMultiFlowReceiver({
   // concern and is deliberately NOT implemented here.
   function sendReport() {
     if (settled || !router) return;
-    ctrl.sendCtrl(rangeReportFrame({ jobId, files: router.rangesFor() }));
+    ctrl.sendCtrl(rangeReportFrame({ jobId, files: reportFiles() }));
   }
 
   function tick() {
     if (settled || !router) return;
     sendReport();
-    persistRanges(router.rangesFor());
+    persistRanges(reportFiles());
     reportTimer = setTimer(tick, reportIntervalMs);
     if (reportTimer && reportTimer.unref) reportTimer.unref();
   }
@@ -890,7 +924,8 @@ export function createMultiFlowReceiver({
       },
       verifyAndFinalize: ({ fileId, expectedHash }) => verifyAndFinalize({ ...findEntry(fileId), expectedHash, partFile: partFiles.get(fileId) }),
       onFileDone: ({ fileId, ok: fileOk }) => {
-        if (!fileOk) router.resetFile(fileId);
+        if (fileOk) finalizedFiles.add(fileId);
+        else router.resetFile(fileId);
         onEvent({ type: fileOk ? 'file-done' : 'file-failed', fileId });
         maybeComplete();
       },
@@ -898,7 +933,7 @@ export function createMultiFlowReceiver({
     });
     for (const flow of flows) flow.onBulk((buf) => run(() => router.onBulkFrame(buf)));
     if (settled) return;
-    ctrl.sendCtrl(acceptFrame({ jobId, resume: [], ranges: router.rangesFor() }));
+    ctrl.sendCtrl(acceptFrame({ jobId, resume: [], ranges: reportFiles() }));
     sendReport();
     startReporter();
   }

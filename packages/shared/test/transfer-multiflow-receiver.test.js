@@ -162,4 +162,57 @@ describe('createMultiFlowReceiver', () => {
     expect(countReports()).toBe(reportsAtEnd);
     expect(persistRanges).toHaveBeenCalledTimes(persistCallsAtEnd);
   });
+
+  it('reports a finalized file as fully covered even though the router itself omits it (fixes the paired sender\'s livelock)', async () => {
+    // router.rangesFor() drops a file entirely once it finalizes — if a
+    // range_report just forwarded that straight to the wire, the paired
+    // createMultiFlowSender's coverage tracker would freeze at whatever
+    // partial coverage the file had before finalizing and never see it as
+    // complete. Two files: finalize the first while the second is still
+    // in flight, and check the very next range_report reports file 0 as
+    // fully covered `[[0, size0]]` rather than omitting it.
+    const size0 = 8, size1 = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const parts = new Map();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: (relPath) => { const b = new Uint8Array(relPath === 'a.bin' ? size0 : size1); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      reportIntervalMs: 10_000,
+    });
+    const done = rx.start();
+    toReceiver(offerFrame({
+      jobId: JOB,
+      entries: [{ fileId: 0, path: 'a.bin', size: size0, mtime: 0 }, { fileId: 1, path: 'b.bin', size: size1, mtime: 0 }],
+      totalBytes: size0 + size1, totalFiles: 2,
+    }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+    expect(out.some((f) => f.t === 'accept')).toBe(true);
+
+    // Deliver + finalize file 0 only; file 1 stays untouched.
+    flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: size0, payload: new Uint8Array(size0).fill(1) }));
+    await new Promise((r) => setTimeout(r, 0));
+    toReceiver(fileEndFrame({ jobId: JOB, fileId: 0, hash: 'H' }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The receive isn't done yet (file 1 pending) — assert on the LATEST
+    // range_report emitted so far, which was sent right after file 0's
+    // file_end drove it to finalize.
+    const reports = out.filter((f) => f.t === 'range_report');
+    expect(reports.length).toBeGreaterThan(0);
+    const latest = reports[reports.length - 1];
+    const file0Entry = latest.files.find((f) => f.fileId === 0);
+    expect(file0Entry).toEqual({ fileId: 0, ivals: [[0, size0]] });
+
+    // Finish the transfer so the promise settles cleanly.
+    flowCbs[0](encodeBulkFrame({ fileId: 1, offset: 0, length: size1, payload: new Uint8Array(size1).fill(2) }));
+    await new Promise((r) => setTimeout(r, 0));
+    toReceiver(fileEndFrame({ jobId: JOB, fileId: 1, hash: 'H' }));
+    toReceiver(jobDoneFrame({ jobId: JOB }));
+    const r = await done;
+    expect(r).toEqual({ jobId: JOB, ok: true });
+  });
 });
