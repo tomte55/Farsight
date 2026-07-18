@@ -20,11 +20,11 @@ const IDLE_TIMEOUT_MS = 15000;
 // turns:) with ephemeral HMAC creds when a shared secret is configured. Both
 // TURN urls share one credential via an RTCIceServer.urls array. Empty when no
 // TURN is configured (LAN dev).
-function iceServersFor(cfg) {
+function iceServersFor(cfg, flowIndex) {
   if (!cfg.turnUri) return [];
   const stunUri = cfg.turnUri.replace('turn:', 'stun:');
   if (!cfg.turnSecret) return [{ urls: stunUri }];
-  const { username, credential } = makeTurnCredential({ secret: cfg.turnSecret, ttlSeconds: cfg.turnTtlSeconds });
+  const { username, credential } = makeTurnCredential({ secret: cfg.turnSecret, ttlSeconds: cfg.turnTtlSeconds, flowIndex });
   const turnUrls = cfg.turnsUri ? [cfg.turnUri, cfg.turnsUri] : cfg.turnUri;
   return [
     { urls: stunUri },
@@ -164,7 +164,7 @@ export function createSignalingServer({ port, config } = {}) {
             limiter.reset(key);
             let sessionId;
             do { sessionId = generateHostId(); } while (sessions.has(sessionId));
-            const sess = { a: socket, b: null, targetId: msg.targetId, timer: null };
+            const sess = { a: socket, b: null, targetId: msg.targetId, timer: null, flowIndex: undefined };
             sessions.set(sessionId, sess);
             socket.farsight.transferSessionId = sessionId;
             clearIdle(); // the initiator is now settled into a session
@@ -187,6 +187,11 @@ export function createSignalingServer({ port, config } = {}) {
             const groupId = isJobId(msg.groupId) ? msg.groupId : undefined;
             const flowIndex = Number.isInteger(msg.flowIndex) && msg.flowIndex >= 0 ? msg.flowIndex : undefined;
             const flowCount = Number.isInteger(msg.flowCount) && msg.flowCount >= 1 ? msg.flowCount : undefined;
+            // Initiator-authoritative: this initiating socket's own claimed
+            // flowIndex is what determines the per-flow TURN username handed
+            // to both ends of THIS flow at ATTACH below — never trust a value
+            // the attacher claims for itself later (see MSG.ATTACH).
+            sess.flowIndex = flowIndex;
             send(target, MSG.TRANSFER_REQUEST, {
               sessionId,
               peerVersion: socket.farsight.version || undefined,
@@ -231,7 +236,12 @@ export function createSignalingServer({ port, config } = {}) {
           socket.farsight.peerSocket = sess.a;
           sess.a.farsight.peerSocket = socket;
           clearIdle();
-          const ice = iceServersFor(cfg);
+          // Both ends of THIS flow share one relay allocation, so they must
+          // get the SAME per-flow TURN username — derive it from the
+          // initiator-authoritative sess.flowIndex (never the attacher's own
+          // claim), so different flows (different sess.flowIndex) land on
+          // different usernames and don't collide against coturn's user-quota.
+          const ice = iceServersFor(cfg, sess.flowIndex);
           send(sess.a, MSG.ICE_SERVERS, { iceServers: ice, peerVersion: socket.farsight.version || undefined });
           send(socket, MSG.ICE_SERVERS, { iceServers: ice });
           log.event('transfer_attach', { sessionId: msg.sessionId });

@@ -221,7 +221,13 @@ describe('main.js: SEND assembly wiring (text-based — main.js imports electron
   test('onGroupReady assembles the bundle and calls startReceive, then cancels the group (no map leak)', () => {
     expect(main).toMatch(/onGroupReady:\s*\(\{\s*groupId,\s*flowCount,\s*flows\s*\}\)\s*=>/);
     expect(main).toMatch(/flowCount\s*>\s*1\s*\?\s*assembleReceiveGroup\(flows\)\s*:\s*flows\[0\]/);
-    expect(main).toMatch(/groupRendezvous\.cancel\(groupId\)/);
+    // Tightened (Plan 3 Task 4 review): a bare substring match on
+    // `groupRendezvous.cancel(groupId)` passes even if the call were hoisted
+    // out of the .finally(...) and run unconditionally (before startReceive
+    // resolves, or even if startReceive never settles) -- which would
+    // re-open the "group map leak" bug this line exists to close. Require the
+    // actual .finally(...) wiring so moving the call out of it fails this test.
+    expect(main).toMatch(/\.finally\(\(\)\s*=>\s*groupRendezvous\.cancel\(groupId\)\)/);
   });
 
   test('openChannel(attach) looks up the pre-opened bundle from pendingGroupReceives by sessionId', () => {
@@ -230,10 +236,19 @@ describe('main.js: SEND assembly wiring (text-based — main.js imports electron
   });
 
   test('the flowCount<=1 SEND path still returns the existing {channel,close,onRendezvousError,peerAuth} shape', () => {
-    expect(main).toMatch(/worker\.onSessionState/);
-    expect(main).toMatch(/onRendezvousError/);
-    expect(main).toMatch(/startsWith\('error:'\)/);
-    expect(main).toMatch(/channel:\s*worker\.channel,/);
+    // Tightened (Plan 3 Task 4 review): `worker.onSessionState` /
+    // `onRendezvousError` / `startsWith('error:')` / `channel: worker.channel,`
+    // ALSO appear verbatim in openAttachFlow (the RECEIVE/attach branch above),
+    // so those four substrings alone can't distinguish "the single-flow SEND
+    // branch was deleted" from "only the attach branch remains". Anchor on
+    // text that exists ONLY in this branch: the bare `signalingUrl` local
+    // (attach/multi-flow both call `currentSignalingUrl()` inline instead)
+    // feeding the initiator startRendezvous call with no groupId/flowIndex/
+    // flowCount fields, and a return object that ends right after `peerAuth,`
+    // (openAttachFlow's return has `linked`/`flowIndex` fields after peerAuth).
+    expect(main).toMatch(/const signalingUrl = currentSignalingUrl\(\);/);
+    expect(main).toMatch(/worker\.startRendezvous\(\{\s*\n\s*role: 'initiator',\s*\n\s*signalingUrl,\s*\n\s*targetId: target\?\.id,\s*\n\s*password: target\?\.password,/);
+    expect(main).toMatch(/onRendezvousError:\s*\(cb\)\s*=>\s*\{\s*rendezvousErrorCb\s*=\s*cb;\s*\},\s*\n\s*peerAuth,\s*\n\s*\};/);
   });
 });
 
