@@ -18,6 +18,12 @@
  * @param {number} [deps.joinWindowMs]
  * @param {typeof setTimeout} [deps.setTimer]
  * @param {typeof clearTimeout} [deps.clearTimer]
+ * @param {(handle: any, flowIndex: number) => void} [deps.onFlowJoin]
+ *   Optional. Once a group has already fired, a later offer for the same
+ *   groupId (a replacement flow re-dialed mid-transfer, or a brand-new
+ *   flowIndex added late) opens a flow and delivers it here instead of being
+ *   dropped. Does NOT touch group.flows/consent/onGroupReady. If omitted,
+ *   post-ready offers are dropped (today's behavior).
  */
 export function createGroupRendezvous({
   openFlow,
@@ -25,6 +31,7 @@ export function createGroupRendezvous({
   joinWindowMs = 8000,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
+  onFlowJoin,
 }) {
   /** @type {Map<string, {flowCount: number, flows: Map<number, any>, timer: any, fired: boolean}>} */
   const groups = new Map();
@@ -63,7 +70,17 @@ export function createGroupRendezvous({
       }, joinWindowMs);
     }
 
-    if (group.fired) return; // group already resolved; ignore late offers
+    if (group.fired) {
+      // Group already resolved: a rolling-join offer (new flowIndex) or a
+      // replacement offer (slot re-dial of an existing flowIndex). Either
+      // way, open the flow and hand it off via onFlowJoin — never touch
+      // group.flows/consent/onGroupReady for a fired group.
+      if (onFlowJoin) {
+        const handle = openFlow({ sessionId, flowIndex, groupId, linked });
+        onFlowJoin(handle, flowIndex);
+      }
+      return;
+    }
     if (group.flows.has(flowIndex)) return; // duplicate (groupId, flowIndex) — ignore
 
     const handle = openFlow({ sessionId, flowIndex, groupId, linked });

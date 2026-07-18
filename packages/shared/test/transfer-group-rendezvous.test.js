@@ -97,4 +97,67 @@ describe('createGroupRendezvous', () => {
     gr.cancel(GROUP);
     expect(closed).toBe(1);
   });
+
+  it('rolling-join: a post-ready offer for a new flowIndex opens a flow and delivers it via onFlowJoin, without re-firing onGroupReady', () => {
+    const opened = [];
+    const ready = [];
+    const joined = [];
+    const gr = createGroupRendezvous({
+      openFlow: (r) => { opened.push(r.flowIndex); return { flowIndex: r.flowIndex, close: () => {} }; },
+      onGroupReady: (g) => ready.push(g),
+      onFlowJoin: (handle, flowIndex) => joined.push({ handle, flowIndex }),
+    });
+    for (let i = 0; i < 3; i++) gr.offer({ sessionId: `s${i}`, groupId: GROUP, flowIndex: i, flowCount: 3, linked: true });
+    expect(ready.length).toBe(1); // group formed as usual
+
+    // A replacement flow supervisor re-dials with a NEW flowIndex after the group fired.
+    gr.offer({ sessionId: 's3', groupId: GROUP, flowIndex: 3, flowCount: 3, linked: true });
+
+    expect(ready.length).toBe(1); // onGroupReady NOT re-fired
+    expect(opened).toEqual([0, 1, 2, 3]); // late offer's flow WAS opened
+    expect(joined.length).toBe(1);
+    expect(joined[0].flowIndex).toBe(3);
+    expect(joined[0].handle.flowIndex).toBe(3);
+  });
+
+  it('rolling-join: a post-ready offer reusing an existing flowIndex (slot re-dial) delivers the new handle via onFlowJoin', () => {
+    const opened = [];
+    const ready = [];
+    const joined = [];
+    let handleSeq = 0;
+    const gr = createGroupRendezvous({
+      openFlow: (r) => { opened.push(r.flowIndex); return { flowIndex: r.flowIndex, id: handleSeq++, close: () => {} }; },
+      onGroupReady: (g) => ready.push(g),
+      onFlowJoin: (handle, flowIndex) => joined.push({ handle, flowIndex }),
+    });
+    for (let i = 0; i < 3; i++) gr.offer({ sessionId: `s${i}`, groupId: GROUP, flowIndex: i, flowCount: 3, linked: true });
+    expect(ready.length).toBe(1);
+    const originalHandle = ready[0].flows.find((f) => f.flowIndex === 1);
+
+    // flowIndex 1's flow died mid-transfer; the supervisor re-dials the SAME slot.
+    gr.offer({ sessionId: 's1b', groupId: GROUP, flowIndex: 1, flowCount: 3, linked: true });
+
+    expect(ready.length).toBe(1); // still only one onGroupReady
+    expect(joined.length).toBe(1);
+    expect(joined[0].flowIndex).toBe(1);
+    expect(joined[0].handle).not.toBe(originalHandle); // a NEW handle, not the stale one
+    expect(joined[0].handle.id).not.toBe(originalHandle.id);
+  });
+
+  it('rolling-join: when onFlowJoin is absent, a post-ready offer is still dropped (backward-compatible)', () => {
+    const opened = [];
+    const ready = [];
+    const gr = createGroupRendezvous({
+      openFlow: (r) => { opened.push(r.flowIndex); return { flowIndex: r.flowIndex, close: () => {} }; },
+      onGroupReady: (g) => ready.push(g),
+      // no onFlowJoin
+    });
+    for (let i = 0; i < 3; i++) gr.offer({ sessionId: `s${i}`, groupId: GROUP, flowIndex: i, flowCount: 3, linked: true });
+    expect(ready.length).toBe(1);
+
+    gr.offer({ sessionId: 's3', groupId: GROUP, flowIndex: 3, flowCount: 3, linked: true }); // late, no onFlowJoin
+
+    expect(ready.length).toBe(1);
+    expect(opened).toEqual([0, 1, 2]); // late offer's flow was NOT opened
+  });
 });
