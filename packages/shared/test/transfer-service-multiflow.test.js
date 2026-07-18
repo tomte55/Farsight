@@ -13,7 +13,7 @@ import { createTransferService } from '../src/transfer-service.js';
 import { createJobsStore } from '../src/jobs-store.js';
 import { createSparsePartFile } from '../src/transfer-io.js';
 import { newJobId } from '../src/transfer-queue.js';
-import { offerFrame, parseCtrlFrame } from '../src/transfer-protocol.js';
+import { offerFrame, parseCtrlFrame, acceptFrame, completeFrame } from '../src/transfer-protocol.js';
 
 const dirs = [];
 async function tmp() { const d = await mkdtemp(join(tmpdir(), 'ftsvc-mf-')); dirs.push(d); return d; }
@@ -405,5 +405,88 @@ describe('transfer-service multi-flow branch: close() teardown on every settle p
     // near-instant cancel is affected. Flagged for a follow-up task, not fixed
     // here (touches transfer-orchestrator.js's multi-flow beginReceive, outside
     // this task's teardown scope).
+  });
+});
+
+// Review fix: runSend used to hardcode `result = { jobId, ok: true }` right
+// after `await sender.start()`, ignoring whatever the promise actually
+// resolved with. createMultiFlowSender's start() CAN resolve { jobId,
+// ok:false } — the receiver's own 'complete' ctrl frame carries ok:false when
+// it finished reconciling but one file terminally failed (per-file I/O
+// isolation) — so the old code persisted/reported a false "fully succeeded"
+// even though the 'completed' event the caller also sees carries ok:false.
+// Drives the SENDER side only through a hand-fed ctrl channel (no real
+// receiver needed): feed it `accept` to unblock the pump, then feed it
+// `complete{ok:false}` directly — exactly the wire frame a real receiver's
+// maybeComplete() sends on a completed-with-failures reconciliation (see its
+// doc in transfer-orchestrator.js) — regardless of how far the pump itself got.
+describe('transfer-service: runSend honors the resolved ok (not hardcoded true)', () => {
+  it('a multi-flow send whose sender.start() resolves {ok:false} records ok:false (jobState still done)', async () => {
+    const srcDir = await tmp();
+    const sendStore = createJobsStore({ dir: await tmp() });
+
+    const small = new Uint8Array(32).fill(7);
+    await writeFile(join(srcDir, 'z.bin'), small);
+    const entries = [{ fileId: 0, path: 'z.bin', size: small.length, mtime: 1 }];
+    const manifest = { entries, totalBytes: small.length, totalFiles: 1 };
+    const sources = new Map([[0, join(srcDir, 'z.bin')]]);
+
+    let ctrlCb = null;
+    const ctrl = {
+      sendCtrl() {}, // outbound frames aren't needed for this test
+      onCtrl(cb) { ctrlCb = cb; },
+    };
+    const flows = [{ isAlive: () => true, sendBulk: async () => {} }];
+
+    const svc = createTransferService({
+      store: sendStore, transferDir: srcDir, consent: async () => true,
+      openChannel: async () => ({ ctrl, flows, close: async () => {} }),
+    });
+
+    const jobId = newJobId();
+    const sendPromise = svc.startSend({ jobId, manifest, sources, target: { id: 'device-okfalse', flowCount: 2 } });
+    await until(() => ctrlCb !== null);
+    ctrlCb(acceptFrame({ jobId, resume: [] }));
+    await tick(5);
+    ctrlCb(completeFrame({ jobId, ok: false }));
+
+    const result = await sendPromise;
+    expect(result.ok).toBe(false); // truthful — not the old hardcoded true
+
+    const rec = (await sendStore.list()).find((j) => j.jobId === jobId);
+    expect(rec).toBeTruthy();
+    expect(rec.jobState).toBe('done'); // still done — not resumable; per-file failures are recorded elsewhere
+  });
+
+  it('a normal multi-flow success (sender.start() resolves with no ok:false) still records ok:true', async () => {
+    const srcDir = await tmp();
+    const sendStore = createJobsStore({ dir: await tmp() });
+
+    const small = new Uint8Array(32).fill(3);
+    await writeFile(join(srcDir, 'z2.bin'), small);
+    const entries = [{ fileId: 0, path: 'z2.bin', size: small.length, mtime: 1 }];
+    const manifest = { entries, totalBytes: small.length, totalFiles: 1 };
+    const sources = new Map([[0, join(srcDir, 'z2.bin')]]);
+
+    let ctrlCb = null;
+    const ctrl = { sendCtrl() {}, onCtrl(cb) { ctrlCb = cb; } };
+    const flows = [{ isAlive: () => true, sendBulk: async () => {} }];
+
+    const svc = createTransferService({
+      store: sendStore, transferDir: srcDir, consent: async () => true,
+      openChannel: async () => ({ ctrl, flows, close: async () => {} }),
+    });
+
+    const jobId = newJobId();
+    const sendPromise = svc.startSend({ jobId, manifest, sources, target: { id: 'device-oktrue', flowCount: 2 } });
+    await until(() => ctrlCb !== null);
+    ctrlCb(acceptFrame({ jobId, resume: [] }));
+    await tick(5);
+    ctrlCb(completeFrame({ jobId, ok: true }));
+
+    const result = await sendPromise;
+    expect(result.ok).toBe(true);
+    const rec = (await sendStore.list()).find((j) => j.jobId === jobId);
+    expect(rec.jobState).toBe('done');
   });
 });

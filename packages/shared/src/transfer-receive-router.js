@@ -18,6 +18,19 @@ export function createReceiveRouter({
     files.set(e.fileId, { size: e.size, ranges: createRangeSet(initialRanges[e.fileId] || []), part: null, partPromise: null, hash: null, finalized: false, finalizing: false, failed: false });
   }
 
+  // Best-effort close of a file's currently-open .part handle before nulling
+  // it out. Nulling alone (the pre-fix behavior) leaks the fd/handle on the
+  // "open succeeded but a later writeAt failed" variant — up to 3 handles
+  // across the retry loop plus the terminal give-up, kept open until app quit
+  // and, on Windows, keeping the exact contended file LOCKED (the opposite of
+  // what this feature wants). close() failing (e.g. the same AV lock that
+  // caused the write to fail) must not block giving up on the file.
+  async function closeAndClearPart(f) {
+    try { await f.part?.close(); } catch { /* best effort */ }
+    f.part = null;
+    f.partPromise = null;
+  }
+
   async function maybeFinalize(fileId) {
     const f = files.get(fileId);
     if (!f || f.finalized || f.finalizing) return;
@@ -73,7 +86,7 @@ export function createReceiveRouter({
       } catch (e) {
         lastErr = e;
         for (const ms of retryDelays) {
-          f.part = null; f.partPromise = null; // force a fresh open on retry, not the failed memoized one
+          await closeAndClearPart(f); // close before a fresh open on retry — the prior open may have succeeded even though writeAt failed
           await delay(ms);
           try {
             await attemptWrite();
@@ -87,8 +100,7 @@ export function createReceiveRouter({
 
       if (lastErr) {
         f.failed = true;
-        f.part = null;
-        f.partPromise = null;
+        await closeAndClearPart(f);
         onFileDone && onFileDone({ fileId: d.fileId, ok: false, terminal: true });
         return; // NOT rethrown — the receive must not fail because of one file
       }

@@ -328,8 +328,17 @@ export function createTransferService({ store, transferDir, consent, openChannel
           }, rendezvousTimeoutMs);
           if (approvalTimer.unref) approvalTimer.unref();
         }
-        await sender.start(); // resolves with no value on success, rejects/throws on failure
-        result = { jobId, ok: true };
+        // Single-flow createSender's start() resolves with NO value on success
+        // (r === undefined -> r?.ok !== false -> true, unchanged). Multi-flow
+        // createMultiFlowSender's start() can resolve { jobId, ok:false } on a
+        // completed-with-failures receive (see its 'complete' ctrl handler
+        // above) — honor that instead of hardcoding ok:true, so the persisted
+        // record's top-level ok matches the 'completed' event's ok. jobState
+        // stays 'done' either way — the send genuinely finished (not
+        // resumable); per-file failures are what the receiver's own perFile
+        // record captures.
+        const r = await sender.start();
+        result = { jobId, ok: r?.ok !== false };
         await saveSendRecord({ jobId, manifest, createdAt, jobState: 'done', peer, tier, sourceRoots, flowCount: target && target.flowCount });
       } else {
         result = { jobId, ok: false, canceled: true };

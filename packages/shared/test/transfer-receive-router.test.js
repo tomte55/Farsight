@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createReceiveRouter } from '../src/transfer-receive-router.js';
 import { encodeBulkFrame } from '../src/transfer-chunk.js';
 
@@ -204,6 +204,55 @@ describe('transfer-receive-router', () => {
       // Further frames for the failed file are ignored (terminal, like `finalized`).
       await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 8, payload: new Uint8Array(8).fill(9) }));
       expect(opensFor0).toBe(3); // no further open attempts
+    });
+
+    // The variant that actually leaked a handle (review fix): openPart SUCCEEDS
+    // every time (unlike the test above, where it rejects and there's never a
+    // handle to leak) but writeAt persistently rejects — e.g. an AV lock that
+    // only bites the write, not the open. Before the fix, each opened handle
+    // across the retry loop (plus the terminal give-up) was nulled WITHOUT
+    // being closed first, leaking up to 3 open fds/handles that (on Windows)
+    // keep the exact contended file locked — the opposite of what per-file
+    // isolation is for.
+    it('closes the opened .part handle before giving up (no leaked handle) when open succeeds but writeAt persistently fails', async () => {
+      const size = 4;
+      let opens = 0;
+      const closeSpies = [];
+      let closedCountAtTerminalEvent = null;
+      const router = createReceiveRouter({
+        manifest: { entries: [{ fileId: 0, size }] },
+        openPart: () => {
+          opens += 1;
+          const closeSpy = vi.fn(() => Promise.resolve());
+          closeSpies.push(closeSpy);
+          return Promise.resolve({
+            writeAt: () => Promise.reject(new Error('EBUSY: resource busy or locked')),
+            close: closeSpy,
+          });
+        },
+        verifyAndFinalize: () => Promise.resolve({ ok: true }),
+        onFileDone: (e) => {
+          // By the time the terminal onFileDone fires, every handle opened so
+          // far must ALREADY be closed — assert the count at this moment, not
+          // after onBulkFrame resolves, so this actually pins ordering.
+          if (e.terminal) closedCountAtTerminalEvent = closeSpies.filter((s) => s.mock.calls.length > 0).length;
+        },
+        onProgress: () => {},
+        delay: () => Promise.resolve(), // instant — this test isn't about real timing
+      });
+
+      // Must NOT throw/reject — the whole point is isolation.
+      await expect(router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array([1, 2, 3, 4]) }))).resolves.toBeUndefined();
+
+      // Bounded retry: 1 initial attempt + 2 backoff retries (default retryDelays: [150, 400]) = 3 total opens.
+      expect(opens).toBe(3);
+      expect(closeSpies).toHaveLength(3);
+      // Every opened handle across the retry loop AND the terminal give-up had
+      // close() called exactly once — no leaked handle anywhere in the path.
+      for (const spy of closeSpies) expect(spy).toHaveBeenCalledTimes(1);
+      // All 3 closes had already happened by the time the terminal event fired.
+      expect(closedCountAtTerminalEvent).toBe(3);
+      expect(router.failedFiles()).toEqual(new Set([0]));
     });
 
     it('a transient failure (fails once, then succeeds) recovers via the retry — no terminal failure', async () => {

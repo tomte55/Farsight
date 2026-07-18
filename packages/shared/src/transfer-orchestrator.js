@@ -1158,8 +1158,10 @@ export function createMultiFlowReceiver({
         } else if (terminal) {
           // Persistent I/O failure (router gave up after bounded retries) —
           // TERMINAL, unlike a verify-mismatch: do NOT resetFile/retry (the
-          // file's part is already closed+nulled by the router itself); it
-          // now counts as resolved for isComplete()/reportFiles() purposes.
+          // router itself now CLOSES the file's open .part handle, then nulls
+          // it, before giving up — so there's no open handle left for us to
+          // manage here); it now counts as resolved for isComplete()/
+          // reportFiles() purposes.
           terminalFailedFiles.add(fileId);
         } else {
           router.resetFile(fileId); verifyingEmitted = false; // verify-mismatch: real retry cycle — allow re-surfacing
