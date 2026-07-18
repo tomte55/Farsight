@@ -54,6 +54,39 @@ describe('createMultiFlowReceiver', () => {
     expect(out.some((f) => f.t === 'complete' && f.ok === true)).toBe(true);
   });
 
+  it('threads the memoized partFile handle into verifyAndFinalize (router closes it first, but it must still be passed)', async () => {
+    const size = 4;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const openedParts = [];
+    const verifyAndFinalizeArgs = [];
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: (relPath) => {
+        const part = { relPath, closed: false, writeAt: () => Promise.resolve(), close: () => { part.closed = true; return Promise.resolve(); }, liveDigest: () => null };
+        openedParts.push(part);
+        return Promise.resolve(part);
+      },
+      verifyAndFinalize: (args) => { verifyAndFinalizeArgs.push(args); return Promise.resolve({ ok: true }); },
+      reportIntervalMs: 10_000,
+    });
+    const done = rx.start();
+    toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'z.bin', size, mtime: 0 }], totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0));
+    flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: size, payload: new Uint8Array(size).fill(1) }));
+    toReceiver(fileEndFrame({ jobId: JOB, fileId: 0, hash: 'H' }));
+    toReceiver(jobDoneFrame({ jobId: JOB }));
+    await done;
+    expect(verifyAndFinalizeArgs.length).toBe(1);
+    // The router closes the part before calling verifyAndFinalize — but the
+    // memoized handle must still be the one that was actually opened+written to.
+    expect(verifyAndFinalizeArgs[0].partFile).toBe(openedParts[0]);
+    expect(verifyAndFinalizeArgs[0].partFile).not.toBeUndefined();
+    expect(openedParts[0].closed).toBe(true);
+  });
+
   it('declines when consent says no', async () => {
     const { ctrl, toReceiver, out } = ctrlPair();
     const rx = createMultiFlowReceiver({ ctrl, flows: [], jobId: JOB, consent: async () => false, openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve() }), verifyAndFinalize: () => Promise.resolve({ ok: true }) });

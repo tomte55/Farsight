@@ -871,11 +871,24 @@ export function createMultiFlowReceiver({
       resolveOnce({ jobId, ok: false });
       return;
     }
+    // Memoize each file's open partFile by fileId: the router closes its own
+    // `f.part` handle before calling verifyAndFinalize (so it can't hand us the
+    // handle directly), but the REAL finalizeReceivedFile({ partFile, ... }) needs
+    // it (for partPath/finalPath/liveDigest — a closed handle object still
+    // provides all three, since liveDigest() for the sparse writer is always
+    // null and just triggers a completion hashFile read). Recorded on every
+    // openPart call (including a post-resetFile reopen), so the map entry is
+    // always the CURRENT part for that fileId.
+    const partFiles = new Map();
     router = createReceiveRouter({
       manifest: m,
       initialRanges: initialRangesFor(m),
-      openPart: (fileId) => openPart(pathOf(fileId)),
-      verifyAndFinalize: ({ fileId, expectedHash }) => verifyAndFinalize({ ...findEntry(fileId), expectedHash }),
+      openPart: async (fileId) => {
+        const p = await openPart(pathOf(fileId));
+        partFiles.set(fileId, p);
+        return p;
+      },
+      verifyAndFinalize: ({ fileId, expectedHash }) => verifyAndFinalize({ ...findEntry(fileId), expectedHash, partFile: partFiles.get(fileId) }),
       onFileDone: ({ fileId, ok: fileOk }) => {
         if (!fileOk) router.resetFile(fileId);
         onEvent({ type: fileOk ? 'file-done' : 'file-failed', fileId });
