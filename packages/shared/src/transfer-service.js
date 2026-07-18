@@ -10,10 +10,10 @@
 // receive can run concurrently with an active send, since the remote peer
 // initiates it and the user has already consented per-offer.
 import { createHash } from 'node:crypto';
-import { createSender, createReceiver } from './transfer-orchestrator.js';
-import { createQueue, selectResumable } from './transfer-queue.js';
+import { createSender, createReceiver, createMultiFlowSender, createMultiFlowReceiver } from './transfer-orchestrator.js';
+import { createQueue, selectResumable, newJobId } from './transfer-queue.js';
 import { parseCtrlFrame } from './transfer-protocol.js';
-import { walkSource } from './transfer-io.js';
+import { walkSource, openSourceReader, createSparsePartFile, finalizeReceivedFile } from './transfer-io.js';
 import { buildManifest } from './transfer-manifest.js';
 import { createResumeWatcher } from './transfer-resume-watcher.js';
 
@@ -56,11 +56,91 @@ function isTerminalReason(reason) {
   return /rejected:|receiver_incomplete|canceled|aborted|bad_manifest|nospace|proto|declined/.test(String(reason || ''));
 }
 
+// Multi-flow selection (Plan 3 Task 3): flowCount > 1 drives the Plan-2
+// createMultiFlowSender/createMultiFlowReceiver instead of the single-flow
+// createSender/createReceiver. Any non-positive-integer input (missing, 0,
+// negative, non-integer) is ignored and falls through to the next source, then
+// to 1 (single-flow) -- never silently coerces a bad value into "multi-flow".
+function resolveFlowCount(preferred, fallback) {
+  const p = Number.isInteger(preferred) && preferred > 0 ? preferred : undefined;
+  const f = Number.isInteger(fallback) && fallback > 0 ? fallback : undefined;
+  return p ?? f ?? 1;
+}
+
+// createMultiFlowSender's readerFor(fileId) is called SYNCHRONOUSLY (see
+// initialPass/gapPass in transfer-orchestrator.js -- there is no `await
+// readerFor(...)`), but transfer-io.js's openSourceReader is async. Return a
+// plain {readAt,close} object immediately and open the real fd lazily on first
+// readAt (memoized) -- the same lazy-open pattern Plan 2's own loopback test
+// fixture uses for this exact seam.
+function readerForSources(sources) {
+  return (fileId) => {
+    let rp = null;
+    return {
+      async readAt(offset, length) {
+        rp = rp || await openSourceReader(sources.get(fileId));
+        return rp.readAt(offset, length);
+      },
+      async close() { if (rp) await rp.close(); },
+    };
+  };
+}
+
+// Multi-flow RESUME (Plan 3 Task 3): the positional/sparse receive writer means
+// the .part file's on-disk SIZE is no longer the resume offset the way it is for
+// the single-flow writer (createPartFile) -- the receiver must persist each
+// file's actual covered byte-ranges explicitly (createMultiFlowReceiver's
+// persistRanges seam) and read them back on a fresh start (initialRangesFor).
+// Returns {fileId: ivals} the same way createReceiveRouter indexes
+// initialRanges (transfer-receive-router.js: `initialRanges[e.fileId]`); {} for
+// no usable prior record (fresh job, wrong dir, or one that predates range
+// persistence).
+async function readPersistedRanges(store, jobId) {
+  let rec = null;
+  try { rec = await store.load(jobId); } catch { rec = null; }
+  if (!rec || rec.dir !== 'recv' || !Array.isArray(rec.perFile)) return {};
+  const out = {};
+  for (const pf of rec.perFile) {
+    if (pf && typeof pf.fileId !== 'undefined' && Array.isArray(pf.ivals)) out[pf.fileId] = pf.ivals;
+  }
+  return out;
+}
+
+function ivalsCoverFile(ivals, size) {
+  return Array.isArray(ivals) && ivals.some((iv) => Array.isArray(iv) && iv[0] <= 0 && iv[1] >= size);
+}
+
+// Persist the multi-flow receive record with each file's current byte-ranges
+// attached (perFile[i].ivals), alongside the same fields the single-flow receive
+// record carries (dir/tier/peer/destRoot/manifest/jobState -- see createReceiver's
+// own saveRecord in transfer-orchestrator.js). Called periodically
+// (createMultiFlowReceiver's persistRanges seam, every reportIntervalMs) and once
+// more with the terminal state when the receive settles. store.save() is itself
+// serialized per jobId (jobs-store.js), so concurrent calls here are safe
+// (last-writer-wins, matching the existing send-side saves' discipline).
+async function saveReceiveRecordWithRanges({ store, jobId, tier, peer, destRoot, manifest, jobState, files }) {
+  if (!store || !manifest) return;
+  const byId = new Map((files || []).map((f) => [f.fileId, f.ivals]));
+  return store.save({
+    jobId, dir: 'recv', tier: tier || 'adhoc', peer: peer || {}, destRoot,
+    manifest,
+    perFile: manifest.entries.map((e) => {
+      const ivals = byId.get(e.fileId) || [];
+      return { fileId: e.fileId, ivals, status: ivalsCoverFile(ivals, e.size) ? 'done' : 'pending' };
+    }),
+    jobState, createdAt: 0,
+  });
+}
+
 export function createTransferService({ store, transferDir, consent, openChannel, onEvent = () => {}, rendezvousTimeoutMs = 30000, receiveCloseGraceMs = 2000, consentClassifyTimeoutMs = 8000, delay = (ms) => new Promise((r) => setTimeout(r, ms)),
   // SP3 Phase 4 auto-resume: when provided, an own-fleet interrupted send is
   // re-established via the resume watcher (getFleet resolves the peer's current
   // signalingId by deviceId). resumeOpts injects the watcher's timers for tests.
-  getFleet, resumeOpts = {} }) {
+  getFleet, resumeOpts = {},
+  // Plan 3 Task 3: default flowCount for a send when `target.flowCount` isn't
+  // set (per-send override always wins -- see resolveFlowCount). 1 keeps the
+  // existing single-flow path exactly as it was.
+  flowCount: serviceFlowCount = 1 }) {
   const queue = createQueue();
   let resumeWatcher = null; // set below when getFleet is provided (own-fleet auto-resume)
   const pendingSends = new Map(); // jobId -> { manifest, sources, target, createdAt, resolve, reject }
@@ -153,7 +233,6 @@ export function createTransferService({ store, transferDir, consent, openChannel
     // send. Best-effort: a store write failure here must not abort a transfer
     // that would otherwise work.
     try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'active', peer, tier, sourceRoots }); } catch { /* best effort */ }
-    let channel = null;
     let close = null;
     let onRendezvousError = null;
     let result;
@@ -165,23 +244,43 @@ export function createTransferService({ store, transferDir, consent, openChannel
     let approvalTimer = null;
     const disarmApprovalTimer = () => { if (approvalTimer) { clearTimeout(approvalTimer); approvalTimer = null; } };
     try {
-      ({ channel, close, onRendezvousError } = await openChannel({ role: 'initiate', target }));
+      // Plan 3 Task 3: flowCount>1 (per-target override, else the service
+      // default) drives the multi-flow branch below via a multi-flow openChannel
+      // call; flowCount<=1 is the existing call/path, byte-for-byte unchanged.
+      const flowCount = resolveFlowCount(target && target.flowCount, serviceFlowCount);
+      const openArgs = flowCount > 1 ? { role: 'initiate', target, flowCount } : { role: 'initiate', target };
+      const opened = await openChannel(openArgs);
+      ({ close, onRendezvousError } = opened);
       if (pendingSends.has(jobId)) {
         // Still wanted: cancel() may have already removed it while the
         // channel was opening (see cancel() below) — don't start sending.
         activeClose = close;
-        const sender = createSender({
-          channel, jobId, manifest, sources,
-          onEvent: (ev) => {
-            // 'prompting' = the host is showing the consent prompt (alive, awaiting
-            // a human). 'accepted' = the user said yes. Either one means the peer
-            // responded, so stop the approval timeout — a person deciding must not
-            // read as "host didn't respond".
-            if (ev.type === 'accepted') { accepted = true; disarmApprovalTimer(); }
-            else if (ev.type === 'prompting') { disarmApprovalTimer(); }
-            emit(jobId, 'send', ev);
-          },
-        });
+        const onSendEvent = (ev) => {
+          // 'prompting' = the host is showing the consent prompt (alive, awaiting
+          // a human). 'accepted' = the user said yes. Either one means the peer
+          // responded, so stop the approval timeout — a person deciding must not
+          // read as "host didn't respond".
+          if (ev.type === 'accepted') { accepted = true; disarmApprovalTimer(); }
+          else if (ev.type === 'prompting') { disarmApprovalTimer(); }
+          emit(jobId, 'send', ev);
+        };
+        // Consume whichever shape openChannel actually returned (Plan 3 Task 4's
+        // grouped N-worker assembly resolves {ctrl,flows,...}; single-flow/legacy
+        // resolves the existing {channel,...}) rather than trusting our own
+        // flowCount decision blindly -- defensive against a partially-wired main.
+        const multi = !!(opened.ctrl && Array.isArray(opened.flows));
+        const sender = multi
+          ? createMultiFlowSender({
+              ctrl: opened.ctrl, flows: opened.flows, jobId, manifest,
+              // The real connected flow count (may differ from the requested one
+              // if main opened fewer) is more honest on the wire OFFER than the
+              // request we made.
+              flowCount: opened.flows.length || flowCount,
+              groupId: (target && typeof target.groupId === 'string') ? target.groupId : newJobId(),
+              readerFor: readerForSources(sources),
+              onEvent: onSendEvent,
+            })
+          : createSender({ channel: opened.channel, jobId, manifest, sources, onEvent: onSendEvent });
         // Signaling-level rendezvous errors (host_offline, bad_password,
         // transfer_timeout, …) surface here BEFORE any accept — fail fast with
         // the real reason instead of hanging until the timeout.
@@ -323,6 +422,159 @@ export function createTransferService({ store, transferDir, consent, openChannel
     }
   }
 
+  // Own-fleet vs contact vs ad-hoc peer classification for an inbound receive's
+  // consent prompt -- shared by the single-flow AND multi-flow receive paths
+  // (Plan 3 Task 3: extracted so the multi-flow branch doesn't duplicate this
+  // SECURITY-sensitive contact-memo logic verbatim; behavior is byte-for-byte
+  // what startReceive already did inline). See the acceptedContactJobs SECURITY
+  // comment above for why a memo hit alone must never skip the prompt.
+  function makeReceiveConsent(peerAuth) {
+    let resolvedTier = null; // set by the classify below; read lazily by the receiver
+    const consentFn = async ({ jobId, manifest }) => {
+      let tier = null;
+      let publicKey = null;
+      try {
+        if (peerAuth) {
+          let timerId = null;
+          const timed = new Promise((res) => { timerId = setTimeout(() => res({ tier: null }), consentClassifyTimeoutMs); });
+          try {
+            const a = await Promise.race([peerAuth, timed]);
+            tier = a.tier;
+            publicKey = a.publicKey || null;
+          } finally {
+            clearTimeout(timerId);
+          }
+        }
+      } catch { tier = null; publicKey = null; }
+      resolvedTier = tier;
+      if (tier === 'fleet') return true;   // own-fleet auto-accepts; contact/adhoc/timeout → prompt
+      // Only a VERIFIED contact's consent is remembered. Ad-hoc/unverified (tier
+      // null, no key) always prompts — there's no authenticated identity to bind
+      // to, so a replayed jobId must not skip the prompt. Fail-closed intact.
+      const memo = tier === 'contact' && publicKey ? `${publicKey}::${jobId}` : null;
+      // A memo hit alone must NOT skip the prompt (see the SECURITY comment on
+      // acceptedContactJobs above) — additionally require the offered manifest
+      // to be byte-identical to the one approved, AND the receiver's OWN store
+      // record to say this job is still genuinely unfinished. Any mismatch or
+      // missing/terminal record falls through to a real prompt — fail closed.
+      const fingerprint = manifestFingerprint(manifest);
+      if (memo && acceptedContactJobs.get(memo) === fingerprint) {
+        let rec = null;
+        try { rec = await store.load(jobId); } catch { rec = null; }
+        if (rec && rec.dir === 'recv' && (rec.jobState === 'active' || rec.jobState === 'interrupted')) {
+          return true; // a resume of a job this peer already got approved: same manifest, still unfinished
+        }
+      }
+      const ok = await consent({ jobId, manifest });
+      if (ok && memo) acceptedContactJobs.set(memo, fingerprint);
+      return ok;
+    };
+    return { consentFn, getTier: () => resolvedTier || 'adhoc' };
+  }
+
+  // Plan 3 Task 3: multi-flow receive. openChannel resolved {ctrl, flows, close,
+  // peerAuth} (Plan 3 Task 4's grouped N-worker assembly) instead of the
+  // single-flow {channel, ...} shape. Unlike single-flow createReceiver,
+  // createMultiFlowReceiver takes jobId as a CONSTRUCTOR param and filters EVERY
+  // ctrl frame -- including the OFFER itself -- by exact jobId match (see
+  // transfer-orchestrator.js), but jobId is sender-chosen and only appears ON
+  // the OFFER frame; nothing in the rendezvous (TRANSFER_REQUEST only carries
+  // sessionId/groupId/flowIndex/flowCount/linked -- see transfer-group-
+  // rendezvous.js) tells us jobId ahead of time. So: tap the raw ctrl first to
+  // learn jobId from its first frame (buffering everything until then), THEN
+  // construct the real receiver with that jobId, then flush the buffer into it.
+  // While we're already tapping every frame, opportunistically reassemble the
+  // manifest too (from offer/offer_begin/offer_entries/offer_end) purely for our
+  // OWN bookkeeping -- createMultiFlowReceiver never surfaces its manifest via
+  // onEvent (unlike single-flow's 'accepted' event), but the jobs-store record
+  // needs it.
+  async function runMultiFlowReceive({ ctrl, flows, close, peerAuth }) {
+    let currentJobId = null;
+    let currentManifest = null;
+    let offerAccum = null;
+    let forwardToReceiver = null;
+    const buffered = [];
+    let resolveJobId;
+    const jobIdKnown = new Promise((res) => { resolveJobId = res; });
+
+    // Registered synchronously, before any await, so no frame can arrive
+    // unobserved between openChannel resolving and this handler being live.
+    ctrl.onCtrl((str) => {
+      const f = parseCtrlFrame(str);
+      if (f) {
+        if (currentJobId === null && typeof f.jobId === 'string') { currentJobId = f.jobId; resolveJobId(f.jobId); }
+        if (f.t === 'offer') {
+          try { currentManifest = buildManifest(f.entries); } catch { /* malformed; the real receiver's own validation rejects it */ }
+        } else if (f.t === 'offer_begin') {
+          offerAccum = { entries: [] };
+        } else if (f.t === 'offer_entries') {
+          if (offerAccum) for (const e of f.entries) offerAccum.entries.push(e);
+        } else if (f.t === 'offer_end') {
+          if (offerAccum) { try { currentManifest = buildManifest(offerAccum.entries); } catch { /* ditto */ } offerAccum = null; }
+        }
+      }
+      if (forwardToReceiver) forwardToReceiver(str);
+      else buffered.push(str);
+    });
+
+    const wrappedCtrl = {
+      sendCtrl: (s) => ctrl.sendCtrl(s),
+      onCtrl(cb) {
+        forwardToReceiver = cb;
+        const pending = buffered.splice(0);
+        for (const s of pending) cb(s);
+      },
+    };
+
+    const jobId = await jobIdKnown;
+    // Sparse/positional resume state (see readPersistedRanges) -- fetched ONCE,
+    // synchronously handed to the receiver: createReceiveRouter reads
+    // initialRanges as a plain object (`initialRanges[e.fileId]`), not a
+    // promise, so this must resolve before the receiver is constructed.
+    const persistedRanges = await readPersistedRanges(store, jobId);
+    const { consentFn: receiveConsent, getTier } = makeReceiveConsent(peerAuth);
+    const destRoot = (typeof transferDir === 'function' ? transferDir() : transferDir);
+
+    const receiver = createMultiFlowReceiver({
+      ctrl: wrappedCtrl, flows, jobId, consent: receiveConsent,
+      openPart: (relPath) => createSparsePartFile({ destRoot, relPath }),
+      verifyAndFinalize: ({ partFile, expectedHash, mtime }) => finalizeReceivedFile({ partFile, expectedHash, mtime }),
+      initialRangesFor: () => persistedRanges,
+      persistRanges: (files) => {
+        if (!currentManifest) return; // no OFFER reassembled yet; nothing to persist against
+        saveReceiveRecordWithRanges({
+          store, jobId, tier: getTier(), peer: {}, destRoot,
+          manifest: currentManifest, jobState: 'active', files,
+        }).catch(() => { /* best effort, matches single-flow saveRecord's discipline */ });
+      },
+      onEvent: (ev) => emit(jobId, 'recv', ev),
+    });
+
+    activeReceives.set(jobId, { abort: (r) => receiver.abort(r) });
+    try {
+      const result = await receiver.start();
+      // createMultiFlowReceiver's own persistRanges cadence stops once it
+      // settles (stopReporter()) -- persist the TERMINAL state once more here so
+      // a completed/failed job's record reflects final coverage, not whatever
+      // the last periodic tick happened to catch.
+      if (currentManifest) {
+        const files = currentManifest.entries.map((e) => ({ fileId: e.fileId, ivals: result.ok ? [[0, e.size]] : [] }));
+        try {
+          await saveReceiveRecordWithRanges({
+            store, jobId, tier: getTier(), peer: {}, destRoot,
+            manifest: currentManifest, jobState: result.ok ? 'done' : 'error', files,
+          });
+        } catch { /* best effort */ }
+      }
+      return result;
+    } finally {
+      activeReceives.delete(jobId);
+      // Same completion-ack grace as the single-flow path (see startReceive).
+      if (receiveCloseGraceMs > 0) { try { await delay(receiveCloseGraceMs); } catch { /* ignore */ } }
+      try { await close(); } catch { /* ignore close errors */ }
+    }
+  }
+
   const api = {
     recoverStaleSends,
 
@@ -346,7 +598,16 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // run the host-role device-keypair handshake and fail closed if it doesn't
       // pass — the signaling server relays `linked` in TRANSFER_REQUEST.
       const linked = (rendezvous && typeof rendezvous === 'object') ? !!rendezvous.linked : false;
-      const { channel, close, peerAuth } = await openChannel({ role: 'attach', sessionId, linked });
+      const opened = await openChannel({ role: 'attach', sessionId, linked });
+      // Plan 3 Task 3: openChannel resolves either the existing single-flow
+      // {channel, close, peerAuth} shape, or the multi-flow {ctrl, flows, close,
+      // peerAuth} shape (Plan 3 Task 4's grouped N-worker assembly, driven by the
+      // group-rendezvous coordinator -- NOT by anything this service decides).
+      // Consume whichever shape actually came back.
+      if (opened && opened.ctrl && Array.isArray(opened.flows)) {
+        return runMultiFlowReceive(opened);
+      }
+      const { channel, close, peerAuth } = opened;
       let currentJobId = null;
       let receiverRef = null;
       const tapped = tapJobId(channel, (id) => {
@@ -371,49 +632,10 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // against auth.sovexa.org) — race it against a timeout so a stalled/offline
       // auth server can't hang the receive forever. Fail-closed means falling
       // through to the human `consent` prompt, never auto-accepting.
-      let resolvedTier = null; // set by the consent classify below; read lazily by the receiver
-      const receiveConsent = async ({ jobId, manifest }) => {
-        let tier = null;
-        let publicKey = null;
-        try {
-          if (peerAuth) {
-            let timerId = null;
-            const timed = new Promise((res) => { timerId = setTimeout(() => res({ tier: null }), consentClassifyTimeoutMs); });
-            try {
-              const a = await Promise.race([peerAuth, timed]);
-              tier = a.tier;
-              publicKey = a.publicKey || null;
-            } finally {
-              clearTimeout(timerId);
-            }
-          }
-        } catch { tier = null; publicKey = null; }
-        resolvedTier = tier;
-        if (tier === 'fleet') return true;   // own-fleet auto-accepts; contact/adhoc/timeout → prompt
-        // Only a VERIFIED contact's consent is remembered. Ad-hoc/unverified (tier
-        // null, no key) always prompts — there's no authenticated identity to bind
-        // to, so a replayed jobId must not skip the prompt. Fail-closed intact.
-        const memo = tier === 'contact' && publicKey ? `${publicKey}::${jobId}` : null;
-        // A memo hit alone must NOT skip the prompt (see the SECURITY comment on
-        // acceptedContactJobs above) — additionally require the offered manifest
-        // to be byte-identical to the one approved, AND the receiver's OWN store
-        // record to say this job is still genuinely unfinished. Any mismatch or
-        // missing/terminal record falls through to a real prompt — fail closed.
-        const fingerprint = manifestFingerprint(manifest);
-        if (memo && acceptedContactJobs.get(memo) === fingerprint) {
-          let rec = null;
-          try { rec = await store.load(jobId); } catch { rec = null; }
-          if (rec && rec.dir === 'recv' && (rec.jobState === 'active' || rec.jobState === 'interrupted')) {
-            return true; // a resume of a job this peer already got approved: same manifest, still unfinished
-          }
-        }
-        const ok = await consent({ jobId, manifest });
-        if (ok && memo) acceptedContactJobs.set(memo, fingerprint);
-        return ok;
-      };
+      const { consentFn: receiveConsent, getTier } = makeReceiveConsent(peerAuth);
       const receiver = createReceiver({
         channel: tapped, destRoot: (typeof transferDir === 'function' ? transferDir() : transferDir), store, consent: receiveConsent,
-        getTier: () => resolvedTier || 'adhoc',
+        getTier,
         onEvent: (ev) => emit(currentJobId, 'recv', ev),
       });
       receiverRef = receiver;
