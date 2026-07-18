@@ -969,6 +969,13 @@ export function createMultiFlowReceiver({
     for (const flow of flows) flow.onBulk((buf) => run(() => { pokeWatchdog(); return router.onBulkFrame(buf); }));
     if (settled) return;
     ctrl.sendCtrl(acceptFrame({ jobId, resume: [], ranges: reportFiles() }));
+    // Persist the jobs-store record ONCE, immediately — mirrors createReceiver's
+    // immediate saveRecord('active') on accept. Without this, the record only
+    // ever gets written by the periodic tick() below (~reportIntervalMs later,
+    // default 3s), so a receive canceled/interrupted within that window leaves
+    // NO store record at all: it vanishes from the Transfers list and can never
+    // be resumed. This call is independent of (and precedes) the first tick.
+    persistRanges(reportFiles());
     sendReport();
     startReporter();
     watching = true; pokeWatchdog(); // now expecting a steady stream of ctrl/bulk traffic

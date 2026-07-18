@@ -127,17 +127,21 @@ describe('createMultiFlowReceiver', () => {
 
     const countReports = () => out.filter((f) => f.t === 'range_report').length;
 
-    // accept() sends its own immediate range_report and arms the periodic reporter.
+    // accept() sends its own immediate range_report, persists the record ONCE
+    // right away (independent of the periodic tick — see the new dedicated test
+    // below for the fast-cancel scenario this exists for), and arms the periodic
+    // reporter.
     expect(out.some((f) => f.t === 'accept')).toBe(true);
     const afterAccept = countReports();
     expect(afterAccept).toBeGreaterThan(0);
-    expect(persistRanges).not.toHaveBeenCalled();
+    expect(persistRanges).toHaveBeenCalledTimes(1);
     expect(fake.pending()).toBe(1); // startReporter() armed exactly one timer
 
-    // Property 1 + 2: the tick fires a NEW range_report, calls persistRanges, and re-arms.
+    // Property 1 + 2: the tick fires a NEW range_report, calls persistRanges AGAIN
+    // (on top of the immediate accept-time call), and re-arms.
     fake.tickOnce();
     expect(countReports()).toBe(afterAccept + 1);
-    expect(persistRanges).toHaveBeenCalledTimes(1);
+    expect(persistRanges).toHaveBeenCalledTimes(2);
     expect(fake.pending()).toBe(1); // re-armed with a fresh timer id, not left dangling
 
     const beforeCompletion = countReports();
@@ -168,6 +172,41 @@ describe('createMultiFlowReceiver', () => {
     fake.tickOnce();
     expect(countReports()).toBe(reportsAtEnd);
     expect(persistRanges).toHaveBeenCalledTimes(persistCallsAtEnd);
+  });
+
+  // The gap this closes: persistRanges was previously only ever called from the
+  // periodic tick() (~reportIntervalMs later, default 3s). A multi-flow receive
+  // canceled/interrupted within that window left NO jobs-store record at all —
+  // it vanished from the Transfers list and could never be resumed. Mirrors
+  // single-flow createReceiver's immediate saveRecord('active') on accept. Uses
+  // a huge reportIntervalMs (never fired via tickOnce here) so the ONLY way
+  // persistRanges could have been called is the new immediate accept-path call.
+  it('persists the record ONCE immediately on accept, independent of the periodic tick (no vanish on fast cancel)', async () => {
+    const size = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const persistRanges = vi.fn();
+    const fake = fakeClock();
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null }),
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      persistRanges,
+      reportIntervalMs: 999_999_999, // large enough that tickOnce() below cannot be the source
+      inactivityMs: 0, // keep the watchdog out of the way — irrelevant to this test
+      setTimer: fake.setTimer, clearTimer: fake.clearTimer,
+    });
+    rx.start().catch(() => {});
+    toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'q.bin', size, mtime: 0 }], totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+    expect(out.some((f) => f.t === 'accept')).toBe(true);
+
+    // Called at least once, from the accept path — NOT the tick, which hasn't fired.
+    expect(persistRanges).toHaveBeenCalledTimes(1);
+    // Shape: one entry per manifest file, with its initial per-file coverage.
+    expect(persistRanges.mock.calls[0][0]).toEqual([{ fileId: 0, ivals: [] }]);
   });
 
   it('reports a finalized file as fully covered even though the router itself omits it (fixes the paired sender\'s livelock)', async () => {
