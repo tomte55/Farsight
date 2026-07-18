@@ -177,6 +177,19 @@ export function createMultiFlowSender({
   offerBatchBytes = 49152,
   completionTimeoutMs = 120000,
   reconcileWaitMs = 3000,
+  // Final-review #2: sender-side inactivity/stall watchdog. pump() can park
+  // indefinitely on the send pool's awaitFlow when every flow is down and the
+  // supervisor never reaches all-slots-`dead` (a final-attempt slot that
+  // connects then sits stuck in 'disconnected' never sets `dead`, so awaitFlow
+  // never rejects) — the post-`all-sent` no_confirmation timer is armed too late
+  // to catch that, and nothing else fails the send. Mirrors createMultiFlow
+  // Receiver's ~25s inactivity watchdog: armed at accept (pump start), reset on
+  // every inbound range_report (the receiver's liveness signal — time-driven
+  // ~reportIntervalMs in a healthy transfer, so steady progress can't false-trip
+  // it), and disarmed at `all-sent` (the no_confirmation completion timer owns
+  // the drain phase) and on settle. On expiry it fail('stalled')s so the app's
+  // existing fail->auto-resume path takes over. 0 disables (single-flow/legacy).
+  inactivityMs = 25000,
   setTimer = setTimeout, clearTimer = clearTimeout,
   // Per-chunk progress would flood IPC; throttle to a human-legible cadence,
   // same discipline as single-flow createSender's emitProgress. Clock injected
@@ -222,9 +235,19 @@ export function createMultiFlowSender({
   const finished = new Promise((res, rej) => { resolve = res; reject = rej; });
   let completionTimer = null;
   const clearCompletion = () => { if (completionTimer) { clearTimer(completionTimer); completionTimer = null; } };
-  const resolveOnce = (v) => { if (!settled) { settled = true; clearCompletion(); resolve(v); } };
-  const fail = (e) => { if (!settled) { settled = true; clearCompletion(); reject(e); } };
+  // Final-review #2 stall watchdog state (armed in pump(), see inactivityMs above).
+  let inactive = null;     // active timer handle, or null
+  let watching = false;    // armed only between accept (pump start) and all-sent/settle
+  const stopWatchdog = () => { if (inactive) { clearTimer(inactive); inactive = null; } };
+  const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopWatchdog(); clearCompletion(); resolve(v); } };
+  const fail = (e) => { if (!settled) { settled = true; watching = false; stopWatchdog(); clearCompletion(); reject(e); } };
   const run = serializer(fail);
+  const pokeWatchdog = () => {
+    if (!watching || settled || !(inactivityMs > 0)) return;
+    if (inactive) clearTimer(inactive);
+    inactive = setTimer(() => { if (!settled) fail(new Error('stalled')); }, inactivityMs);
+    if (inactive && inactive.unref) inactive.unref();
+  };
 
   // Each file's hash, computed once by the initial full-file read (below) and
   // reused by any later gap pass's re-sent file_end — a resumed, already
@@ -354,6 +377,7 @@ export function createMultiFlowSender({
   }
 
   async function pump() {
+    watching = true; pokeWatchdog(); // now actively sending — a stall must not hang forever
     try {
       await pool.run(initialPass());
       for (;;) {
@@ -379,6 +403,11 @@ export function createMultiFlowSender({
     }
     ctrl.sendCtrl(jobDoneFrame({ jobId }));
     onEvent({ type: 'all-sent' });
+    // Every byte is on the wire — hand the drain phase to the no_confirmation
+    // completion timer below and disarm the stall watchdog (otherwise it could
+    // trip during a legitimate final-verify wait, and it would double-cover a
+    // phase the completion timer already owns).
+    watching = false; stopWatchdog();
     if (!settled && completionTimeoutMs > 0) {
       completionTimer = setTimer(() => fail(new Error('no_confirmation')), completionTimeoutMs);
       if (completionTimer && completionTimer.unref) completionTimer.unref();
@@ -418,6 +447,7 @@ export function createMultiFlowSender({
     }
     if (f.t === 'range_report') {
       tracker.applyReport(f.files);
+      pokeWatchdog(); // fresh receiver report — the control plane + transfer are alive
       emitProgress();
       checkFileSent();
       if (pendingWaiterResolve) pendingWaiterResolve();

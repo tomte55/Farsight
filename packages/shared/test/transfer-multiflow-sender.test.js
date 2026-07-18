@@ -500,3 +500,98 @@ describe('createMultiFlowSender awaitFlow threading', () => {
     expect(Buffer.from(dest).equals(Buffer.from(A))).toBe(true);
   });
 });
+
+// Final-review #2: createMultiFlowSender's pump can park indefinitely on the
+// send pool's awaitFlow when every flow is down and the supervisor never reaches
+// all-slots-`dead` (so awaitFlow never rejects). The receiver has a ~25s
+// inactivity watchdog; the sender needs one too, or the send hangs forever.
+describe('createMultiFlowSender — Final-review #2 stall watchdog', () => {
+  // Deterministic injected clock: setTimer records a callback+due-time, advance()
+  // fires everything due. unref is a no-op (real timers get it; this doesn't need it).
+  function fakeClock() {
+    let now = 0, id = 0; const timers = new Map();
+    return {
+      setTimer: (fn, ms) => { const t = ++id; timers.set(t, { fn, at: now + ms }); return { __t: t, unref() {} }; },
+      clearTimer: (h) => { if (h && h.__t) timers.delete(h.__t); },
+      advance: async (ms) => {
+        now += ms;
+        for (const [t, e] of [...timers.entries()].sort((a, b) => a[1].at - b[1].at)) {
+          if (e.at <= now) { timers.delete(t); e.fn(); }
+        }
+        await Promise.resolve();
+      },
+    };
+  }
+  const flush = () => new Promise((r) => setTimeout(r, 0)); // real macrotask: drains the serializer's microtasks
+  const oneFile = { entries: [{ fileId: 0, size: 300 }] };
+  const src = new Map([[0, new Uint8Array(300)]]);
+  // A ctrl that auto-accepts the OFFER and can be driven to emit range_reports.
+  function makeCtrl() {
+    let cb = null;
+    return {
+      sendCtrl: (s) => { const f = parseCtrlFrame(s); if (f && (f.t === 'offer' || f.t === 'offer_end')) cb(acceptFrame({ jobId: JOB, resume: [], ranges: [] })); },
+      onCtrl: (c) => { cb = c; },
+      report: (files) => cb(rangeReportFrame({ jobId: JOB, files })),
+    };
+  }
+
+  it('flows all die and never recover (awaitFlow never resolves) -> FAILS with stalled within the bound (not hang)', async () => {
+    const clk = fakeClock();
+    const ctrl = makeCtrl();
+    const flows = [{ isAlive: () => false, sendBulk: () => Promise.resolve() }];
+    const sender = createMultiFlowSender({
+      ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
+      awaitFlow: () => new Promise(() => {}), // parks forever
+      inactivityMs: 5000, setTimer: clk.setTimer, clearTimer: clk.clearTimer, completionTimeoutMs: 0,
+    });
+    const done = sender.start();
+    let settled = false; done.then(() => { settled = true; }, () => { settled = true; });
+    await flush(); await flush(); // accept -> pump -> park on awaitFlow, watchdog armed at t=0
+    expect(settled).toBe(false);
+    await clk.advance(5000);
+    await expect(done).rejects.toThrow('stalled');
+  });
+
+  it('mutation: inactivityMs:0 disables the watchdog — the same parked send does NOT fail (proves the guard is load-bearing)', async () => {
+    const clk = fakeClock();
+    const ctrl = makeCtrl();
+    const flows = [{ isAlive: () => false, sendBulk: () => Promise.resolve() }];
+    const sender = createMultiFlowSender({
+      ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
+      awaitFlow: () => new Promise(() => {}),
+      inactivityMs: 0, setTimer: clk.setTimer, clearTimer: clk.clearTimer, completionTimeoutMs: 0,
+    });
+    const done = sender.start();
+    let settled = false; done.then(() => { settled = true; }, () => { settled = true; });
+    await flush(); await flush();
+    await clk.advance(1_000_000); // far past any bound
+    await flush();
+    expect(settled).toBe(false); // no watchdog -> the parked send hangs
+  });
+
+  it('a healthy send with steady range_reports does NOT trip the watchdog; cessation then trips it', async () => {
+    const clk = fakeClock();
+    const ctrl = makeCtrl();
+    // sendBulk parks so pump stays in-flight and the ONLY watchdog reset is the
+    // receiver's range_report cadence — isolating "steady progress keeps it alive".
+    const flows = [{ isAlive: () => true, sendBulk: () => new Promise(() => {}) }];
+    const sender = createMultiFlowSender({
+      ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
+      inactivityMs: 1000, setTimer: clk.setTimer, clearTimer: clk.clearTimer, completionTimeoutMs: 0, progressIntervalMs: 0,
+    });
+    const done = sender.start();
+    let settled = false; done.then(() => { settled = true; }, () => { settled = true; });
+    await flush(); await flush(); // pump armed the watchdog at t=0 (would fire at 1000)
+    for (let i = 0; i < 5; i += 1) {
+      await clk.advance(600); // < inactivityMs
+      ctrl.report([{ fileId: 0, ivals: [[0, Math.min(300, 100 * (i + 1))]] }]);
+      await flush();
+      expect(settled).toBe(false); // never tripped while reports keep coming
+    }
+    await clk.advance(1000); // reports stop -> the bound elapses
+    await expect(done).rejects.toThrow('stalled');
+  });
+});
