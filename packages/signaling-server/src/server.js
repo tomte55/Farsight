@@ -3,6 +3,7 @@ import { WebSocketServer } from 'ws';
 import { pathToFileURL } from 'node:url';
 import { MSG, parseMessage, buildMessage } from '@farsight/shared/protocol';
 import { generateHostId } from '@farsight/shared/host-id';
+import { isJobId } from '@farsight/shared/transfer-protocol';
 import { constantTimeEqual } from '@farsight/shared/password';
 import { makeTurnCredential } from '@farsight/shared/turn';
 import { createRegistry } from './registry.js';
@@ -177,10 +178,22 @@ export function createSignalingServer({ port, config } = {}) {
               }
             }, cfg.sessionTimeoutMs ?? 15000);
             if (sess.timer.unref) sess.timer.unref();
+            // Plan 2 Task 6 (SP3 multi-flow): whitelisted pass-through so N
+            // parallel flows can be grouped by the receiver into one logical
+            // transfer with a single consent. Relayed verbatim, never
+            // interpreted here — pairing/session logic above is unchanged,
+            // each flow is still its own session/socket pair. R-6: omit any
+            // field that fails validation rather than forwarding it raw.
+            const groupId = isJobId(msg.groupId) ? msg.groupId : undefined;
+            const flowIndex = Number.isInteger(msg.flowIndex) && msg.flowIndex >= 0 ? msg.flowIndex : undefined;
+            const flowCount = Number.isInteger(msg.flowCount) && msg.flowCount >= 1 ? msg.flowCount : undefined;
             send(target, MSG.TRANSFER_REQUEST, {
               sessionId,
               peerVersion: socket.farsight.version || undefined,
               linked: wantsLinked || undefined,
+              groupId,
+              flowIndex,
+              flowCount,
             });
             log.event('transfer_request', { targetId: msg.targetId });
             break;

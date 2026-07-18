@@ -14,7 +14,11 @@ function nn(x) { return Number.isInteger(x) && x >= 0; }
 // peer, so reject it here at the protocol boundary like any other malformed
 // frame (review finding: sender-chosen jobId used unsanitized in a fs path).
 const JOB_ID_RE = /^[0-9a-f]{32}$/;
-function isJobId(x) { return typeof x === 'string' && JOB_ID_RE.test(x); }
+// Exported so other modules that need to validate a 32-lowercase-hex id
+// against this exact shape (e.g. the signaling server's groupId whitelist —
+// groupId is minted the same way as jobId, via newJobId()) reuse this
+// definition instead of duplicating the regex.
+export function isJobId(x) { return typeof x === 'string' && JOB_ID_RE.test(x); }
 
 // Validate/echo a [{fileId, ivals:[[start,end], ...]}] list (accept.ranges, range_report.files).
 function parseFileRanges(files) {
