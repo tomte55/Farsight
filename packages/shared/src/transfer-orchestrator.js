@@ -8,6 +8,7 @@ import {
   fileBeginFrame, fileEndFrame, jobDoneFrame, acceptFrame, rejectFrame, promptingFrame, completeFrame,
   cancelFrame, parseCtrlFrame, rangeReportFrame, TRANSFER_PROTOCOL_VERSION,
 } from './transfer-protocol.js';
+import { batchReportFiles } from './transfer-report-batch.js';
 
 // Split manifest entries into batches whose serialized size stays under maxBytes,
 // so no single offer_entries frame exceeds the data-channel message limit. Always
@@ -809,6 +810,13 @@ export function createMultiFlowReceiver({
   initialRangesFor = () => ({}),
   persistRanges = () => {},
   reportIntervalMs = 3000,
+  // Bound each range_report ft-ctrl frame to the ~256KB data-channel message
+  // limit (Plan 3): cap a single file's interval count (capIvals drops the
+  // smallest covered runs — harmless re-send, never over-reports) and split
+  // the file SET across multiple frames — each batch is a valid full-snapshot
+  // subset, since createCoverageTracker.applyReport only replaces coverage for
+  // files present in a given report.
+  maxFilesPerFrame = 64, maxIntervalsPerFile = 256,
   onEvent = () => {},
   setTimer = setTimeout, clearTimer = clearTimeout,
 }) {
@@ -864,7 +872,8 @@ export function createMultiFlowReceiver({
   // concern and is deliberately NOT implemented here.
   function sendReport() {
     if (settled || !router) return;
-    ctrl.sendCtrl(rangeReportFrame({ jobId, files: reportFiles() }));
+    const batches = batchReportFiles(reportFiles(), { maxFilesPerFrame, maxIntervalsPerFile });
+    for (const files of batches) ctrl.sendCtrl(rangeReportFrame({ jobId, files }));
   }
 
   function tick() {

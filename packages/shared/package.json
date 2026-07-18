@@ -46,6 +46,7 @@
     "./transfer-auth-gate": "./src/transfer-auth-gate.js",
     "./transfer-resume": "./src/transfer-resume.js",
     "./transfer-resume-watcher": "./src/transfer-resume-watcher.js",
+    "./transfer-report-batch": "./src/transfer-report-batch.js",
     "./update-policy": "./src/update-policy.js",
     "./updater": "./src/updater.js",
     "./log": "./src/log.js",
