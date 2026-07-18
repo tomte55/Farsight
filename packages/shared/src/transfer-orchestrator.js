@@ -166,6 +166,13 @@ export function createSender({
 export function createMultiFlowSender({
   ctrl: ctrl0, flows, jobId, manifest, chunkSize = 131072, flowCount, groupId,
   readerFor, newHash = () => createHash('sha256'),
+  // Resilient multi-flow: the supervisor's starvation waiter. The send pool
+  // awaits it (instead of throwing no_live_flows) when it has a chunk to send
+  // but no live flow yet — a staggered dial still in progress, or every flow
+  // transiently lost — and it only rejects once every slot is exhausted. Absent
+  // (single-flow/legacy, or a caller that opened a static flow set) → the pool
+  // keeps its old throw-immediately-on-starvation behavior.
+  awaitFlow,
   onEvent = () => {},
   offerBatchBytes = 49152,
   completionTimeoutMs = 120000,
@@ -328,7 +335,7 @@ export function createMultiFlowSender({
 
   async function pump() {
     try {
-      await createSendPool({ flows }).run(initialPass());
+      await createSendPool({ flows, awaitFlow }).run(initialPass());
       for (;;) {
         // `settled` is the backstop: the receiver's own `complete`/`reject`/
         // `cancel` frame settles this driver directly (see the ctrl handler
@@ -344,7 +351,7 @@ export function createMultiFlowSender({
         await waitForReport(reconcileWaitMs);
         if (canceled || settled) return;
         if (tracker.isComplete()) break;
-        await createSendPool({ flows }).run(gapPass());
+        await createSendPool({ flows, awaitFlow }).run(gapPass());
       }
     } catch (e) {
       fail(e); // includes 'no_live_flows' — never spin against a dead flow set

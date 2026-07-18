@@ -13,91 +13,169 @@
 // satisfies whichever shape is needed — SEND wraps it (sendBulk/isAlive),
 // RECEIVE uses it directly (it already has onBulk).
 
-// A transfer-worker's onSessionState callback slot is single-owner (exactly one
-// handler per worker — see transfer-worker.js), so the ONE handler installed
-// per worker here has to do both jobs: track aliveness for createSendPool, and
-// (flow 0 only, mirroring the single-flow openChannel's onRendezvousError)
-// forward a rendezvous-level error.
-//
-// C1 (critical deadlock fix): a flow that dies must not just stop being
-// dispatched NEW chunks (isAlive()->false) — any sendBulk ALREADY in flight on
-// it has to be forced to settle too, or the send pool's Promise.race(inflight)
-// waits forever on a promise nothing will ever resolve (the worker only
-// credits an open data channel). So on a TERMINAL state ('failed', 'closed',
-// or any 'error:*') we both mark not-alive AND call channel.fail(state) to
-// reject any pending sendBulk. 'disconnected' is deliberately treated as only
-// transient here — wireConnectionState() in transfer-worker/worker.js debounces
-// a single ICE-restart attempt on it, so it may recover; if it truly dies the
-// connection escalates to 'failed', which IS terminal and calls fail().
-function wireAliveness(worker, aliveMap, onError) {
-  worker.onSessionState((state) => {
-    if (state === 'connected') { aliveMap.set(worker, true); return; }
-    if (state === 'disconnected') { aliveMap.set(worker, false); return; } // transient — may ICE-restart
-    if (state === 'failed' || state === 'closed') {
-      aliveMap.set(worker, false);
-      worker.channel.fail(state);
-      return;
-    }
-    if (typeof state === 'string' && state.startsWith('error:')) {
-      aliveMap.set(worker, false);
-      worker.channel.fail(state);
-      if (onError) onError(state.slice('error:'.length));
-    }
-  });
-}
+import { createFlowSupervisor } from '@farsight/shared/transfer-flow-supervisor';
 
 /**
- * SEND: open `flowCount` workers (via `createWorker(flowIndex)`), kick off
- * each one's initiator rendezvous (via `makeParams(flowIndex)` -> the params
- * object passed to `worker.startRendezvous`), and fold them into the
- * {ctrl, flows, close, onRendezvousError} shape createMultiFlowSender expects.
+ * SEND: build a flow SUPERVISOR that keeps `flowCount` slots filled — a
+ * staggered initial dial plus a bounded-backoff re-dial of any slot that fails
+ * to connect or dies mid-transfer — and fold it into the
+ * {ctrl, flows, awaitFlow, onCtrlReplaced, close, onRendezvousError} shape
+ * createMultiFlowSender consumes (via transfer-service).
+ *
+ * `flows` is the SAME live array the supervisor mutates: it starts EMPTY and
+ * each slot appends a { sendBulk, isAlive } wrapper the instant it connects
+ * (onFlowUp), so a re-dialed replacement flow becomes usable to the send pool
+ * with no re-plumbing. `awaitFlow` is the supervisor's starvation waiter — the
+ * pool awaits it (instead of throwing no_live_flows) whenever it has a chunk to
+ * send but no live flow yet (staggered dial in progress, or a transient loss),
+ * and it only rejects once every slot has exhausted its re-dial budget.
+ *
+ * The supervisor owns each worker's single-owner onSessionState slot, so it —
+ * not this module — decides re-dial/aliveness. Two things it does NOT do that we
+ * still must (both preserved from the pre-supervisor assembly):
+ *   C1: on a slot going TERMINAL the supervisor marks not-alive + onFlowDown,
+ *       but never fails the channel; a sendBulk already in flight on that dead
+ *       flow would then hang the pool's Promise.race(inflight) forever. So
+ *       onFlowDown fails the slot's channel to reject it.
+ *   Rendezvous error: only slot 0 (the ctrl flow) surfaces a signaling-level
+ *       'error:*' (bad_password/host_offline/…) to onRendezvousError so a send
+ *       fails FAST instead of silently re-dialing 8× to exhaustion. Since the
+ *       supervisor claims onSessionState, we MULTIPLEX slot 0's worker: our
+ *       wrapper fans every state out to BOTH our error-forwarder and the
+ *       supervisor's handler.
  *
  * @param {object} args
  * @param {number} args.flowCount
  * @param {(flowIndex: number) => { channel: any, onSessionState: Function, startRendezvous: Function, close: Function }} args.createWorker
  * @param {(flowIndex: number) => object} args.makeParams
+ * @param {Function} [args.createSupervisor] injected for tests (default: real createFlowSupervisor)
  */
-export function assembleSendFlows({ flowCount, createWorker, makeParams }) {
-  const workers = [];
-  const alive = new Map();
-  let rendezvousErrorCb = null;
-  for (let flowIndex = 0; flowIndex < flowCount; flowIndex += 1) {
-    const worker = createWorker(flowIndex);
-    alive.set(worker, false);
-    wireAliveness(worker, alive, flowIndex === 0 ? (reason) => { if (rendezvousErrorCb) rendezvousErrorCb(reason); } : null);
-    worker.startRendezvous(makeParams(flowIndex));
-    workers.push(worker);
+export function assembleSendFlows({
+  flowCount,
+  createWorker,
+  makeParams,
+  createSupervisor = createFlowSupervisor,
+  staggerMs,
+  backoff,
+  maxRedialsPerSlot,
+  setTimer,
+  clearTimer,
+}) {
+  const flows = [];               // LIVE array the supervisor mutates (starts empty)
+  const slotEntry = new Map();    // slotIndex -> { alive } (drives the current wrapper's isAlive)
+  const slotWorker = new Map();   // slotIndex -> the worker handed to the supervisor
+  const handed = new Set();       // every worker ever handed out (for close())
+  let ctrlChannel = null;         // slot 0's current channel (initial + each re-dial)
+  let closed = false;
+  let rendezvousErrorCb = null;   // sender surfaces this as onRendezvousError
+  let ctrlReplacedCb = null;      // transfer-service wires this to sender.setCtrl
+  let bufferedCtrl = null;        // a ctrl swap that fired before ctrlReplacedCb registered
+
+  function wrappedCreateWorker(slotIndex) {
+    const worker = createWorker(slotIndex);
+    let handedWorker = worker;
+    if (slotIndex === 0) {
+      // Multiplex slot 0's single-owner onSessionState (see header): forward
+      // 'error:*' to onRendezvousError, then delegate to the supervisor.
+      let supervisorCb = null;
+      worker.onSessionState((state) => {
+        if (typeof state === 'string' && state.startsWith('error:') && rendezvousErrorCb) {
+          rendezvousErrorCb(state.slice('error:'.length));
+        }
+        if (supervisorCb) supervisorCb(state);
+      });
+      handedWorker = { ...worker, onSessionState(cb) { supervisorCb = cb; } };
+      ctrlChannel = worker.channel; // initial ctrl; a re-dial re-runs this AND onCtrlReplaced
+    }
+    slotWorker.set(slotIndex, handedWorker);
+    handed.add(handedWorker);
+    return handedWorker;
   }
+
+  const supervisor = createSupervisor({
+    flowCount,
+    createWorker: wrappedCreateWorker,
+    makeParams,
+    onFlowUp: (slotIndex, flow) => {
+      const entry = { alive: true };
+      slotEntry.set(slotIndex, entry);
+      flows.push({
+        sendBulk: (buf) => flow.sendBulk(buf),
+        isAlive: () => entry.alive,
+      });
+    },
+    onFlowDown: (slotIndex) => {
+      const entry = slotEntry.get(slotIndex);
+      if (entry) entry.alive = false;
+      // C1: reject any sendBulk parked on the dead slot's channel so the pool's
+      // Promise.race(inflight) settles instead of hanging on a dead flow.
+      const w = slotWorker.get(slotIndex);
+      if (w) { try { w.channel.fail('failed'); } catch { /* best-effort */ } }
+    },
+    onCtrlReplaced: (worker) => {
+      ctrlChannel = worker.channel;
+      if (ctrlReplacedCb) ctrlReplacedCb(worker.channel);
+      else bufferedCtrl = worker.channel; // registered late — replay on register
+    },
+    isRunning: () => !closed,
+    staggerMs,
+    backoff,
+    maxRedialsPerSlot,
+    setTimer,
+    clearTimer,
+  });
+
+  supervisor.start();
+
   return {
-    ctrl: workers[0].channel,
-    flows: workers.map((w) => ({
-      sendBulk: (buf) => w.channel.sendBulk(buf),
-      isAlive: () => !!alive.get(w),
-    })),
-    // C2 (cancel-path leak fix): worker.close() -> win.destroy() BYPASSES
-    // channel.fail() entirely, so any sendBulk already in flight on that
-    // worker (parked waiting on an 'ft-bulk-credit' that will now never
-    // arrive, because the window is gone) stays pending FOREVER. The send
-    // pool's run() then never unwinds pump()'s createSendPool(...).run(...),
-    // which means initialPass()/gapPass()'s generator cleanup (closing the
-    // open `reader`) never runs -- a silent fd + closure leak on every
-    // canceled multi-flow send, distinct from the C1 flow-DEATH deadlock
-    // (which is handled by wireAliveness calling fail() on a terminal session
-    // state) because a user CANCEL destroys the window directly without ever
-    // routing through a terminal state at all. Failing each channel first
-    // forces any in-flight sendBulk to reject, so the pool retires every flow,
-    // run() rejects with no_live_flows, pump() throws, and the generator's
-    // `await reader.close()` actually executes. Best-effort/guarded: a worker
-    // whose channel has no fail() (e.g. some future non-channel reuse) must
-    // not stop the other workers from closing.
+    // Getter, not a captured value: slot 0's channel is set on the synchronous
+    // start() dial and re-set by each re-dial. transfer-service reads it once to
+    // seed createMultiFlowSender's ctrl; setCtrl (via onCtrlReplaced) swaps it
+    // thereafter.
+    get ctrl() { return ctrlChannel; },
+    flows,
+    awaitFlow: () => supervisor.awaitFlow(),
+    // Registered by transfer-service AFTER it builds the sender: on every slot-0
+    // (re)connect, swap the sender's ctrl channel to the fresh one so the OFFER/
+    // range_report control plane survives a slot-0 death.
+    onCtrlReplaced: (cb) => {
+      ctrlReplacedCb = cb;
+      if (bufferedCtrl != null) { const ch = bufferedCtrl; bufferedCtrl = null; cb(ch); }
+    },
+    // C2 (cancel-path leak fix): a user CANCEL calls close() directly, never
+    // routing through a terminal session state, so nothing else fails the
+    // channels. Fail every channel FIRST (rejects any in-flight sendBulk so the
+    // pool unwinds and its generator's reader.close() runs), THEN stop the
+    // supervisor (cancels pending (re-)dial timers + closes its current
+    // workers), THEN close every worker ever handed out (the supervisor only
+    // tracks each slot's CURRENT worker, so old re-dialed windows would leak).
     close: async () => {
-      await Promise.all(workers.map((w) => {
-        try { w.channel.fail('closed'); } catch { /* best-effort */ }
-        return w.close();
-      }));
+      closed = true;
+      for (const w of handed) { try { w.channel.fail('closed'); } catch { /* best-effort */ } }
+      try { supervisor.stop(); } catch { /* best-effort */ }
+      await Promise.all([...handed].map((w) => { try { return w.close(); } catch { return undefined; } }));
     },
     onRendezvousError: (cb) => { rendezvousErrorCb = cb; },
   };
+}
+
+/**
+ * RECEIVE rolling-join dispatch: route a late/replacement flow (delivered by the
+ * group rendezvous' onFlowJoin once the group has already fired) into the active
+ * receiver. flowIndex 0 is the ctrl flow — swap the receiver's ctrl channel
+ * (setCtrl); any other flowIndex is a bulk flow — wire it into the router
+ * (addFlow). `sink` is the receiver's { addFlow, setCtrl } face (null when no
+ * receive is active yet — the caller then closes the handle). Returns whether it
+ * dispatched.
+ */
+export function dispatchReceiveFlowJoin(sink, channel, flowIndex) {
+  if (!sink) return false;
+  if (flowIndex === 0) {
+    if (typeof sink.setCtrl === 'function') sink.setCtrl(channel);
+  } else if (typeof sink.addFlow === 'function') {
+    sink.addFlow(channel, flowIndex);
+  }
+  return true;
 }
 
 /**

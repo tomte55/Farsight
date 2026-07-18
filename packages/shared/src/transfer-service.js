@@ -174,6 +174,14 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // serialized (one activeClose suffices); receives are explicitly NOT queue-gated,
   // so several can be in flight — this must be a map, not a single slot.
   const activeReceives = new Map(); // jobId -> { abort }
+  // Resilient multi-flow rolling-join: an ACTIVE multi-flow receive exposes a
+  // { addFlow, setCtrl } sink keyed by its rendezvous sessionId (== the group's
+  // groupId), so a late/replacement flow the group rendezvous admits after the
+  // group already fired can be routed into the live receiver (main's onFlowJoin
+  // -> getReceiveFlowSink -> addFlow/setCtrl). Registered only once the receive
+  // is ACTIVE ('accepted') — Task 5: addFlow is a no-op before the router exists,
+  // so registering earlier would silently drop the join. Removed on teardown.
+  const receiveFlowSinks = new Map(); // sessionId -> { addFlow, setCtrl }
 
   // Contact consents already granted, keyed by VERIFIED-peer-key + jobId, valued
   // by the fingerprint of the manifest the human actually approved. An
@@ -305,9 +313,20 @@ export function createTransferService({ store, transferDir, consent, openChannel
               flowCount: opened.flows.length || flowCount,
               groupId: (target && typeof target.groupId === 'string') ? target.groupId : newJobId(),
               readerFor: readerForSources(sources),
+              // Resilient multi-flow: the supervisor's starvation waiter, so the
+              // pool waits for a resupplied/late flow instead of failing when the
+              // live flow set momentarily empties (staggered dial / a flow death).
+              awaitFlow: opened.awaitFlow,
               onEvent: onSendEvent,
             })
           : createSender({ channel: opened.channel, jobId, manifest, sources, onEvent: onSendEvent });
+        // Resilient multi-flow: when the supervisor re-dials a dead slot 0, hand
+        // the sender the fresh ctrl channel so the control plane (OFFER/
+        // range_report/complete) survives a slot-0 death. Registered AFTER the
+        // sender exists (the assembly buffers a swap that fired earlier).
+        if (multi && typeof opened.onCtrlReplaced === 'function') {
+          opened.onCtrlReplaced((newCtrl) => { try { sender.setCtrl(newCtrl); } catch { /* best-effort */ } });
+        }
         // Signaling-level rendezvous errors (host_offline, bad_password,
         // transfer_timeout, …) surface here BEFORE any accept — fail fast with
         // the real reason instead of hanging until the timeout.
@@ -525,7 +544,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // exists (jobId isn't known yet), so it can't wait for createMultiFlowReceiver's
   // own 'accepted' event (which does now carry the manifest, mirroring
   // single-flow's) -- the jobs-store record needs the manifest sooner than that.
-  async function runMultiFlowReceive({ ctrl, flows, close, peerAuth }) {
+  async function runMultiFlowReceive({ ctrl, flows, close, peerAuth, sessionId }) {
     let currentJobId = null;
     let currentManifest = null;
     let offerAccum = null;
@@ -609,7 +628,15 @@ export function createTransferService({ store, transferDir, consent, openChannel
         }).catch(() => { /* best effort, matches single-flow saveRecord's discipline */ });
       },
       onEvent: (ev) => {
-        if (ev.type === 'accepted') accepted = true;
+        if (ev.type === 'accepted') {
+          accepted = true;
+          // Now ACTIVE (router exists): expose the rolling-join sink so the
+          // group rendezvous' onFlowJoin can add a late/replacement flow.
+          if (sessionId) receiveFlowSinks.set(sessionId, {
+            addFlow: (ch, idx) => receiver.addFlow(ch, idx),
+            setCtrl: (ch) => receiver.setCtrl(ch),
+          });
+        }
         if (ev.type === 'file-failed' && ev.reason === 'io_error') failedFileIds.add(ev.fileId);
         emit(jobId, 'recv', ev);
       },
@@ -645,6 +672,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
       return result;
     } finally {
       activeReceives.delete(jobId);
+      if (sessionId) receiveFlowSinks.delete(sessionId);
       // Same completion-ack grace as the single-flow path (see startReceive).
       if (receiveCloseGraceMs > 0) { try { await delay(receiveCloseGraceMs); } catch { /* ignore */ } }
       try { await close(); } catch { /* ignore close errors */ }
@@ -681,7 +709,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // group-rendezvous coordinator -- NOT by anything this service decides).
       // Consume whichever shape actually came back.
       if (opened && opened.ctrl && Array.isArray(opened.flows)) {
-        return runMultiFlowReceive(opened);
+        return runMultiFlowReceive({ ...opened, sessionId });
       }
       const { channel, close, peerAuth } = opened;
       let currentJobId = null;
@@ -725,6 +753,15 @@ export function createTransferService({ store, transferDir, consent, openChannel
         if (receiveCloseGraceMs > 0) { try { await delay(receiveCloseGraceMs); } catch { /* ignore */ } }
         try { await close(); } catch { /* ignore close errors */ }
       }
+    },
+
+    // Resilient multi-flow rolling-join: the { addFlow, setCtrl } face of an
+    // ACTIVE multi-flow receive, keyed by its rendezvous sessionId (== groupId).
+    // main's onFlowJoin uses it to route a late/replacement flow into the live
+    // receiver; null when no receive is active for that session yet (the caller
+    // then closes the orphan handle — the sender re-dials).
+    getReceiveFlowSink(sessionId) {
+      return receiveFlowSinks.get(sessionId) || null;
     },
 
     async listJobs() {

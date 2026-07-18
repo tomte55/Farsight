@@ -5,7 +5,8 @@
 // this file reuses). Proves (a) a striped, drop-and-recover send/receive lands
 // byte-identical on real disk, and (b) a receive that resumes from a persisted
 // partial state only transfers the gap, not the whole file again.
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, test } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -488,5 +489,35 @@ describe('transfer-service: runSend honors the resolved ok (not hardcoded true)'
     expect(result.ok).toBe(true);
     const rec = (await sendStore.list()).find((j) => j.jobId === jobId);
     expect(rec.jobState).toBe('done');
+  });
+});
+
+// Resilient multi-flow Task 7: transfer-service is the ONLY place that holds
+// BOTH the opened multi-flow bundle (from main's assembleSendFlows / the group
+// rendezvous) AND the constructed sender/receiver, so it owns three wirings the
+// supervisor/rolling-join depend on. Guarded here as source-text contract points
+// (the full behaviour is proven in the orchestrator drivers + the controller
+// assembly tests); mirrors the repo's wiring-guard convention.
+describe('transfer-service: supervisor + rolling-join wiring (source guards)', () => {
+  const src = readFileSync(new URL('../src/transfer-service.js', import.meta.url), 'utf8');
+
+  test('multi-flow SEND threads the bundle\'s awaitFlow into createMultiFlowSender (→ its send pool)', () => {
+    expect(src).toMatch(/createMultiFlowSender\(\{[\s\S]*?awaitFlow:\s*opened\.awaitFlow/);
+  });
+
+  test('multi-flow SEND wires the bundle\'s onCtrlReplaced to the sender\'s setCtrl (slot-0 ctrl swap)', () => {
+    expect(src).toMatch(/opened\.onCtrlReplaced\s*===\s*'function'/);
+    expect(src).toMatch(/opened\.onCtrlReplaced\(\([^)]*\)\s*=>[\s\S]*?\.setCtrl\(/);
+  });
+
+  test('multi-flow RECEIVE registers a per-session flow sink (addFlow/setCtrl) exposed via getReceiveFlowSink', () => {
+    expect(src).toMatch(/receiveFlowSinks/);
+    expect(src).toMatch(/getReceiveFlowSink\(/);
+    // registered only once the receive is ACTIVE (Task 5: addFlow drops before then)
+    expect(src).toMatch(/'accepted'[\s\S]*?receiveFlowSinks\.set/);
+  });
+
+  test('runMultiFlowReceive is threaded the sessionId so the sink can be keyed by it', () => {
+    expect(src).toMatch(/runMultiFlowReceive\(\{[\s\S]*?sessionId/);
   });
 });

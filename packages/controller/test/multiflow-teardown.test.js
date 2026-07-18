@@ -75,21 +75,44 @@ function fakeHandle(flowIndex) {
   return { channel: { onBulk: vi.fn(), onCtrl: vi.fn(), sendCtrl: vi.fn() }, close: vi.fn(async () => {}), peerAuth: Promise.resolve({ tier: 'fleet' }), flowIndex };
 }
 
+// Resilient multi-flow (Task 7) rewrote assembleSendFlows onto the flow
+// supervisor: workers are no longer all created synchronously up front — the
+// supervisor STAGGERS the initial dial and RE-DIALS dead slots over time. To
+// keep these teardown invariants deterministic (not clock-dependent), inject a
+// fake supervisor that dials every slot synchronously on start() and lets the
+// test drive onFlowDown. The invariants themselves are unchanged: every worker
+// EVER handed out is swept by close(), regardless of connection outcome, and a
+// double bundle.close() tears each real worker down only once.
+function fakeSupervisorFactory() {
+  let cfg = null;
+  const factory = (config) => {
+    cfg = config;
+    return {
+      start: () => { for (let i = 0; i < config.flowCount; i += 1) config.createWorker(i); },
+      stop: vi.fn(), // no-op: the bundle's own close() sweep is what these tests assert
+      liveCount: () => 0,
+      onSlotStarved: vi.fn(),
+      awaitFlow: vi.fn(() => new Promise(() => {})),
+    };
+  };
+  factory.cfg = () => cfg;
+  return factory;
+}
+
 describe('SEND (assembleSendFlows): close() closes every worker regardless of connection outcome', () => {
-  test('a worker that ERRORED before ever connecting is still tracked and still closed by close()', async () => {
+  test('a slot that went TERMINAL before ever connecting is still tracked and still closed by close()', async () => {
     const workers = [];
+    const sup = fakeSupervisorFactory();
     const { close } = assembleSendFlows({
       flowCount: 5,
       createWorker: () => { const w = fakeWorker(); workers.push(w); return w; },
       makeParams: () => ({}),
+      createSupervisor: sup,
     });
-    // Worker 2 fails its rendezvous before ANY worker reaches 'connected' — it
-    // was created up front (assembleSendFlows pushes every worker into its
-    // `workers` array synchronously, before any of them can settle), so it
-    // must still be in the close() sweep, not silently dropped because it
-    // never became "alive".
-    workers[2].__emit('error:host_offline');
-    workers[0].__emit('connected');
+    // Slot 2's worker went terminal (onFlowDown) before ANY slot connected — it
+    // was still handed out, so it must be in the close() sweep, not dropped
+    // because it never became "alive".
+    sup.cfg().onFlowDown(2);
     await close();
     expect(workers.length).toBe(5);
     workers.forEach((w) => expect(w.close).toHaveBeenCalledTimes(1));
@@ -97,10 +120,12 @@ describe('SEND (assembleSendFlows): close() closes every worker regardless of co
 
   test('close() called twice (settle path + cancel path, per transfer-service.js) destroys each real worker only ONCE', async () => {
     const workers = [];
+    const sup = fakeSupervisorFactory();
     const { close } = assembleSendFlows({
       flowCount: 4,
       createWorker: () => { const w = idempotentFakeWorker(); workers.push(w); return w; },
       makeParams: () => ({}),
+      createSupervisor: sup,
     });
     // transfer-service.js's cancel() calls the openChannel-returned close()
     // directly; runSend's own `finally` ALSO calls the same close() once its

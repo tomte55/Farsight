@@ -39,7 +39,7 @@ import { newJobId } from '@farsight/shared/transfer-queue';
 // electron import — unit-testable directly) and the group-rendezvous
 // coordinator that folds N incoming per-flow TRANSFER_REQUESTs into one
 // consent/receive.
-import { assembleSendFlows, assembleReceiveGroup } from './transfer-channel-assembly.js';
+import { assembleSendFlows, assembleReceiveGroup, dispatchReceiveFlowJoin } from './transfer-channel-assembly.js';
 import { createGroupRendezvous } from '@farsight/shared/transfer-group-rendezvous';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -243,6 +243,10 @@ function openAttachFlow({ sessionId, flowIndex, groupId, linked }) {
     peerAuth,
     linked: !!linked,
     flowIndex,
+    // Carried so a rolling-join handle (delivered post-ready via onFlowJoin) can
+    // be routed to the RIGHT active receive — the receiver is keyed by the
+    // group's sessionId (== groupId), which onFlowJoin only sees via the handle.
+    groupId,
   };
 }
 
@@ -261,6 +265,26 @@ const pendingGroupReceives = new Map();
 // uniformly.
 const groupRendezvous = createGroupRendezvous({
   openFlow: ({ sessionId, flowIndex, groupId, linked }) => openAttachFlow({ sessionId, flowIndex, groupId, linked }),
+  // Resilient multi-flow rolling-join: once a group has already fired (its
+  // receive is under way), a later offer for the same groupId — a re-dialed
+  // replacement slot, or a brand-new flowIndex added late — is opened and
+  // delivered here instead of being dropped. Route it into the LIVE receiver:
+  // flowIndex 0 swaps the ctrl channel (setCtrl), any other joins the bulk
+  // router (addFlow). The receiver is keyed by the group's sessionId (== groupId,
+  // set by onGroupReady below) and only present once the receive is ACTIVE — if
+  // it isn't (a join that raced ahead of consent, or arrived after teardown),
+  // there's nothing to route into, so close the orphan handle (the sender's
+  // supervisor re-dials).
+  onFlowJoin: (handle, flowIndex) => {
+    const sink = getTransferService().getReceiveFlowSink(handle && handle.groupId);
+    if (sink) {
+      dispatchReceiveFlowJoin(sink, handle.channel, flowIndex);
+      log?.child('transfer').info(`rolling-join flow=${flowIndex} group=${handle.groupId}`);
+    } else {
+      log?.child('transfer').warn(`rolling-join dropped (no active receive) flow=${flowIndex} group=${handle && handle.groupId}`);
+      if (handle && typeof handle.close === 'function') { Promise.resolve(handle.close()).catch(() => {}); }
+    }
+  },
   onGroupReady: ({ groupId, flowCount, flows }) => {
     const linked = !!(flows[0] && flows[0].linked);
     const bundle = flowCount > 1 ? assembleReceiveGroup(flows) : flows[0];

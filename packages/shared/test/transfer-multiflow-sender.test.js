@@ -391,3 +391,55 @@ describe('createMultiFlowSender', () => {
     expect(r).toEqual({ jobId: JOB, ok: true }); // resolved by ch2's complete, not ch1's
   });
 });
+
+// Resilient multi-flow Task 2/7: the sender threads `awaitFlow` into its send
+// pool so a pump that starts before any flow has connected (staggered dial) or
+// that loses its only flow mid-transfer WAITS for a resupplied flow instead of
+// throwing no_live_flows. Proves the wiring end-to-end: start pump with only a
+// DEAD flow, and only after awaitFlow is invoked (and a live flow pushed into
+// the SAME array) does delivery complete.
+describe('createMultiFlowSender awaitFlow threading', () => {
+  it('a starved pump waits on awaitFlow, then completes once a live flow is resupplied', async () => {
+    const A = new Uint8Array(60).map((_, i) => (i * 5) & 0xff);
+    const sources = new Map([[0, A]]);
+    const manifest = { entries: [{ fileId: 0, size: A.length }] };
+    const dest = new Uint8Array(A.length);
+    const recv = [];
+    let ctrlOnMsg = null;
+    let reportTimer = null;
+    const covered = () => { const arr = [...recv].sort((a, b) => a[0] - b[0]); const out = []; for (const [s, e] of arr) { const l = out[out.length - 1]; if (l && s <= l[1]) l[1] = Math.max(l[1], e); else out.push([s, e]); } return out; };
+    const isComplete = () => { const iv = covered(); return iv.length === 1 && iv[0][0] === 0 && iv[0][1] >= A.length; };
+    const report = () => ctrlOnMsg && ctrlOnMsg(rangeReportFrame({ jobId: JOB, files: [{ fileId: 0, ivals: covered() }] }));
+    const ctrl = {
+      sendCtrl: (s) => {
+        const f = parseCtrlFrame(s);
+        if (f.t === 'offer' || f.t === 'offer_end') ctrlOnMsg(acceptFrame({ jobId: JOB, resume: [], ranges: [] }));
+        else if (f.t === 'file_end') setTimeout(report, 0);
+        else if (f.t === 'job_done') { if (isComplete()) { clearInterval(reportTimer); ctrlOnMsg(completeFrame({ jobId: JOB, ok: true })); } else setTimeout(report, 0); }
+      },
+      onCtrl: (cb) => { ctrlOnMsg = cb; if (!reportTimer) { reportTimer = setInterval(() => report(), 10); if (reportTimer.unref) reportTimer.unref(); } },
+    };
+    const deadFlow = { isAlive: () => false, sendBulk: () => Promise.reject(new Error('dead')) };
+    const liveFlow = { isAlive: () => true, sendBulk: (buf) => { const d = decodeBulkFrame(buf); dest.set(d.payload, d.offset); recv.push([d.offset, d.offset + d.length]); return Promise.resolve(); } };
+    const flows = [deadFlow];
+    let awaitCalls = 0;
+    let resolveAwait = null;
+    const awaitFlow = () => { awaitCalls += 1; return new Promise((res) => { resolveAwait = res; }); };
+
+    const sender = createMultiFlowSender({
+      ctrl, flows, jobId: JOB, manifest, chunkSize: 60, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash, awaitFlow,
+    });
+    const done = sender.start();
+    // Let accept → pump → starvation → awaitFlow happen.
+    await new Promise((r) => setTimeout(r, 40));
+    expect(awaitCalls).toBeGreaterThan(0);
+    expect(typeof resolveAwait).toBe('function'); // pool parked on awaitFlow, not thrown
+
+    flows.push(liveFlow); // resupply
+    resolveAwait();
+    const r = await done;
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    expect(Buffer.from(dest).equals(Buffer.from(A))).toBe(true);
+  });
+});
