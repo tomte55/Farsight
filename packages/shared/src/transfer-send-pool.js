@@ -5,10 +5,13 @@
 // that dies (isAlive() false) or whose sendBulk rejects hands its chunk back for a
 // surviving flow, and a rejecting flow is retired so it can't spin. Backpressure is
 // each flow's own sendBulk() promise (resolves on per-flow credit). Throws
-// no_live_flows if a chunk remains and no flow is usable. No fs/DOM/WebRTC.
+// no_live_flows if a chunk remains and no flow is usable — unless an `awaitFlow`
+// callback is supplied, in which case starvation awaits it (retrying dispatch on
+// resolve, so a flow supervisor can resupply `flows` mid-run) and only throws if
+// awaitFlow itself rejects. No fs/DOM/WebRTC.
 import { encodeBulkFrame } from './transfer-chunk.js';
 
-export function createSendPool({ flows, encodeFrame = encodeBulkFrame }) {
+export function createSendPool({ flows, encodeFrame = encodeBulkFrame, awaitFlow }) {
   const failed = new Set(); // flows whose sendBulk rejected — retired as unusable
   function usableFlows() { return flows.filter((f) => f.isAlive() && !failed.has(f)); }
 
@@ -53,7 +56,12 @@ export function createSendPool({ flows, encodeFrame = encodeBulkFrame }) {
         }
 
         if (!tryDispatch(chunk)) {
-          if (inflight.size === 0) throw new Error('no_live_flows'); // nothing usable at all
+          if (inflight.size === 0) {
+            if (!awaitFlow) throw new Error('no_live_flows'); // nothing usable at all, no resupply option
+            requeue.unshift(chunk);                // hold it; wait for a resupplied flow
+            try { await awaitFlow(); } catch { throw new Error('no_live_flows'); }
+            continue;                              // retry dispatch — a new flow may be in `flows` now
+          }
           requeue.unshift(chunk);                  // hold it; wait for a flow to free
           await Promise.race(inflight.values());
         }

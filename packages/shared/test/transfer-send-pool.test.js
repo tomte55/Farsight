@@ -105,4 +105,45 @@ describe('transfer-send-pool', () => {
     const allOffsets = [...good.sent].map((c) => c.offset).sort((a, b) => a - b);
     expect(allOffsets).toEqual([...Array(5)].map((_, i) => i * 4)); // every chunk delivered exactly once, all via the survivor
   });
+
+  // Task 2: starvation (chunk pending, no usable flow, nothing inflight) should
+  // WAIT for a resupplied flow via the injected awaitFlow, not throw immediately.
+  it('awaitFlow resolves after a live flow is pushed -> held chunk dispatches, run() resolves', async () => {
+    const dead = fakeFlow();
+    dead.kill();
+    const flows = [dead];
+    let resolveAwait = null;
+    const awaitFlow = () => new Promise((res) => { resolveAwait = res; });
+
+    const pool = createSendPool({ flows, awaitFlow });
+    const runP = pool.run(chunks(1));
+
+    // Let the pool try to dispatch onto the dead flow, fail, and call awaitFlow.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(typeof resolveAwait).toBe('function'); // pool is waiting on awaitFlow, not throwing
+
+    const live = fakeFlow();
+    flows.push(live); // supervisor resupplies a live flow
+    resolveAwait();
+
+    await runP; // must resolve, not throw
+    expect(live.sent.map((c) => c.offset)).toEqual([0]);
+  });
+
+  it('awaitFlow rejects -> run() rejects with no_live_flows', async () => {
+    const dead = fakeFlow();
+    dead.kill();
+    const awaitFlow = () => Promise.reject(new Error('gave_up'));
+
+    await expect(createSendPool({ flows: [dead], awaitFlow }).run(chunks(1)))
+      .rejects.toThrow('no_live_flows');
+  });
+
+  it('no awaitFlow provided -> still throws no_live_flows immediately (regression)', async () => {
+    const dead = fakeFlow();
+    dead.kill();
+
+    await expect(createSendPool({ flows: [dead] }).run(chunks(1)))
+      .rejects.toThrow('no_live_flows');
+  });
 });
