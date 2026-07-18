@@ -123,8 +123,12 @@ export function createTransferWorker({ onLog } = {}) {
 
   return {
     // params: { role: 'initiator'|'attach', signalingUrl, targetId?, password?,
-    // linked?, sessionId?, version? } — see docs/private/.../sp3-flagship
-    // design §4.2/§4.3 for the two rendezvous shapes.
+    // linked?, sessionId?, version?, groupId?, flowIndex?, flowCount? } — see
+    // docs/private/.../sp3-flagship design §4.2/§4.3 for the two rendezvous
+    // shapes; groupId/flowIndex/flowCount (Plan 3 Task 4) are undefined for a
+    // plain single-flow transfer and forwarded opaquely onto the CONNECT/ATTACH
+    // sent by transfer-worker/worker.js — this function itself is a transparent
+    // passthrough (sendToWorker queues until did-finish-load either way).
     startRendezvous(params) {
       // sendToWorker queues until did-finish-load, so the kickoff is never dropped.
       sendToWorker(topics.startRendezvous, params);

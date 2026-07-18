@@ -142,8 +142,12 @@ async function startHostRegistration() {
       // server relays TRANSFER_REQUEST on this same registration socket; forward
       // it to main, which attaches a transfer worker and round-trips consent
       // before anything touches disk. (An own-fleet push auto-accepts in main.)
+      // Plan 3 Task 4 (SP3 multi-flow): groupId/flowIndex/flowCount identify
+      // which multi-flow group (if any) this request belongs to (undefined for
+      // a legacy/solo transfer) — passed through verbatim so main's group-
+      // rendezvous coordinator can fold N per-flow requests into one receive.
       [MSG.TRANSFER_REQUEST]: (m) => {
-        window.farsightIpc.transferIncoming({ sessionId: m.sessionId, linked: !!m.linked });
+        window.farsightIpc.transferIncoming({ sessionId: m.sessionId, linked: !!m.linked, groupId: m.groupId, flowIndex: m.flowIndex, flowCount: m.flowCount });
       },
     }, { password, version, acceptsLinked: true, log: hlog.child('signaling') });
     hostRotator = createIdleRotator({ intervalMs: HOST_PW_ROTATE_MS, onRotate: rotateHostPassword });

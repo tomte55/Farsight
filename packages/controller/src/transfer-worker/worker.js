@@ -220,7 +220,13 @@ function wireConnectionState(isInitiator) {
 }
 
 window.farsightTransfer.onStartRendezvous(async (params) => {
-  const { signalingUrl, role, targetId, password, linked, sessionId, version } = params || {};
+  // Plan 3 Task 4 (SP3 multi-flow): groupId/flowIndex/flowCount identify which
+  // parallel-flow group (if any) this worker's rendezvous belongs to — undefined
+  // for a plain single-flow send/receive (byte-identical to before). Threaded
+  // through onto the CONNECT/ATTACH wire messages below; the signaling server
+  // already relays them on CONNECT (Plan 2 Task 6) and ignores unknown fields
+  // elsewhere, so this is a safe no-op for a legacy/solo transfer.
+  const { signalingUrl, role, targetId, password, linked, sessionId, version, groupId, flowIndex, flowCount } = params || {};
   isInitiator = role === 'initiator';
   linkedTransfer = !!linked;
   authGate = createTransferAuthGate({ linked: linkedTransfer });
@@ -275,11 +281,11 @@ window.farsightTransfer.onStartRendezvous(async (params) => {
   if (isInitiator) {
     // Design §4.2/§4.3: kind:'transfer' does not consume the target's control
     // pairing — a host can serve a transfer while being controlled.
-    signal.send(MSG.CONNECT, { targetId, password, kind: 'transfer', linked, version });
+    signal.send(MSG.CONNECT, { targetId, password, kind: 'transfer', linked, version, groupId, flowIndex, flowCount });
   } else {
     // Design §4.2 step 3: the target's transfer worker joins the session the
     // initiator started, by the unguessable sessionId relayed via TRANSFER_REQUEST.
-    signal.send(MSG.ATTACH, { sessionId, version });
+    signal.send(MSG.ATTACH, { sessionId, version, groupId, flowIndex, flowCount });
   }
 });
 

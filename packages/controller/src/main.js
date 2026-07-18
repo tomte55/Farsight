@@ -35,6 +35,12 @@ import { createJobsStore } from '@farsight/shared/jobs-store';
 import { walkSource } from '@farsight/shared/transfer-io';
 import { buildManifest } from '@farsight/shared/transfer-manifest';
 import { newJobId } from '@farsight/shared/transfer-queue';
+// Plan 3 Task 4 (SP3 multi-flow): the pure send/receive assembly helpers (no
+// electron import — unit-testable directly) and the group-rendezvous
+// coordinator that folds N incoming per-flow TRANSFER_REQUESTs into one
+// consent/receive.
+import { assembleSendFlows, assembleReceiveGroup } from './transfer-channel-assembly.js';
+import { createGroupRendezvous } from '@farsight/shared/transfer-group-rendezvous';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Account service (SP2 saved-hosts console) — lazily built so safeStorage /
@@ -189,6 +195,84 @@ ipcMain.on('transfer:respond-consent', (_e, input) => {
   resolve(!!accept);
 });
 
+// Freshly resolve the configured signaling URL at worker-open time (env
+// overrides the stored value) — factored out since it's now needed at THREE
+// call sites (the single-flow path, the multi-flow send assembly, and the
+// per-flow attach opener below) instead of just one.
+function currentSignalingUrl() {
+  const stored = readStoredConfig();
+  return resolveSignalingUrl({
+    envUrl: process.env.FARSIGHT_SIGNALING_URL,
+    storedUrl: stored.signalingUrl,
+  }).url;
+}
+
+// Plan 3 Task 4 (SP3 multi-flow RECEIVE): opens ONE attaching transfer worker
+// for a single flow of a (possibly multi-flow) incoming transfer. This is the
+// group-rendezvous coordinator's `openFlow` — i.e. exactly what the OLD
+// openChannel attach branch used to do inline, now factored out so it can run
+// once per flow (N times for a real multi-flow group) instead of once per
+// receive. `flowIndex` rides along on the returned handle (not just the
+// worker's own bookkeeping) so onGroupReady below can line flows up in
+// flowIndex order — flows are NOT guaranteed to connect in order (each is an
+// independent WebRTC/signaling race), but the paired sender always treats its
+// flowIndex-0 worker as `ctrl` (assembleSendFlows), so the receiver must agree
+// on which flow that is or it listens for the manifest OFFER on the wrong
+// data channel.
+function openAttachFlow({ sessionId, flowIndex, groupId, linked }) {
+  const worker = createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)) });
+  let rendezvousErrorCb = null;
+  worker.onSessionState((state) => {
+    if (typeof state === 'string' && state.startsWith('error:') && rendezvousErrorCb) {
+      rendezvousErrorCb(state.slice('error:'.length));
+    }
+  });
+  let resolvePeerAuth;
+  const peerAuth = new Promise((res) => { resolvePeerAuth = res; });
+  if (!linked) resolvePeerAuth({ tier: null });
+  worker.onPeerAuth(async ({ publicKey }) => {
+    let tier = null;
+    try { tier = await getAccountService().classifyPublicKey(publicKey); } catch { tier = null; }
+    resolvePeerAuth({ tier, publicKey });
+  });
+  worker.startRendezvous({ role: 'attach', signalingUrl: currentSignalingUrl(), sessionId, linked: !!linked, version: app.getVersion(), groupId, flowIndex });
+  return {
+    channel: worker.channel,
+    close: async () => worker.close(),
+    onRendezvousError: (cb) => { rendezvousErrorCb = cb; },
+    peerAuth,
+    linked: !!linked,
+    flowIndex,
+  };
+}
+
+// Bundles assembled by onGroupReady below, keyed by the sessionId
+// getTransferService().startReceive() is invoked with (the group's groupId, or
+// the lone sessionId for a legacy request) — so THIS module's openChannel
+// attach branch never opens a worker itself anymore; it just hands back what
+// the coordinator already opened. Deleted on pickup (one-shot).
+const pendingGroupReceives = new Map();
+
+// Every incoming TRANSFER_REQUEST (main.js's transfer:incoming handler, one
+// per flow) is fed through this coordinator instead of calling startReceive
+// directly. A legacy request (no groupId/flowCount) fires onGroupReady
+// immediately with a single flow — see transfer-group-rendezvous.js — so this
+// covers BOTH the plain single-flow receive and a real multi-flow group
+// uniformly.
+const groupRendezvous = createGroupRendezvous({
+  openFlow: ({ sessionId, flowIndex, groupId, linked }) => openAttachFlow({ sessionId, flowIndex, groupId, linked }),
+  onGroupReady: ({ groupId, flowCount, flows }) => {
+    const linked = !!(flows[0] && flows[0].linked);
+    const bundle = flowCount > 1 ? assembleReceiveGroup(flows) : flows[0];
+    const sessionId = groupId; // correlates with the openChannel(attach) lookup below
+    pendingGroupReceives.set(sessionId, bundle);
+    log?.child('transfer').info(`transfer group ready group=${groupId} flows=${flows.length}/${flowCount}`);
+    getTransferService().startReceive({ rendezvous: { sessionId, linked } })
+      .catch((err) => log?.child('transfer').warn(`receive failed: ${err?.message || err}`))
+      .finally(() => groupRendezvous.cancel(groupId)); // Task 2 review note: else the group map entry leaks
+  },
+});
+
 let transferService = null;
 function getTransferService() {
   if (!transferService) {
@@ -203,13 +287,51 @@ function getTransferService() {
       // the host's openChannel: transfer-service always calls this as
       // { role, target, sessionId } — 'initiate' carries target (sessionId
       // undefined), 'attach' carries sessionId (target undefined).
-      openChannel: async ({ role, target, sessionId, linked }) => {
+      openChannel: async ({ role, target, sessionId, linked, flowCount }) => {
+        // Plan 3 Task 4: SEND multi-flow — flowCount>1 opens N parallel
+        // transfer workers (one RTCPeerConnection each) sharing one groupId,
+        // instead of the single worker below. flowCount<=1 falls through to
+        // the EXISTING single-worker path, byte-for-byte unchanged.
+        if (role === 'initiate' && Number.isInteger(flowCount) && flowCount > 1) {
+          const groupId = newJobId();
+          return assembleSendFlows({
+            flowCount,
+            createWorker: () => createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)) }),
+            makeParams: (flowIndex) => ({
+              role: 'initiator',
+              signalingUrl: currentSignalingUrl(),
+              targetId: target?.id,
+              password: target?.password,
+              // SP3 Phase 4: own-fleet send — pair password-free and authenticate
+              // end-to-end via the device keypair (no session password).
+              linked: !!target?.linked,
+              version: app.getVersion(),
+              groupId, flowIndex, flowCount,
+            }),
+          });
+        }
+
+        // RECEIVE (attach): Plan 3 Task 4 — every incoming TRANSFER_REQUEST is
+        // fed through groupRendezvous (see transfer:incoming below), which
+        // already opened every flow for this group (openAttachFlow) and handed
+        // the assembled bundle here via pendingGroupReceives, keyed by the SAME
+        // sessionId this call is invoked with (onGroupReady mints it and calls
+        // startReceive itself). This covers legacy single-flow receives too —
+        // the coordinator fires onGroupReady immediately for those — so the
+        // bundle is always present by the time transfer-service's startReceive
+        // reaches this call.
+        if (role !== 'initiate') {
+          const bundle = pendingGroupReceives.get(sessionId);
+          if (bundle) { pendingGroupReceives.delete(sessionId); return bundle; }
+          // Defensive fallback only — should be unreachable given the above,
+          // but never silently hang a receive if it somehow is.
+          log?.child('transfer').warn(`openChannel(attach) found no pre-opened flow for session=${sessionId}`);
+          return openAttachFlow({ sessionId, flowIndex: 0, groupId: undefined, linked });
+        }
+
+        // ---- existing single-worker SEND path (flowCount<=1), unchanged ----
         const worker = createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)) });
-        const stored = readStoredConfig();
-        const signalingUrl = resolveSignalingUrl({
-          envUrl: process.env.FARSIGHT_SIGNALING_URL,
-          storedUrl: stored.signalingUrl,
-        }).url;
+        const signalingUrl = currentSignalingUrl();
         // Surface signaling-level rendezvous failures (host_offline, bad_password,
         // transfer_timeout, busy, locked) to the transfer-service so a send fails
         // fast with the real reason instead of hanging in "waiting for approval".
@@ -220,36 +342,26 @@ function getTransferService() {
             rendezvousErrorCb(state.slice('error:'.length));
           }
         });
-        // RECEIVE (attach): resolve the device-keypair-VERIFIED peer's tier
-        // (fleet|contact|null) so transfer-service can auto-accept an own-fleet
-        // push and skip the human prompt. A non-linked (ad-hoc/password) attach
-        // never runs the handshake → resolve null immediately (always prompt)
-        // rather than waiting on a callback that will never fire.
+        // A non-linked (ad-hoc/password) send never runs the device-keypair
+        // handshake -> resolve null immediately (peerAuth is unused on the send
+        // path today, but kept for return-shape parity with attach).
         let resolvePeerAuth;
         const peerAuth = new Promise((res) => { resolvePeerAuth = res; });
-        if (role !== 'initiate' && !linked) resolvePeerAuth({ tier: null });
         worker.onPeerAuth(async ({ publicKey }) => {
           let tier = null;
           try { tier = await getAccountService().classifyPublicKey(publicKey); } catch { tier = null; }
-          // publicKey rides along so transfer-service binds a remembered contact
-          // consent to the VERIFIED device — a sender-chosen jobId alone must never
-          // unlock a skipped prompt.
           resolvePeerAuth({ tier, publicKey });
         });
-        if (role === 'initiate') {
-          worker.startRendezvous({
-            role: 'initiator',
-            signalingUrl,
-            targetId: target?.id,
-            password: target?.password,
-            // SP3 Phase 4: own-fleet send — pair password-free and authenticate
-            // end-to-end via the device keypair (no session password).
-            linked: !!target?.linked,
-            version: app.getVersion(),
-          });
-        } else {
-          worker.startRendezvous({ role: 'attach', signalingUrl, sessionId, linked: !!linked, version: app.getVersion() });
-        }
+        worker.startRendezvous({
+          role: 'initiator',
+          signalingUrl,
+          targetId: target?.id,
+          password: target?.password,
+          // SP3 Phase 4: own-fleet send — pair password-free and authenticate
+          // end-to-end via the device keypair (no session password).
+          linked: !!target?.linked,
+          version: app.getVersion(),
+        });
         return {
           channel: worker.channel,
           close: async () => worker.close(),
@@ -346,9 +458,20 @@ ipcMain.handle('transfer:incoming', async (_e, input) => {
   // SP3 Phase 4: the signaling server relays `linked` for an own-fleet transfer;
   // carry it through so the attacher enforces the device-keypair handshake.
   const linked = !!(input && input.linked);
-  log?.child('transfer').info(`incoming transfer_request session=${sessionId}${linked ? ' linked' : ''}`);
-  getTransferService().startReceive({ rendezvous: { sessionId, linked } })
-    .catch((err) => log?.child('transfer').warn(`receive failed: ${err?.message || err}`));
+  // Plan 3 Task 4 (SP3 multi-flow): groupId/flowIndex/flowCount identify which
+  // multi-flow group (if any) this request belongs to — the signaling server
+  // relays them verbatim on a real multi-flow CONNECT (Plan 2 Task 6); a
+  // legacy/solo transfer sends none of these. Feed EVERY request (one per
+  // flow) through the group-rendezvous coordinator instead of calling
+  // startReceive directly — it folds a real group's N requests into ONE
+  // receive/consent, and treats a legacy request as an immediate single-flow
+  // group (see transfer-group-rendezvous.js), so this single call site now
+  // covers both.
+  const groupId = typeof (input && input.groupId) === 'string' ? input.groupId : undefined;
+  const flowIndex = Number.isInteger(input && input.flowIndex) ? input.flowIndex : undefined;
+  const flowCount = Number.isInteger(input && input.flowCount) ? input.flowCount : undefined;
+  log?.child('transfer').info(`incoming transfer_request session=${sessionId}${linked ? ' linked' : ''}${groupId ? ` group=${groupId} flow=${flowIndex}/${flowCount}` : ''}`);
+  groupRendezvous.offer({ sessionId, groupId, flowIndex, flowCount, linked });
   return { ok: true };
 });
 
