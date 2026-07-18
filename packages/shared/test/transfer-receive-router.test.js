@@ -81,4 +81,31 @@ describe('transfer-receive-router', () => {
     await router.onFileHash(7, 'HASH');
     expect(router.isComplete()).toBe(true);
   });
+
+  describe('resetFile (verify-failure recovery)', () => {
+    it('clears a file so it re-receives and is no longer reported complete', async () => {
+      const size = 8;
+      let opens = 0;
+      const bufs = [];
+      const mkPart = () => { const b = new Uint8Array(size); bufs.push(b); return { writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve() }; };
+      let failNext = true;
+      const router = createReceiveRouter({
+        manifest: { entries: [{ fileId: 0, size }] },
+        openPart: () => { opens += 1; return Promise.resolve(mkPart()); },
+        verifyAndFinalize: () => { const ok = !failNext; failNext = false; return Promise.resolve({ ok }); },
+        onFileDone: () => {}, onProgress: () => {},
+      });
+      // First full delivery + hash → verify FAILS.
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 8, payload: new Uint8Array(8).fill(1) }));
+      await router.onFileHash(0, 'H');
+      expect(router.isComplete()).toBe(false);          // verify failed → not complete
+      // Recover: reset, then re-deliver → verify SUCCEEDS.
+      await router.resetFile(0);
+      expect(router.rangesFor()).toEqual([{ fileId: 0, ivals: [] }]); // full gap again
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 8, payload: new Uint8Array(8).fill(2) }));
+      await router.onFileHash(0, 'H');
+      expect(router.isComplete()).toBe(true);
+      expect(opens).toBe(2);                            // reopened after reset
+    });
+  });
 });

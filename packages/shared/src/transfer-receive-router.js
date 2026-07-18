@@ -67,5 +67,15 @@ export function createReceiveRouter({ manifest, initialRanges = {}, openPart, ve
       for (const f of files.values()) if (!f.finalized) return false;
       return true;
     },
+    async resetFile(fileId) {
+      const f = files.get(fileId);
+      if (!f || f.finalized) return;
+      if (f.part) { try { await f.part.close(); } catch { /* best effort */ } }
+      f.part = null;
+      f.partPromise = null;
+      f.hash = null;
+      f.finalizing = false;
+      f.ranges = createRangeSet();
+    },
   };
 }
