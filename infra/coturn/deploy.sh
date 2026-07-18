@@ -3,7 +3,7 @@
 # Run from a repo checkout:  sudo bash infra/coturn/deploy.sh
 # (create infra/.env from infra/.env.example first)
 # Idempotent-ish: safe to re-run. Requires ${TURN_DOMAIN} DNS -> this server's
-# public IP, and the router forwarding 3478 udp/tcp, 5349 tcp, 49160-49200 udp.
+# public IP, and the router forwarding 3478 udp/tcp, 5349 tcp, 49160-49600 udp.
 set -euo pipefail
 
 # Load deployment-specific settings (domains, user, paths).
@@ -70,8 +70,9 @@ listening-ip=${PRIV}
 relay-ip=${PRIV}
 external-ip=${PUB}/${PRIV}
 # Relay port range (must be open on the firewall/router):
+# 440 ports: high multi-flow transfers (default 16, cap 32 flows) need headroom.
 min-port=49160
-max-port=49200
+max-port=49600
 # TLS cert (Let's Encrypt, exported from Caddy):
 cert=/certs/${TURN_DOMAIN}.crt
 pkey=/certs/${TURN_DOMAIN}.key
@@ -135,7 +136,7 @@ sleep 2
 echo ">> signaling logs:"; docker logs farsight-signaling 2>&1 | tail -5 || true
 
 ### 8) host firewall (harmless if ufw is inactive)
-ufw allow 3478/udp; ufw allow 3478/tcp; ufw allow 5349/tcp; ufw allow 49160:49200/udp
+ufw allow 3478/udp; ufw allow 3478/tcp; ufw allow 5349/tcp; ufw allow 49160:49600/udp
 ufw status verbose | grep -E "Status|3478|5349|49160" || true
 
 echo ""
