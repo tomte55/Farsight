@@ -819,6 +819,12 @@ export function createMultiFlowReceiver({
   // valid full-snapshot subset, since createCoverageTracker.applyReport only
   // replaces coverage for files present in a given report.
   reportMaxBytes = 200000,
+  // Mirrors createReceiver's inactivity watchdog (see its doc there): a
+  // consented, active receive that stops getting ANY ctrl or bulk traffic
+  // (sender vanished / connection dropped, on ANY of the N flows) must not
+  // hang at 'active' forever. Armed only after accept; reset on every ctrl
+  // frame and every bulk frame across every flow. Same default as single-flow.
+  inactivityMs = 25000,
   onEvent = () => {},
   setTimer = setTimeout, clearTimer = clearTimeout,
 }) {
@@ -827,8 +833,25 @@ export function createMultiFlowReceiver({
   const finished = new Promise((res, rej) => { resolve = res; reject = rej; });
   let reportTimer = null;
   const stopReporter = () => { if (reportTimer) { clearTimer(reportTimer); reportTimer = null; } };
-  const resolveOnce = (v) => { if (!settled) { settled = true; stopReporter(); resolve(v); } };
-  const fail = (e) => { if (!settled) { settled = true; stopReporter(); reject(e); } };
+
+  // Inactivity watchdog — mirrors createReceiver's (see its doc above it).
+  let inactive = null;     // active timer handle, or null
+  let watching = false;    // armed only between accept and settle
+  const stopWatchdog = () => { if (inactive) { clearTimer(inactive); inactive = null; } };
+  const pokeWatchdog = () => {
+    if (!watching || settled || !(inactivityMs > 0)) return;
+    if (inactive) clearTimer(inactive);
+    inactive = setTimer(() => run(async () => {
+      if (settled) return;
+      stopReporter();
+      onEvent({ type: 'interrupted' });
+      fail(new Error('stalled'));
+    }), inactivityMs);
+    if (inactive && inactive.unref) inactive.unref();
+  };
+
+  const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopReporter(); stopWatchdog(); resolve(v); } };
+  const fail = (e) => { if (!settled) { settled = true; watching = false; stopReporter(); stopWatchdog(); reject(e); } };
   const run = serializer(fail);
 
   let manifest = null;
@@ -943,17 +966,25 @@ export function createMultiFlowReceiver({
       },
       onProgress: (p) => onEvent({ type: 'progress', ...p }),
     });
-    for (const flow of flows) flow.onBulk((buf) => run(() => router.onBulkFrame(buf)));
+    for (const flow of flows) flow.onBulk((buf) => run(() => { pokeWatchdog(); return router.onBulkFrame(buf); }));
     if (settled) return;
     ctrl.sendCtrl(acceptFrame({ jobId, resume: [], ranges: reportFiles() }));
     sendReport();
     startReporter();
+    watching = true; pokeWatchdog(); // now expecting a steady stream of ctrl/bulk traffic
   }
 
   ctrl.onCtrl((str) => run(async () => {
+    pokeWatchdog(); // fresh ctrl frame — the transfer is alive
     if (settled) return;
     const f = parseCtrlFrame(str);
     if (!f || f.jobId !== jobId) return;
+    if (f.t === 'cancel') {
+      onEvent({ type: 'canceled' });
+      stopReporter();
+      fail(new Error('canceled'));
+      return;
+    }
     if (f.t === 'offer') {
       if (router || offerAccum) return;
       await beginReceive(f.entries);

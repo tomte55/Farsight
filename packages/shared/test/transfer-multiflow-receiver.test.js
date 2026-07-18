@@ -2,7 +2,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createMultiFlowReceiver } from '../src/transfer-orchestrator.js';
 import { encodeBulkFrame } from '../src/transfer-chunk.js';
-import { offerFrame, fileEndFrame, jobDoneFrame, parseCtrlFrame } from '../src/transfer-protocol.js';
+import { offerFrame, fileEndFrame, jobDoneFrame, cancelFrame, parseCtrlFrame } from '../src/transfer-protocol.js';
 import { createCoverageTracker } from '../src/transfer-reconcile.js';
 
 const JOB = 'a'.repeat(32);
@@ -113,6 +113,12 @@ describe('createMultiFlowReceiver', () => {
       verifyAndFinalize: () => Promise.resolve({ ok: true }),
       persistRanges,
       reportIntervalMs: 5000, // irrelevant — the fake clock only advances via tickOnce()
+      // This test is about the REPORTER's cadence specifically; the watchdog now
+      // shares the same injected clock (see the inactivity-watchdog tests below),
+      // and this fake clock's tickOnce() can't model "some ms elapsed" for one
+      // timer but not another — disable the watchdog here so `fake.pending()`
+      // reflects only the reporter timer, as this test's assertions expect.
+      inactivityMs: 0,
       setTimer: fake.setTimer, clearTimer: fake.clearTimer,
     });
     const done = rx.start();
@@ -313,5 +319,117 @@ describe('createMultiFlowReceiver', () => {
     expect(unboundedTracker.coveredFor(2).toJSON()).toEqual([[0, 2]]);    // partial, live
     expect(unboundedTracker.coveredFor(3).toJSON()).toEqual([]);          // untouched
     expect(unboundedTracker.coveredFor(4).toJSON()).toEqual([]);          // untouched
+  });
+
+  // Mirrors createReceiver's inbound-cancel handling: a sender-initiated cancel
+  // must settle the receive as canceled, surface the event, and leave no
+  // dangling timer (reporter or watchdog) behind.
+  it('handles an inbound cancel after accept: settles canceled, emits {type:"canceled"}, and clears all timers', async () => {
+    const size = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const parts = new Map();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const events = [];
+    const fake = fakeClock();
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      onEvent: (ev) => events.push(ev),
+      reportIntervalMs: 5000,
+      setTimer: fake.setTimer, clearTimer: fake.clearTimer,
+    });
+    const done = rx.start().catch((e) => e.message);
+    toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'c.bin', size, mtime: 0 }], totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+    expect(out.some((f) => f.t === 'accept')).toBe(true);
+    expect(fake.pending()).toBeGreaterThan(0); // reporter + watchdog armed at accept
+
+    toReceiver(cancelFrame(JOB));
+    const result = await done;
+    expect(result).toBe('canceled');
+    expect(events.some((e) => e.type === 'canceled')).toBe(true);
+    expect(fake.pending()).toBe(0); // every timer (reporter + watchdog) cleared, none dangling
+  });
+
+  // Mirrors createReceiver's inactivity watchdog: a consented, active receive
+  // that stops getting ANY ctrl/bulk traffic (sender vanished, connection
+  // dropped) must not hang at 'active' forever.
+  it('fails the receive on inactivity: no ctrl/bulk frame within inactivityMs after accept stalls it', async () => {
+    const size = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const parts = new Map();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const events = [];
+    const fake = fakeClock();
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      onEvent: (ev) => events.push(ev),
+      reportIntervalMs: 5000,
+      inactivityMs: 1000,
+      setTimer: fake.setTimer, clearTimer: fake.clearTimer,
+    });
+    const done = rx.start().catch((e) => e.message);
+    toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 's.bin', size, mtime: 0 }], totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+    expect(out.some((f) => f.t === 'accept')).toBe(true);
+
+    fake.tickOnce(); // fires every currently-pending timer: the reporter's tick (harmless) + the watchdog (no frames arrived since accept -> stall)
+    const result = await done;
+    expect(result).toBe('stalled');
+    expect(events.some((e) => e.type === 'interrupted')).toBe(true);
+    expect(fake.pending()).toBe(0); // the fail() path tears down both timers
+  });
+
+  // Watchdog RESET needs genuine elapsed-time semantics (a frame just short of
+  // the deadline must push the deadline out) which the file's tickOnce()-style
+  // fakeClock can't model (it fires every pending timer unconditionally,
+  // irrespective of configured ms) — so this one test uses vitest's real fake
+  // timers instead, which respect actual relative ms between two independently-
+  // configured timers (the reporter and the watchdog).
+  it('watchdog reset: a frame delivered just before the deadline delays the stall past it', async () => {
+    const size = 8;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const parts = new Map();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const events = [];
+    vi.useFakeTimers();
+    try {
+      const rx = createMultiFlowReceiver({
+        ctrl, flows, jobId: JOB,
+        consent: async () => true,
+        openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
+        verifyAndFinalize: () => Promise.resolve({ ok: true }),
+        onEvent: (ev) => events.push(ev),
+        reportIntervalMs: 1_000_000, // keep the reporter out of the way of this timing test
+        inactivityMs: 1000,
+      });
+      const done = rx.start().catch((e) => e.message);
+      toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'w.bin', size, mtime: 0 }], totalBytes: size, totalFiles: 1 }));
+      await vi.advanceTimersByTimeAsync(0); // let consent+accept flush
+      expect(out.some((f) => f.t === 'accept')).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(800); // 800ms since accept — inside the 1000ms window
+      // Poke: bulk bytes arrive on a flow, just before the original deadline would elapse.
+      flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: size, payload: new Uint8Array(size).fill(3) }));
+      await vi.advanceTimersByTimeAsync(0); // let the bulk handler's pokeWatchdog() run
+
+      await vi.advanceTimersByTimeAsync(800); // 1600ms since accept, but only 800ms since the poke
+      expect(events.some((e) => e.type === 'interrupted')).toBe(false); // reset held — no stall yet
+
+      await vi.advanceTimersByTimeAsync(300); // now ~1100ms since the poke — past inactivityMs
+      const result = await done;
+      expect(result).toBe('stalled');
+      expect(events.some((e) => e.type === 'interrupted')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
