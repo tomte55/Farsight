@@ -127,6 +127,27 @@ export async function finalizeReceivedFile({ partFile, expectedHash, mtime }) {
   return { ok: true };
 }
 
+// Finalize a received file by PATH (no open handle) — for the multi-flow receiver,
+// where a resumed/already-complete file may have no open partFile. Reads the .part
+// fresh (no held fd → safe rename on Windows), verifies, publishes. Idempotent across
+// resume: a file already finalized in a prior run (no .part, final present) returns ok
+// without re-hashing; nothing on disk returns not-ok.
+export async function finalizeReceivedPath({ destRoot, relPath, expectedHash, mtime }) {
+  const finalPath = confineDestPath(destRoot, relPath);
+  const partPath = `${finalPath}.part`;
+  let partExists = true;
+  try { await stat(partPath); } catch { partExists = false; }
+  if (!partExists) {
+    try { await stat(finalPath); return { ok: true }; } catch { return { ok: false }; }
+  }
+  const actual = await hashFile(partPath);
+  if (actual !== expectedHash) { await rm(partPath, { force: true }); return { ok: false }; }
+  await rename(partPath, finalPath);
+  const secs = mtime / 1000;
+  await utimes(finalPath, secs, secs);
+  return { ok: true };
+}
+
 // Publish a file the receiver ALREADY has in full at accept time — i.e. a
 // skip-existing file (the final already on disk, matched by path+size+mtime) or a
 // complete `.part` left by a prior run. The sender skips such a file entirely (no

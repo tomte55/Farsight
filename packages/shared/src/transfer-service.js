@@ -14,7 +14,7 @@ import { resolveParallelConnections } from './config.js';
 import { createSender, createReceiver, createMultiFlowSender, createMultiFlowReceiver } from './transfer-orchestrator.js';
 import { createQueue, selectResumable, newJobId } from './transfer-queue.js';
 import { parseCtrlFrame } from './transfer-protocol.js';
-import { walkSource, openSourceReader, createSparsePartFile, finalizeReceivedFile } from './transfer-io.js';
+import { walkSource, openSourceReader, createSparsePartFile, finalizeReceivedPath } from './transfer-io.js';
 import { buildManifest } from './transfer-manifest.js';
 import { createResumeWatcher } from './transfer-resume-watcher.js';
 
@@ -556,7 +556,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     const receiver = createMultiFlowReceiver({
       ctrl: wrappedCtrl, flows, jobId, consent: receiveConsent,
       openPart: (relPath) => createSparsePartFile({ destRoot, relPath }),
-      verifyAndFinalize: ({ partFile, expectedHash, mtime }) => finalizeReceivedFile({ partFile, expectedHash, mtime }),
+      verifyAndFinalize: ({ path, expectedHash, mtime }) => finalizeReceivedPath({ destRoot, relPath: path, expectedHash, mtime }),
       initialRangesFor: () => persistedRanges,
       persistRanges: (files) => {
         if (!currentManifest) return; // no OFFER reassembled yet; nothing to persist against

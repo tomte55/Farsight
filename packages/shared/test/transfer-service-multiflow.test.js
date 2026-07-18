@@ -180,6 +180,77 @@ describe('transfer-service multi-flow branch (real disk + jobs-store)', () => {
     const recvRec = (await recvStore.list()).find((j) => j.jobId === jobId);
     expect(recvRec.jobState).toBe('done');
   });
+
+  // The actual field bug: a resume where ONE file is already fully received
+  // (byte-complete via persisted ranges from a prior interrupted attempt), so
+  // the sender's initial pass yields it NO bulk chunks at all (already fully
+  // covered) — only its file_end arrives. That means openPart is NEVER called
+  // for this file this run, so the old partFile-based verifyAndFinalize got
+  // `partFile: undefined` and crashed on `partFile.liveDigest()` in an infinite
+  // loop (the ctrl handler kept re-processing). The path-based fix
+  // (finalizeReceivedPath) must finalize this file from disk with no open
+  // handle at all.
+  it('resumes a file that is ALREADY fully received (persisted full ranges, no .part bytes needed) without crashing on undefined.liveDigest', async () => {
+    const srcDir = await tmp();
+    const dstDir = await tmp();
+    const sendStore = createJobsStore({ dir: await tmp() });
+    const recvStore = createJobsStore({ dir: await tmp() });
+
+    const content = new Uint8Array(500).map((_, i) => (i * 13 + 3) & 0xff);
+    await writeFile(join(srcDir, 'done.bin'), content);
+    const entries = [{ fileId: 0, path: 'done.bin', size: content.length, mtime: 1 }];
+    const manifest = { entries, totalBytes: content.length, totalFiles: 1 };
+    const sources = new Map([[0, join(srcDir, 'done.bin')]]);
+
+    const jobId = 'c'.repeat(32);
+
+    // Simulate the prior run's leftovers: the .part already holds every byte
+    // (a genuinely complete-but-not-yet-renamed file — e.g. the process died
+    // between the last write and finalize), and the receive record persists
+    // full [0,size) coverage for it, exactly as this run's persistRanges seam
+    // would have left behind.
+    const part = await createSparsePartFile({ destRoot: dstDir, relPath: 'done.bin' });
+    await part.writeAt(0, Buffer.from(content));
+    await part.fsync();
+    await part.close();
+    await recvStore.save({
+      jobId, dir: 'recv', tier: 'adhoc', peer: {}, destRoot: dstDir,
+      manifest,
+      perFile: [{ fileId: 0, ivals: [[0, content.length]], status: 'pending' }],
+      jobState: 'interrupted', createdAt: Date.now(),
+    });
+
+    const { senderCtrl, receiverCtrl, senderFlows, receiverFlows } = link({ flowCount: 2 });
+    let bulkSendCount = 0;
+    const countingSenderFlows = senderFlows.map((f) => ({
+      isAlive: f.isAlive,
+      sendBulk: (buf) => { bulkSendCount += 1; return f.sendBulk(buf); },
+    }));
+
+    const receiverSvc = createTransferService({
+      store: recvStore, transferDir: dstDir, consent: async () => true,
+      openChannel: async () => ({ ctrl: receiverCtrl, flows: receiverFlows, close: async () => {} }),
+      receiveCloseGraceMs: 0,
+    });
+    const senderSvc = createTransferService({
+      store: sendStore, transferDir: srcDir, consent: async () => true,
+      openChannel: async () => ({ ctrl: senderCtrl, flows: countingSenderFlows, close: async () => {} }),
+    });
+
+    const recvPromise = receiverSvc.startReceive({ rendezvous: 'r-mf-3' });
+    await tick(10);
+    const sendResult = await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'device-mf3', flowCount: 2 } });
+    const recvResult = await recvPromise;
+
+    expect(sendResult.ok).toBe(true);
+    expect(recvResult.ok).toBe(true);
+    // Already fully covered per persisted ranges: NO bulk frames were needed for it.
+    expect(bulkSendCount).toBe(0);
+    expect(Buffer.from(await readFile(join(dstDir, 'done.bin'))).equals(Buffer.from(content))).toBe(true);
+
+    const recvRec = (await recvStore.list()).find((j) => j.jobId === jobId);
+    expect(recvRec.jobState).toBe('done');
+  });
 });
 
 // Plan 3 Task 5: deterministic teardown. The controller's real openChannel

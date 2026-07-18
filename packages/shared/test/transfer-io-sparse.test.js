@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createSparsePartFile, openSourceReader, finalizeReceivedFile } from '../src/transfer-io.js';
+import { createSparsePartFile, openSourceReader, finalizeReceivedFile, finalizeReceivedPath, confineDestPath } from '../src/transfer-io.js';
 import { createHash } from 'node:crypto';
 
 let dir;
@@ -31,6 +31,43 @@ describe('createSparsePartFile', () => {
     const r = await finalizeReceivedFile({ partFile: p, expectedHash: hash, mtime: 1_700_000_000_000 });
     expect(r.ok).toBe(true);
     expect(new Uint8Array(await readFile(p.finalPath))).toEqual(content);
+  });
+});
+
+describe('finalizeReceivedPath', () => {
+  it('a complete .part whose hash matches renames to final and returns ok', async () => {
+    const content = new Uint8Array([1, 2, 3, 4, 5]);
+    const p = await createSparsePartFile({ destRoot: dir, relPath: 'a.bin' });
+    await p.writeAt(0, content);
+    await p.fsync();
+    await p.close();
+    const hash = createHash('sha256').update(content).digest('hex');
+    const r = await finalizeReceivedPath({ destRoot: dir, relPath: 'a.bin', expectedHash: hash, mtime: 1_700_000_000_000 });
+    expect(r.ok).toBe(true);
+    expect(new Uint8Array(await readFile(join(dir, 'a.bin')))).toEqual(content);
+  });
+
+  it('hash mismatch removes the .part and returns not-ok', async () => {
+    const content = new Uint8Array([9, 9, 9]);
+    const p = await createSparsePartFile({ destRoot: dir, relPath: 'b.bin' });
+    await p.writeAt(0, content);
+    await p.fsync();
+    await p.close();
+    const r = await finalizeReceivedPath({ destRoot: dir, relPath: 'b.bin', expectedHash: 'deadbeef', mtime: 1_700_000_000_000 });
+    expect(r.ok).toBe(false);
+    const finalPath = confineDestPath(dir, 'b.bin');
+    await expect(stat(`${finalPath}.part`)).rejects.toThrow();
+  });
+
+  it('no .part but the final already exists (already-finalized resume case) returns ok without re-hashing', async () => {
+    await writeFile(join(dir, 'c.bin'), new Uint8Array([7, 7]));
+    const r = await finalizeReceivedPath({ destRoot: dir, relPath: 'c.bin', expectedHash: 'irrelevant-not-checked', mtime: 1_700_000_000_000 });
+    expect(r.ok).toBe(true);
+  });
+
+  it('neither .part nor final exists returns not-ok', async () => {
+    const r = await finalizeReceivedPath({ destRoot: dir, relPath: 'nope.bin', expectedHash: 'x', mtime: 1 });
+    expect(r.ok).toBe(false);
   });
 });
 
