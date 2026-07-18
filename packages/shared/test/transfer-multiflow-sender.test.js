@@ -91,7 +91,7 @@ describe('createMultiFlowSender', () => {
   // bar never moved even though the receiver was confirming coverage the whole
   // time. Computed from the tracker (the sender's authoritative record of what
   // the RECEIVER has confirmed), so it only reflects real, confirmed delivery.
-  it('applying a range_report emits progress with the aggregate shape {sent,total,fraction,filesSent,filesTotal}', async () => {
+  it('applying a range_report emits progress with the aggregate shape {sent,total,fraction,filesSent,filesTotal,flowsLive,flowsTotal,redials}', async () => {
     const A = new Uint8Array(4096 * 2).map((_, i) => (i * 3) & 0xff);
     const sources = new Map([[0, A]]);
     const manifest = { entries: [{ fileId: 0, size: A.length }] };
@@ -110,10 +110,67 @@ describe('createMultiFlowSender', () => {
     const progressEvents = events.filter((e) => e.type === 'progress');
     expect(progressEvents.length).toBeGreaterThan(0);
     for (const e of progressEvents) {
-      expect(Object.keys(e.progress).sort()).toEqual(['filesSent', 'filesTotal', 'fraction', 'sent', 'total'].sort());
+      expect(Object.keys(e.progress).sort()).toEqual(['filesSent', 'filesTotal', 'flowsLive', 'flowsTotal', 'fraction', 'redials', 'sent', 'total'].sort());
     }
     const last = progressEvents[progressEvents.length - 1];
-    expect(last.progress).toEqual({ sent: A.length, total: A.length, fraction: 1, filesSent: 1, filesTotal: 1 });
+    expect(last.progress).toEqual({
+      sent: A.length, total: A.length, fraction: 1, filesSent: 1, filesTotal: 1,
+      flowsLive: 1, flowsTotal: 1, redials: 0,
+    });
+  });
+
+  // Task 9: per-flow HEALTH in the aggregate progress event — flowsLive (from
+  // the send pool's LIVE aliveCount(), not hardcoded to flowsTotal — one flow
+  // here is dead throughout, so flowsLive must read 2, never 3), flowsTotal
+  // (the target flowCount), and redials (the supervisor's cumulative counter,
+  // threaded via the injected redialCount callback).
+  it('progress carries flowsLive (real alive count, not flowsTotal), flowsTotal, and redials', async () => {
+    const A = new Uint8Array(4096 * 2).map((_, i) => (i * 3) & 0xff);
+    const sources = new Map([[0, A]]);
+    const manifest = { entries: [{ fileId: 0, size: A.length }] };
+    const rig = wire({ manifest, sources, flowCount: 3 });
+    // Make one of the 3 flows permanently dead (isAlive:false) so aliveCount()
+    // (2) provably differs from flowCount (3) — hardcoding flowsLive to
+    // flowsTotal would pass a naive test but must fail THIS one.
+    rig.flows[2].isAlive = () => false;
+    const events = [];
+    const sender = createMultiFlowSender({
+      ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 3,
+      groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
+      onEvent: (ev) => events.push(ev),
+      redialCount: () => 5,
+      progressIntervalMs: 0,
+    });
+    const r = await sender.start();
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    const progressEvents = events.filter((e) => e.type === 'progress');
+    expect(progressEvents.length).toBeGreaterThan(0);
+    for (const e of progressEvents) {
+      expect(e.progress.flowsLive).toBe(2);   // real usable-flow count, not 3
+      expect(e.progress.flowsTotal).toBe(3);  // the target flowCount
+      expect(e.progress.redials).toBe(5);     // threaded from the supervisor
+    }
+  });
+
+  // Without a redialCount callback (single-flow-shaped caller, or a fixture
+  // with no supervisor behind it) redials must default to 0, not throw/undefined.
+  it('progress defaults redials to 0 when no redialCount is supplied', async () => {
+    const A = new Uint8Array(64).map((_, i) => i);
+    const sources = new Map([[0, A]]);
+    const manifest = { entries: [{ fileId: 0, size: A.length }] };
+    const rig = wire({ manifest, sources, flowCount: 1 });
+    const events = [];
+    const sender = createMultiFlowSender({
+      ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 64, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
+      onEvent: (ev) => events.push(ev),
+      progressIntervalMs: 0,
+    });
+    const r = await sender.start();
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    const progressEvents = events.filter((e) => e.type === 'progress');
+    expect(progressEvents.length).toBeGreaterThan(0);
+    for (const e of progressEvents) expect(e.progress.redials).toBe(0);
   });
 
   it('throttles progress emission via progressIntervalMs', async () => {

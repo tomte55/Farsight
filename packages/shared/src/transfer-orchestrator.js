@@ -182,6 +182,11 @@ export function createMultiFlowSender({
   // same discipline as single-flow createSender's emitProgress. Clock injected
   // for tests.
   progressIntervalMs = 250, now = () => Date.now(),
+  // Task 9: cumulative re-dial count this transfer, read live at each progress
+  // emit — the flow supervisor's counter (threaded via assembleSendFlows'
+  // redialCount), 0 if the caller doesn't wire one (single-flow/legacy, or a
+  // static flow set with no supervisor behind it).
+  redialCount = () => 0,
 }) {
   if (typeof readerFor !== 'function') throw new Error('readerFor is required');
 
@@ -191,6 +196,15 @@ export function createMultiFlowSender({
   // OFFER, and setCtrl's re-send) goes out on the live channel, and the range_report
   // handler re-attaches to it. See setCtrl / attachCtrl below.
   let ctrl = ctrl0;
+
+  // Task 9: a SINGLE persistent send pool for the whole transfer (both the
+  // initial pass and every later gap pass reuse it — see pump() below), so its
+  // aliveCount() is a live, queryable read of "how many flows are usable RIGHT
+  // NOW" for the aggregate progress health fields. Previously each pass built
+  // its own throwaway createSendPool; reusing one changes nothing observable
+  // about dispatch (usableFlows() already re-filters the live `flows` array
+  // fresh on every call) but gives emitProgress somewhere to read from.
+  const pool = createSendPool({ flows, awaitFlow });
 
   const tracker = createCoverageTracker({ manifest });
   // The test manifests (and any minimal caller) may omit totalBytes/totalFiles —
@@ -240,6 +254,12 @@ export function createMultiFlowSender({
       progress: {
         sent, total: totalBytes, fraction: totalBytes > 0 ? sent / totalBytes : 1,
         filesSent, filesTotal: totalFiles,
+        // Task 9: per-flow health, for the transfer detail UI. flowsLive is a
+        // LIVE read of the pool's usable-flow count (never hardcoded to
+        // flowCount — a re-dial in progress or a dead slot must show through);
+        // flowsTotal is the target slot count; redials is the supervisor's
+        // cumulative counter (0 if none is wired).
+        flowsLive: pool.aliveCount(), flowsTotal: flowCount, redials: redialCount(),
       },
     });
   }
@@ -335,7 +355,7 @@ export function createMultiFlowSender({
 
   async function pump() {
     try {
-      await createSendPool({ flows, awaitFlow }).run(initialPass());
+      await pool.run(initialPass());
       for (;;) {
         // `settled` is the backstop: the receiver's own `complete`/`reject`/
         // `cancel` frame settles this driver directly (see the ctrl handler
@@ -351,7 +371,7 @@ export function createMultiFlowSender({
         await waitForReport(reconcileWaitMs);
         if (canceled || settled) return;
         if (tracker.isComplete()) break;
-        await createSendPool({ flows, awaitFlow }).run(gapPass());
+        await pool.run(gapPass());
       }
     } catch (e) {
       fail(e); // includes 'no_live_flows' — never spin against a dead flow set

@@ -337,6 +337,32 @@ describe('transfer-flow-supervisor', () => {
     await expect(p).rejects.toThrow('all_slots_exhausted');
   });
 
+  // Task 9: cumulative re-dial count, for UI health surfacing. Must count only
+  // ACTUAL re-dials (a worker created because a prior one went terminal) — the
+  // initial staggered dial of every slot in start() must NOT count, even though
+  // it also calls dial().
+  it('redialCount(): 0 after the initial staggered dial of every slot; increments once per ACTUAL re-dial, across multiple slots', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 2, backoff: [500] });
+    const sup = createFlowSupervisor(args);
+    sup.start();
+    clock.advance(250); // both slots dialed (initial dial only)
+    expect(sup.redialCount()).toBe(0);
+
+    createWorker.latestFor(0).emit('failed'); // schedules slot 0's re-dial @+500
+    clock.advance(500);
+    expect(sup.redialCount()).toBe(1); // one real re-dial happened
+
+    createWorker.latestFor(1).emit('closed'); // schedules slot 1's re-dial @+500
+    clock.advance(500);
+    expect(sup.redialCount()).toBe(2); // a second real re-dial, different slot
+
+    // A transient 'disconnected' never re-dials — must not bump the counter.
+    createWorker.latestFor(0).emit('connected');
+    createWorker.latestFor(0).emit('disconnected');
+    clock.advance(100000);
+    expect(sup.redialCount()).toBe(2); // unchanged
+  });
+
   it('stop(): cancels pending re-dial timers and closes live workers; no re-dials afterward', () => {
     const { clock, createWorker, args } = baseArgs({ flowCount: 2, backoff: [500] });
     const sup = createFlowSupervisor(args);

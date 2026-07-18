@@ -505,6 +505,14 @@ describe('transfer-service: supervisor + rolling-join wiring (source guards)', (
     expect(src).toMatch(/createMultiFlowSender\(\{[\s\S]*?awaitFlow:\s*opened\.awaitFlow/);
   });
 
+  // Task 9: per-flow health (flowsLive/flowsTotal/redials) in the aggregate
+  // progress event. flowsLive/flowsTotal are derived inside createMultiFlowSender
+  // itself (from the pool + the flowCount already threaded here); redials needs
+  // the supervisor's counter threaded in from the opened bundle.
+  test('multi-flow SEND threads the bundle\'s redialCount into createMultiFlowSender (→ progress.redials)', () => {
+    expect(src).toMatch(/createMultiFlowSender\(\{[\s\S]*?redialCount:\s*opened\.redialCount/);
+  });
+
   test('multi-flow SEND wires the bundle\'s onCtrlReplaced to the sender\'s setCtrl (slot-0 ctrl swap)', () => {
     expect(src).toMatch(/opened\.onCtrlReplaced\s*===\s*'function'/);
     expect(src).toMatch(/opened\.onCtrlReplaced\(\([^)]*\)\s*=>[\s\S]*?\.setCtrl\(/);

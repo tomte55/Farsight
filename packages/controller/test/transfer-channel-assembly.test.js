@@ -37,6 +37,7 @@ function fakeSupervisorFactory() {
   let cfg = null;
   const stop = vi.fn();
   const awaitFlow = vi.fn(() => new Promise(() => {})); // never resolves
+  const redialCount = vi.fn(() => 0);
   const factory = (config) => {
     cfg = config;
     return {
@@ -45,11 +46,13 @@ function fakeSupervisorFactory() {
       liveCount: () => 0,
       onSlotStarved: vi.fn(),
       awaitFlow,
+      redialCount,
     };
   };
   factory.cfg = () => cfg;
   factory.stop = stop;
   factory.awaitFlow = awaitFlow;
+  factory.redialCount = redialCount;
   return factory;
 }
 
@@ -145,6 +148,15 @@ describe('assembleSendFlows (supervisor-backed)', () => {
     const { bundle, sup } = build();
     bundle.awaitFlow();
     expect(sup.awaitFlow).toHaveBeenCalled();
+  });
+
+  // Task 9: the bundle's redialCount is the supervisor's — the sender's
+  // aggregate progress reads this for its `redials` health field.
+  test('redialCount delegates to the supervisor\'s cumulative re-dial counter', () => {
+    const { bundle, sup } = build();
+    sup.redialCount.mockReturnValue(3);
+    expect(bundle.redialCount()).toBe(3);
+    expect(sup.redialCount).toHaveBeenCalled();
   });
 
   test('a slot-0 error: state is forwarded to onRendezvousError (fail fast on bad_password); non-slot-0 is not', () => {

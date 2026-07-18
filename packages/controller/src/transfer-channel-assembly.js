@@ -152,6 +152,11 @@ export function assembleSendFlows({
     get ctrl() { return ctrlChannel; },
     flows,
     awaitFlow: () => supervisor.awaitFlow(),
+    // Task 9: cumulative re-dial count this transfer, for the sender's
+    // aggregate progress health fields — threaded straight through from the
+    // supervisor, which is the only thing that knows when a slot was ACTUALLY
+    // re-dialed (vs. its initial staggered dial).
+    redialCount: () => supervisor.redialCount(),
     // Registered by transfer-service AFTER it builds the sender: on every slot-0
     // (re)connect, swap the sender's ctrl channel to the fresh one so the OFFER/
     // range_report control plane survives a slot-0 death.

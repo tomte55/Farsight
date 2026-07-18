@@ -50,6 +50,22 @@ describe('main.js: SP3 send-path IPC handlers', () => {
     expect(main).toMatch(/mainWindow\.webContents\.send\(['"]transfer:event['"]/);
   });
 
+  // Task 9: the UI task needs file-failed{fileId,reason} to reach the renderer.
+  // transfer-service's onEvent forwards the ENTIRE ev object verbatim to
+  // 'transfer:event' with no type-based branch that could exclude/reshape a
+  // rarer event like file-failed — confirm that generic pass-through, not just
+  // that SOME send() call exists (which the test above already covers loosely).
+  test('onEvent forwards every event verbatim (unconditionally, not just \'progress\') — so file-failed{reason} reaches the renderer too', () => {
+    const start = main.indexOf('onEvent: (ev) => {');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const block = main.slice(start, start + 800);
+    // The webContents.send call passes `ev` itself, not a rebuilt/filtered object.
+    expect(block).toMatch(/webContents\.send\(['"]transfer:event['"],\s*ev\)/);
+    // Guarded only by mainWindow-liveness, never by ev.type — no `if (ev.type`
+    // branch gates the send() call (the ternary that picks a LOG level is fine).
+    expect(block).not.toMatch(/if\s*\(ev\.type/);
+  });
+
   test('pick-paths offers files (multi-select) OR a folder by mode — never a combined dialog (Windows/Linux cannot show both)', () => {
     // Files mode: multi-select files. Folder mode: a single directory.
     expect(main).toMatch(/\['openFile',\s*'multiSelections'\]/);

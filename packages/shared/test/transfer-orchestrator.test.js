@@ -617,6 +617,35 @@ test('sender emits throttled progress events as chunks go out', async () => {
   expect(prog[prog.length - 1].progress.sent).toBeGreaterThan(0);
 });
 
+// Task 9: the single-flow path's progress shape must stay stable — createSender
+// has no send pool / flow supervisor behind it, so it must NOT grow
+// flowsLive/flowsTotal/redials (those are multi-flow-only, from
+// createMultiFlowSender). Guards against the new fields leaking in here by
+// some shared helper refactor.
+test('single-flow sender progress carries no flowsLive/flowsTotal/redials — shape unchanged', async () => {
+  const root = tmp();
+  const f = join(root, 'a.bin');
+  const data = Buffer.alloc(2000, 4);
+  writeFileSync(f, data);
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: data.length, mtime: 5 }], totalBytes: data.length, totalFiles: 1 };
+  const events = [];
+  const ch = fakeChannel();
+  const sender = createSender({
+    channel: ch, jobId: '11af63b378a338da93dd0d44332d3bfb', manifest, sources: new Map([[0, f]]), chunkSize: 500,
+    progressIntervalMs: 0, onEvent: (ev) => events.push(ev),
+  });
+  const finished = sender.start();
+  await ch.feedCtrl(acceptFrame({ jobId: '11af63b378a338da93dd0d44332d3bfb', resume: [] }));
+  await until(() => ch.ctrlOut.some((fr) => fr.t === 'job_done'));
+  await ch.feedCtrl(completeFrame({ jobId: '11af63b378a338da93dd0d44332d3bfb', ok: true }));
+  await finished;
+  const prog = events.filter((e) => e.type === 'progress');
+  expect(prog.length).toBeGreaterThan(0);
+  for (const e of prog) {
+    expect(Object.keys(e.progress).sort()).toEqual(['fraction', 'sent', 'total', 'filesSent', 'filesTotal'].sort());
+  }
+});
+
 // SP3 P4: real receiver terminal events + tier-aware interrupted persistence.
 
 test('receiver emits a real completed event when it acks delivery', async () => {

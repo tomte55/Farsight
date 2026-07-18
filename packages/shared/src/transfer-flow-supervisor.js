@@ -62,6 +62,12 @@ export function createFlowSupervisor({
   let active = false;        // start() -> true, stop() -> false; hard kill-switch
   let allExhausted = false;  // every slot reached slot.dead — no recovery possible
   let waiter = null;         // pending { promise, resolve, reject } for awaitFlow
+  // Cumulative count of slots ACTUALLY re-dialed this transfer (a worker
+  // created because a prior one went terminal — never the initial staggered
+  // dial). Surfaced via redialCount() for UI health (Task 9); a `dial()` call
+  // is a re-dial iff scheduleRedial already bumped slot.attempt past 0 before
+  // arming the timer that leads here (see dial()'s check below).
+  let redials = 0;
 
   const backoffFor = (attempt) => backoff[Math.min(attempt, backoff.length - 1)];
 
@@ -121,6 +127,10 @@ export function createFlowSupervisor({
     if (!active) return;
     const slot = slots[slotIndex];
     slot.timer = null;
+    // slot.attempt is 0 only for the INITIAL dial (start()'s staggered loop);
+    // scheduleRedial always increments it before arming the timer that calls
+    // back in here, so attempt > 0 at this point means this dial is a re-dial.
+    if (slot.attempt > 0) redials += 1;
     const worker = createWorker(slotIndex);
     slot.worker = worker;
     alive.set(worker, false);
@@ -204,6 +214,7 @@ export function createFlowSupervisor({
       }
     },
     liveCount,
+    redialCount: () => redials,
     onSlotStarved(cb) { if (typeof cb === 'function') starvedCbs.push(cb); },
     awaitFlow,
   };

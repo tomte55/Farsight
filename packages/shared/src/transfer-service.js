@@ -317,6 +317,12 @@ export function createTransferService({ store, transferDir, consent, openChannel
               // pool waits for a resupplied/late flow instead of failing when the
               // live flow set momentarily empties (staggered dial / a flow death).
               awaitFlow: opened.awaitFlow,
+              // Task 9: the supervisor's cumulative re-dial counter (via
+              // assembleSendFlows), surfaced in the aggregate progress event's
+              // `redials` field. undefined here (a caller/fixture with no
+              // supervisor wired) falls back to createMultiFlowSender's own
+              // `() => 0` default.
+              redialCount: opened.redialCount,
               onEvent: onSendEvent,
             })
           : createSender({ channel: opened.channel, jobId, manifest, sources, onEvent: onSendEvent });
