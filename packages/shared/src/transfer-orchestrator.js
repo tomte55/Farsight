@@ -811,12 +811,14 @@ export function createMultiFlowReceiver({
   persistRanges = () => {},
   reportIntervalMs = 3000,
   // Bound each range_report ft-ctrl frame to the ~256KB data-channel message
-  // limit (Plan 3): cap a single file's interval count (capIvals drops the
-  // smallest covered runs — harmless re-send, never over-reports) and split
-  // the file SET across multiple frames — each batch is a valid full-snapshot
-  // subset, since createCoverageTracker.applyReport only replaces coverage for
-  // files present in a given report.
-  maxFilesPerFrame = 64, maxIntervalsPerFile = 256,
+  // limit (Plan 3): batchReportFiles measures actual SERIALIZED BYTES (not file
+  // or interval counts — a fragmented file's ivals can blow the byte budget long
+  // before any count cap would trip) and packs files into frames each under
+  // reportMaxBytes; capIvals drops the smallest covered runs of an individual
+  // over-budget file (harmless re-send, never over-reports). Each batch is a
+  // valid full-snapshot subset, since createCoverageTracker.applyReport only
+  // replaces coverage for files present in a given report.
+  reportMaxBytes = 200000,
   onEvent = () => {},
   setTimer = setTimeout, clearTimer = clearTimeout,
 }) {
@@ -864,15 +866,16 @@ export function createMultiFlowReceiver({
 
   // Sends the receiver's current per-file coverage so the paired
   // createMultiFlowSender's reconciliation loop can see what's still missing.
-  // NOTE (Plan 2 design bound, see spec "Required Plan 2 design inputs"): this
-  // assumes a single file's `ivals` always fits in ONE range_report ft-ctrl
-  // frame. A very large/fragmented file's range list could in principle exceed
-  // the ~256KB data-channel message limit (the same failure mode the OFFER hit
-  // for many-file manifests) — paginated range_report framing is a Plan 3
-  // concern and is deliberately NOT implemented here.
+  // Reports are byte-bounded via batchReportFiles — it measures actual
+  // serialized bytes and emits one range_report ft-ctrl frame PER BATCH, so no
+  // single frame can exceed the ~256KB data-channel message limit (the same
+  // failure mode the OFFER hit for many-file manifests). capIvals (used
+  // internally by batchReportFiles) may drop the smallest covered runs of an
+  // extremely fragmented single file to keep it within budget — those bytes are
+  // simply re-sent later, never over-reported.
   function sendReport() {
     if (settled || !router) return;
-    const batches = batchReportFiles(reportFiles(), { maxFilesPerFrame, maxIntervalsPerFile });
+    const batches = batchReportFiles(reportFiles(), { maxBytes: reportMaxBytes });
     for (const files of batches) ctrl.sendCtrl(rangeReportFrame({ jobId, files }));
   }
 

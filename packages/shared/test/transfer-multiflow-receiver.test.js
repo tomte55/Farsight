@@ -218,16 +218,18 @@ describe('createMultiFlowReceiver', () => {
   });
 
   // Plan 3, Task 1: a range_report must never exceed the ~256KB data-channel
-  // message limit. sendReport() now calls batchReportFiles() and emits one
-  // range_report frame PER BATCH instead of one unbounded frame. Drives the
+  // message limit. sendReport() now calls batchReportFiles() (byte-bounded —
+  // it measures actual serialized bytes, not file/interval counts) and emits
+  // one range_report frame PER BATCH instead of one unbounded frame. Drives the
   // same 5-file scenario (2 finalized, 1 partially-covered, 2 untouched)
-  // through a BOUNDED receiver (maxFilesPerFrame: 2 -> 3 frames per cycle)
-  // and an UNBOUNDED one (default maxFilesPerFrame, which comfortably fits
-  // all 5 files in a single frame), then checks that applying every batched
-  // frame's files to a fresh createCoverageTracker yields IDENTICAL coverage
-  // to applying the single unbatched frame's files (round-trip equivalence:
-  // splitting the file set across frames must not lose or corrupt coverage).
-  it('bounds one report cycle to maxFilesPerFrame files per range_report frame, with no loss of coverage across the batches', async () => {
+  // through a BOUNDED receiver (reportMaxBytes: 65 -> 3 frames per cycle, at
+  // most 2 files each) and an UNBOUNDED one (default reportMaxBytes, which
+  // comfortably fits all 5 files in a single frame), then checks that applying
+  // every batched frame's files to a fresh createCoverageTracker yields
+  // IDENTICAL coverage to applying the single unbatched frame's files
+  // (round-trip equivalence: splitting the file set across frames must not
+  // lose or corrupt coverage).
+  it('bounds one report cycle to a byte budget per range_report frame, with no loss of coverage across the batches', async () => {
     const N = 5;
     const size = 4;
     const manifest = {
@@ -239,7 +241,7 @@ describe('createMultiFlowReceiver', () => {
     // Drives one identical scenario through a fresh receiver, returns every
     // range_report frame emitted by the ONE sendReport() call triggered by a
     // single fake-clock tick (isolated from the accept-time report).
-    async function driveOneReportCycle({ maxFilesPerFrame } = {}) {
+    async function driveOneReportCycle({ reportMaxBytes } = {}) {
       const { ctrl, toReceiver, out } = ctrlPair();
       const parts = new Map();
       const flowCbs = [];
@@ -256,7 +258,7 @@ describe('createMultiFlowReceiver', () => {
         verifyAndFinalize: () => Promise.resolve({ ok: true }),
         reportIntervalMs: 5000, // irrelevant — the fake clock only advances via tickOnce()
         setTimer: fake.setTimer, clearTimer: fake.clearTimer,
-        ...(maxFilesPerFrame !== undefined ? { maxFilesPerFrame } : {}),
+        ...(reportMaxBytes !== undefined ? { reportMaxBytes } : {}),
       });
       rx.start().catch(() => {}); // never completes in this scenario (files 2-4 stay pending) — don't let a rejection go unhandled
       toReceiver(offerFrame({ jobId: JOB, entries: manifest.entries, totalBytes: manifest.totalBytes, totalFiles: manifest.totalFiles }));
@@ -282,8 +284,8 @@ describe('createMultiFlowReceiver', () => {
       return cycleFrames;
     }
 
-    const boundedFrames = await driveOneReportCycle({ maxFilesPerFrame: 2 });
-    const unboundedFrames = await driveOneReportCycle(); // default maxFilesPerFrame (64) — 5 files fit in one frame
+    const boundedFrames = await driveOneReportCycle({ reportMaxBytes: 65 });
+    const unboundedFrames = await driveOneReportCycle(); // default reportMaxBytes (200000) — 5 files fit in one frame
 
     // Pagination actually happened: 5 files / 2 per frame -> 3 frames, each capped.
     expect(boundedFrames.length).toBe(3);
