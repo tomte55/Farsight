@@ -687,6 +687,71 @@ describe('createMultiFlowReceiver', () => {
     expect(openedParts[0].close).toHaveBeenCalledTimes(1);
   });
 
+  // UI-legibility gap: live-observed as sender "21/22 · 0 MB/s", receiver
+  // "20/22 · 0 MB/s", no phase label — the receiver never told the UI it had
+  // entered the verify-only tail (all bytes in, still hashing/finalizing).
+  // Mirrors single-flow createReceiver's job_done `pending.size > 0` check,
+  // but computed from router coverage since multi-flow completion is
+  // coverage-defined. Two files: file 0 finalizes fast; file 1's
+  // verifyAndFinalize hangs on a controllable promise so the receive sits in
+  // the verify-only tail long enough to observe the event ordering.
+  it('emits a verifying event once all bytes are in but finalize is still pending — not before, not after completion', async () => {
+    const size = 8;
+    const { ctrl, toReceiver } = ctrlPair();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const events = [];
+    let resolveVerify;
+    const verifyGate = new Promise((res) => { resolveVerify = res; });
+    const rx = createMultiFlowReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null }),
+      verifyAndFinalize: ({ fileId }) => (fileId === 1 ? verifyGate.then(() => ({ ok: true })) : Promise.resolve({ ok: true })),
+      onEvent: (ev) => events.push(ev),
+      reportIntervalMs: 10_000,
+    });
+    const done = rx.start();
+    const entries = [{ fileId: 0, path: 'a.bin', size, mtime: 0 }, { fileId: 1, path: 'b.bin', size, mtime: 0 }];
+    toReceiver(offerFrame({ jobId: JOB, entries, totalBytes: size * 2, totalFiles: 2 }));
+    await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+
+    // File 0: fully received + finalized (fast path) — file 1 hasn't even
+    // started, so this is still ordinary mid-transfer, NOT the verify tail.
+    flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: size, payload: new Uint8Array(size).fill(1) }));
+    await new Promise((r) => setTimeout(r, 0));
+    toReceiver(fileEndFrame({ jobId: JOB, fileId: 0, hash: 'H0' }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(events.some((e) => e.type === 'verifying')).toBe(false);
+
+    // File 1: only HALF its bytes in — still receiving, definitely not the tail.
+    flowCbs[0](encodeBulkFrame({ fileId: 1, offset: 0, length: size / 2, payload: new Uint8Array(size / 2).fill(2) }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(events.some((e) => e.type === 'verifying')).toBe(false);
+
+    // File 1: the rest of its bytes arrive — now every file's bytes are in,
+    // but file 1's verifyAndFinalize hangs on verifyGate, so it's byte-complete
+    // and not yet finalized. THIS is the verify-only tail.
+    flowCbs[0](encodeBulkFrame({ fileId: 1, offset: size / 2, length: size / 2, payload: new Uint8Array(size / 2).fill(2) }));
+    await new Promise((r) => setTimeout(r, 0));
+    toReceiver(fileEndFrame({ jobId: JOB, fileId: 1, hash: 'H1' }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const verifying = events.find((e) => e.type === 'verifying');
+    expect(verifying).toBeTruthy();
+    expect(verifying.progress).toEqual({ received: size * 2, total: size * 2, fraction: 1, filesDone: 1, filesTotal: 2 });
+    expect(events.some((e) => e.type === 'completed')).toBe(false); // file 1 still finalizing
+
+    resolveVerify();
+    await new Promise((r) => setTimeout(r, 0));
+    const r = await done;
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    expect(events.some((e) => e.type === 'completed')).toBe(true);
+    // Fired exactly once — a flood of no-op progress calls after the tail
+    // began must not re-emit it.
+    expect(events.filter((e) => e.type === 'verifying').length).toBe(1);
+  });
+
   // Fix 2: the settle-path close/persist await must be bounded — a wedged
   // part.close() (this codebase has a Windows wedged-fd history) must not hang
   // the whole receive (and its start() caller) forever. A leaked fd on timeout

@@ -195,6 +195,49 @@ describe('createMultiFlowSender', () => {
     expect(sent.some((f) => f.t === 'file_end' && f.fileId === 0)).toBe(true); // file_end sent despite full resume coverage
   });
 
+  // UI-legibility gap: live-observed as the sender frozen on "Transferring ·
+  // 0 MB/s" during the receiver's verify tail. Once the sender has dispatched
+  // everything the tracker can confirm + sent job_done, it's only WAITING on
+  // the receiver's complete ack — 'all-sent' (which the renderer maps to
+  // "Finishing…") must surface THEN, not only once `completed` also lands.
+  // The ctrl mock here deliberately does NOT auto-reply to job_done, so the
+  // test can observe the gap between all-sent and completed directly.
+  it('emits all-sent once production is done and it is only waiting on the complete ack, before completed', async () => {
+    const size = 4096;
+    const A = new Uint8Array(size).map((_, i) => (i * 3) & 0xff);
+    let onCtrl = null;
+    const events = [];
+    const ctrl = {
+      sendCtrl: (s) => {
+        const f = parseCtrlFrame(s);
+        if (f.t === 'offer' || f.t === 'offer_end') onCtrl(acceptFrame({ jobId: JOB, resume: [], ranges: [] }));
+        else if (f.t === 'file_end') onCtrl(rangeReportFrame({ jobId: JOB, files: [{ fileId: 0, ivals: [[0, size]] }] }));
+        // Deliberately no auto-reply to job_done — driven manually below.
+      },
+      onCtrl: (cb) => { onCtrl = cb; },
+    };
+    const flows = [{ isAlive: () => true, sendBulk: () => Promise.resolve() }];
+    const sender = createMultiFlowSender({
+      ctrl, flows, jobId: JOB, manifest: { entries: [{ fileId: 0, size }] }, chunkSize: 4096, flowCount: 1,
+      groupId: 'b'.repeat(32),
+      readerFor: () => ({ readAt: (o, l) => Promise.resolve(A.subarray(o, o + l)), close: () => {} }),
+      newHash: () => ({ update() {}, digest: () => 'H' }),
+      onEvent: (ev) => events.push(ev),
+      reconcileWaitMs: 30,
+    });
+    const done = sender.start();
+    // Let the initial pass + file_end's range_report + job_done dispatch flush.
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(events.some((e) => e.type === 'all-sent')).toBe(true); // "Finishing…"
+    expect(events.some((e) => e.type === 'completed')).toBe(false); // receiver hasn't acked yet
+
+    onCtrl(completeFrame({ jobId: JOB, ok: true }));
+    const r = await done;
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    expect(events.some((e) => e.type === 'completed')).toBe(true);
+  });
+
   // Livelock regression: a raw createReceiveRouter-backed receiver (the real
   // paired implementation) OMITS a finalized file from every range_report from
   // then on (see transfer-receive-router.js's rangesFor()) — this fake mirrors

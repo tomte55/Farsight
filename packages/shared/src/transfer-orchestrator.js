@@ -971,6 +971,35 @@ export function createMultiFlowReceiver({
   function findEntry(fileId) { return manifest.entries.find((e) => e.fileId === fileId); }
   function pathOf(fileId) { const e = findEntry(fileId); return e ? e.path : undefined; }
 
+  // Detects the verify-only TAIL: every file's bytes are fully in (per the
+  // router's coverage — coveredBytesFor counts a finalized file as fully
+  // covered too, so this stays true once files start finishing) but not every
+  // file has finalized (verified+fsync'd+renamed) yet. Mirrors single-flow
+  // createReceiver's `if (pending.size > 0) onEvent({type:'verifying'})` on
+  // job_done — same intent, computed from the router's coverage instead of a
+  // pending-map, since multi-flow completion is coverage-defined, not a
+  // job_done-first sequencing. Fires ONCE per transition (guarded by
+  // verifyingEmitted) so a flood of harmless duplicate/gap-resend bulk frames
+  // after all bytes are already in doesn't re-emit it every frame. Reset on a
+  // verify FAILURE (router.resetFile via onFileDone below) so a genuine retry
+  // cycle — bytes come back in, finalize again — can re-surface the label.
+  let verifyingEmitted = false;
+  function checkVerifying() {
+    if (settled || verifyingEmitted || !router || !manifest) return;
+    if (finalizedFiles.size >= manifest.entries.length) return; // nothing left to verify
+    let received = 0, total = 0;
+    for (const e of manifest.entries) { total += e.size; received += router.coveredBytesFor(e.fileId); }
+    if (total > 0 && received < total) return; // still mid-transfer — not the verify tail
+    verifyingEmitted = true;
+    onEvent({
+      type: 'verifying',
+      progress: {
+        received, total, fraction: total > 0 ? received / total : 1,
+        filesDone: finalizedFiles.size, filesTotal: manifest.entries.length,
+      },
+    });
+  }
+
   // Throttled AGGREGATE progress — the per-file {fileId, coveredBytes, size} the
   // router's onProgress used to pass straight through was the wrong shape for the
   // UI (which wants one number for the whole job) AND unthrottled (a flood over
@@ -1093,11 +1122,11 @@ export function createMultiFlowReceiver({
       verifyAndFinalize: ({ fileId, expectedHash }) => verifyAndFinalize({ ...findEntry(fileId), expectedHash, partFile: partFiles.get(fileId) }),
       onFileDone: ({ fileId, ok: fileOk }) => {
         if (fileOk) finalizedFiles.add(fileId);
-        else router.resetFile(fileId);
+        else { router.resetFile(fileId); verifyingEmitted = false; } // real retry cycle — allow re-surfacing
         onEvent({ type: fileOk ? 'file-done' : 'file-failed', fileId });
         maybeComplete();
       },
-      onProgress: () => emitProgress(),
+      onProgress: () => { emitProgress(); checkVerifying(); },
     });
     for (const flow of flows) flow.onBulk((buf) => run(() => { pokeWatchdog(); return router.onBulkFrame(buf); }));
     if (settled) return;
@@ -1158,6 +1187,12 @@ export function createMultiFlowReceiver({
     if (f.t === 'job_done') {
       jobDoneSeen = true;
       sendReport();
+      // Backstop for checkVerifying's normal onProgress trigger: covers the
+      // (unusual) case where the last bytes landed without a following bulk
+      // frame ever calling onProgress again (e.g. a manifest whose only
+      // remaining file is zero-length, so no bulk frame arrives for it at
+      // all) — job_done is the one guaranteed later signal.
+      checkVerifying();
       maybeComplete();
       return;
     }
