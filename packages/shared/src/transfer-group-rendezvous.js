@@ -81,9 +81,14 @@ export function createGroupRendezvous({
       clearTimer(group.timer);
       group.timer = null;
     }
-    for (const handle of group.flows.values()) {
-      if (handle && typeof handle.close === 'function') {
-        handle.close();
+    // Once a group has fired, its flow handles have been handed off to the
+    // receiver and may be mid-transfer — closing them would sever active
+    // data channels. Only close flows for a group canceled BEFORE ready.
+    if (!group.fired) {
+      for (const handle of group.flows.values()) {
+        if (handle && typeof handle.close === 'function') {
+          handle.close();
+        }
       }
     }
     groups.delete(groupId);

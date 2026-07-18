@@ -50,4 +50,51 @@ describe('createGroupRendezvous', () => {
     gr.offer({ sessionId: 's0b', groupId: GROUP, flowIndex: 0, flowCount: 3 }); // dup index
     expect(opened).toEqual([0]);
   });
+
+  it('does not re-fire onGroupReady when the stale join-timer callback still runs after the count-path already fired the group', () => {
+    // A plain fakeClock's clearTimer deletes the timer from its map, so a
+    // *cleared* timer can never be re-invoked via fireAll() — that would only
+    // prove clearTimer works, not that fireReady's own `fired` guard holds.
+    // Capture the timer callback directly (bypassing clearTimer's removal) to
+    // simulate the real race this guard defends against: the join-timer
+    // callback still runs even though the group already resolved via the
+    // count path.
+    let timerFn;
+    const setTimer = (fn) => { timerFn = fn; return 1; };
+    const clearTimer = () => {};
+    const ready = [];
+    const gr = createGroupRendezvous({ openFlow: (r) => ({ flowIndex: r.flowIndex, close: () => {} }), onGroupReady: (g) => ready.push(g), joinWindowMs: 5000, setTimer, clearTimer });
+    for (let i = 0; i < 3; i++) gr.offer({ sessionId: `s${i}`, groupId: GROUP, flowIndex: i, flowCount: 3, linked: true });
+    expect(ready.length).toBe(1); // count-path fired already
+    timerFn(); // stale timer callback still runs; fireReady's `fired` guard must no-op
+    expect(ready.length).toBe(1);
+  });
+
+  it('does not re-fire onGroupReady when late offers arrive after a partial-timeout fire', () => {
+    const clock = fakeClock();
+    const ready = [];
+    const gr = createGroupRendezvous({ openFlow: (r) => ({ flowIndex: r.flowIndex, close: () => {} }), onGroupReady: (g) => ready.push(g), joinWindowMs: 5000, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+    gr.offer({ sessionId: 's0', groupId: GROUP, flowIndex: 0, flowCount: 3, linked: true }); // 1 of 3
+    clock.fireAll(); // partial-timeout fire with 1 flow
+    expect(ready.length).toBe(1);
+    gr.offer({ sessionId: 's1', groupId: GROUP, flowIndex: 1, flowCount: 3, linked: true }); // late
+    gr.offer({ sessionId: 's2', groupId: GROUP, flowIndex: 2, flowCount: 3, linked: true }); // late
+    expect(ready.length).toBe(1); // still exactly one ready
+  });
+
+  it('cancel() after the group has fired does NOT close the live flow handles', () => {
+    let closed = 0;
+    const gr = createGroupRendezvous({ openFlow: (r) => ({ flowIndex: r.flowIndex, close: () => { closed++; } }), onGroupReady: () => {} });
+    for (let i = 0; i < 3; i++) gr.offer({ sessionId: `s${i}`, groupId: GROUP, flowIndex: i, flowCount: 3, linked: true });
+    gr.cancel(GROUP);
+    expect(closed).toBe(0);
+  });
+
+  it('cancel() before the group has fired DOES close the opened flow handles', () => {
+    let closed = 0;
+    const gr = createGroupRendezvous({ openFlow: (r) => ({ flowIndex: r.flowIndex, close: () => { closed++; } }), onGroupReady: () => {} });
+    gr.offer({ sessionId: 's0', groupId: GROUP, flowIndex: 0, flowCount: 3, linked: true }); // 1 of 3, not ready
+    gr.cancel(GROUP);
+    expect(closed).toBe(1);
+  });
 });
