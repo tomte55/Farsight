@@ -793,4 +793,89 @@ describe('createMultiFlowReceiver', () => {
     expect(result).toBe('canceled');
     expect(closeCalled).toBe(true); // the close WAS attempted — just not awaited past the bound
   });
+
+  // Per-file failure isolation (real field case: Windows AV locks/quarantines
+  // one file's .part mid-write — "UNKNOWN: unknown error, open ...setup.exe.part").
+  // Before this feature, that throw propagated out of the router's onBulkFrame,
+  // failed the WHOLE receive, tripped auto-resume, and the SAME file failed
+  // again -> infinite loop. Two files: file 0's openPart persistently fails;
+  // file 1 is healthy. `delay: () => Promise.resolve()` keeps the router's
+  // bounded retry backoff from actually waiting in this test.
+  describe('per-file failure isolation (AV-locked file, etc.)', () => {
+    it('resolves COMPLETED with the other file finalized, emits file-failed, sends complete{ok:false}, and reports the failed file as covered', async () => {
+      const size = 8;
+      const { ctrl, toReceiver, out } = ctrlPair();
+      const flowCbs = [];
+      const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+      const events = [];
+      const part1 = { writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null };
+      const rx = createMultiFlowReceiver({
+        ctrl, flows, jobId: JOB,
+        consent: async () => true,
+        openPart: (relPath) => (relPath === 'bad.bin'
+          ? Promise.reject(new Error('UNKNOWN: unknown error, open bad.bin.part'))
+          : Promise.resolve(part1)),
+        verifyAndFinalize: () => Promise.resolve({ ok: true }),
+        onEvent: (ev) => events.push(ev),
+        reportIntervalMs: 10_000,
+        delay: () => Promise.resolve(), // instant — this test isn't about real backoff timing
+      });
+      const done = rx.start();
+      const entries = [{ fileId: 0, path: 'bad.bin', size, mtime: 0 }, { fileId: 1, path: 'good.bin', size, mtime: 0 }];
+      toReceiver(offerFrame({ jobId: JOB, entries, totalBytes: size * 2, totalFiles: 2 }));
+      await new Promise((r) => setTimeout(r, 0)); // let consent+accept flush
+      expect(out.some((f) => f.t === 'accept')).toBe(true);
+
+      // File 0's every bulk frame hits the persistently-failing openPart.
+      // File 1 is deliberately left UNTOUCHED at this point, so router.isComplete()
+      // is still false and maybeComplete() does NOT fire yet — this lets the
+      // NEXT range_report (below) actually go out (a report call is a no-op
+      // once settled), so its file0 entry can be checked independently of the
+      // final completion report.
+      flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: size, payload: new Uint8Array(size).fill(1) }));
+      // Let the bounded retry (now instant via injected delay) run to exhaustion.
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(events.some((e) => e.type === 'file-failed')).toBe(true); // file 0 already given up on
+
+      // The sender doesn't know the receiver gave up on file 0 — it still
+      // sends file_end for it once its bytes+hash are done on its side. That
+      // triggers a fresh range_report; file 1 is still untouched, so the
+      // receive is NOT complete yet (isolating this report from the final
+      // completion report).
+      toReceiver(fileEndFrame({ jobId: JOB, fileId: 0, hash: 'irrelevant-file-already-failed' }));
+      await new Promise((r) => setTimeout(r, 0));
+
+      // That report must already show the terminally-failed file 0 as fully
+      // covered, so the paired sender's coverage tracker converges instead of
+      // re-sending into the same failure forever.
+      const midReports = out.filter((f) => f.t === 'range_report');
+      const midLatest = midReports[midReports.length - 1];
+      const midFile0Entry = midLatest.files.find((f) => f.fileId === 0);
+      expect(midFile0Entry).toEqual({ fileId: 0, ivals: [[0, size]] });
+
+      // File 1 delivers + finalizes normally — the failure on file 0 must not
+      // have wedged it.
+      flowCbs[0](encodeBulkFrame({ fileId: 1, offset: 0, length: size, payload: new Uint8Array(size).fill(2) }));
+      await new Promise((r) => setTimeout(r, 0));
+      toReceiver(fileEndFrame({ jobId: JOB, fileId: 1, hash: 'H1' }));
+      toReceiver(jobDoneFrame({ jobId: JOB }));
+
+      const r = await done; // RESOLVES — must not reject/loop
+      expect(r).toEqual({ jobId: JOB, ok: false }); // completed WITH a terminal failure
+
+      const failedEvent = events.find((e) => e.type === 'file-failed');
+      expect(failedEvent).toBeTruthy();
+      expect(failedEvent.fileId).toBe(0);
+      expect(failedEvent.reason).toBe('io_error');
+
+      const doneEvent = events.find((e) => e.type === 'file-done');
+      expect(doneEvent).toBeTruthy();
+      expect(doneEvent.fileId).toBe(1);
+
+      expect(out.some((f) => f.t === 'complete' && f.ok === false)).toBe(true);
+    });
+  });
 });

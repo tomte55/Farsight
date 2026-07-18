@@ -288,4 +288,44 @@ describe('createMultiFlowSender', () => {
     await new Promise((res) => setTimeout(res, 30 * 4));
     expect(sendBulkCalls).toBe(callsAtResolve); // pump terminated — no further sends
   });
+
+  // Per-file failure isolation: the receiver now completes-with-failures
+  // (sends complete{ok:false}) instead of never completing / retrying forever
+  // when one file terminally fails (e.g. AV-locked .part) on its side. Before
+  // this fix, complete{ok:false} always meant fail('receiver_incomplete') —
+  // which for an own-fleet/contact send is RECOVERABLE and triggers
+  // auto-resume, re-sending the same doomed file into the same failure
+  // forever. By the time the receiver sends `complete` at all, its own
+  // reconciliation has already retried everything it can, so re-sending can't
+  // help — start() must RESOLVE {ok:false}, not reject/loop.
+  it('resolves {ok:false} (done-with-failures) on an inbound complete{ok:false} instead of rejecting/looping', async () => {
+    const size = 4096;
+    const A = new Uint8Array(size).map((_, i) => (i * 3) & 0xff);
+    let onCtrl = null;
+    const events = [];
+    const ctrl = {
+      sendCtrl: (s) => {
+        const f = parseCtrlFrame(s);
+        if (f.t === 'offer' || f.t === 'offer_end') onCtrl(acceptFrame({ jobId: JOB, resume: [], ranges: [] }));
+        else if (f.t === 'file_end') onCtrl(rangeReportFrame({ jobId: JOB, files: [{ fileId: 0, ivals: [[0, size]] }] }));
+        else if (f.t === 'job_done') onCtrl(completeFrame({ jobId: JOB, ok: false })); // receiver: completed WITH a terminal per-file failure
+      },
+      onCtrl: (cb) => { onCtrl = cb; },
+    };
+    const flows = [{ isAlive: () => true, sendBulk: () => Promise.resolve() }];
+    const sender = createMultiFlowSender({
+      ctrl, flows, jobId: JOB, manifest: { entries: [{ fileId: 0, size }] }, chunkSize: 4096, flowCount: 1,
+      groupId: 'b'.repeat(32),
+      readerFor: () => ({ readAt: (o, l) => Promise.resolve(A.subarray(o, o + l)), close: () => {} }),
+      newHash: () => ({ update() {}, digest: () => 'H' }),
+      onEvent: (ev) => events.push(ev),
+      reconcileWaitMs: 30,
+    });
+    const r = await sender.start(); // must RESOLVE, not reject
+    expect(r).toEqual({ jobId: JOB, ok: false });
+    const completed = events.find((e) => e.type === 'completed');
+    expect(completed).toBeTruthy();
+    expect(completed.ok).toBe(false);
+    expect(events.some((e) => e.type === 'error')).toBe(false); // no 'receiver_incomplete' error event
+  });
 });

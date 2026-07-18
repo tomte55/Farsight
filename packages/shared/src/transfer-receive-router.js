@@ -5,10 +5,17 @@
 import { decodeBulkFrame } from './transfer-chunk.js';
 import { createRangeSet } from './transfer-ranges.js';
 
-export function createReceiveRouter({ manifest, initialRanges = {}, openPart, verifyAndFinalize, onFileDone, onProgress }) {
-  const files = new Map(); // fileId -> { size, ranges, part, hash, finalized, finalizing }
+export function createReceiveRouter({
+  manifest, initialRanges = {}, openPart, verifyAndFinalize, onFileDone, onProgress,
+  // Per-file I/O failure isolation (e.g. AV locking/quarantining a .part mid-write):
+  // a bounded, brief, ONE-TIME retry of the open+write for THIS file before giving
+  // up on it. Injectable so a test can prove the retry without real timers/delays.
+  retryDelays = [150, 400],
+  delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
+  const files = new Map(); // fileId -> { size, ranges, part, hash, finalized, finalizing, failed }
   for (const e of manifest.entries) {
-    files.set(e.fileId, { size: e.size, ranges: createRangeSet(initialRanges[e.fileId] || []), part: null, partPromise: null, hash: null, finalized: false, finalizing: false });
+    files.set(e.fileId, { size: e.size, ranges: createRangeSet(initialRanges[e.fileId] || []), part: null, partPromise: null, hash: null, finalized: false, finalizing: false, failed: false });
   }
 
   async function maybeFinalize(fileId) {
@@ -44,36 +51,89 @@ export function createReceiveRouter({ manifest, initialRanges = {}, openPart, ve
       const d = decodeBulkFrame(buf);
       if (!d) return;
       const f = files.get(d.fileId);
-      if (!f || f.finalized) return;
-      if (!f.partPromise) f.partPromise = openPart(d.fileId);
-      f.part = await f.partPromise;
-      await f.part.writeAt(d.offset, d.payload);
+      // A `failed` file is TERMINAL, same as `finalized`: ignore further frames
+      // for it rather than re-attempting an I/O path already given up on.
+      if (!f || f.finalized || f.failed) return;
+
+      const attemptWrite = async () => {
+        if (!f.partPromise) f.partPromise = openPart(d.fileId);
+        f.part = await f.partPromise;
+        await f.part.writeAt(d.offset, d.payload);
+      };
+
+      // Isolate a persistent open/write failure (real case: Windows AV locking/
+      // quarantining a `setup.exe.part`) to THIS FILE ONLY — it must never
+      // escape onBulkFrame and fail the whole receive (that used to trigger
+      // auto-resume -> the same file fails again -> infinite loop). Retry
+      // bounded + brief (one-time per delivered frame): if it still fails after
+      // retryDelays are exhausted, give up on this file permanently.
+      let lastErr = null;
+      try {
+        await attemptWrite();
+      } catch (e) {
+        lastErr = e;
+        for (const ms of retryDelays) {
+          f.part = null; f.partPromise = null; // force a fresh open on retry, not the failed memoized one
+          await delay(ms);
+          try {
+            await attemptWrite();
+            lastErr = null;
+            break;
+          } catch (e2) {
+            lastErr = e2;
+          }
+        }
+      }
+
+      if (lastErr) {
+        f.failed = true;
+        f.part = null;
+        f.partPromise = null;
+        onFileDone && onFileDone({ fileId: d.fileId, ok: false, terminal: true });
+        return; // NOT rethrown — the receive must not fail because of one file
+      }
+
       f.ranges.add(d.offset, d.length);
       onProgress && onProgress({ fileId: d.fileId, coveredBytes: f.ranges.coveredBytes(), size: f.size });
       await maybeFinalize(d.fileId);
     },
     async onFileHash(fileId, hash) {
       const f = files.get(fileId);
-      if (!f || f.finalized) return;
+      if (!f || f.finalized || f.failed) return;
       f.hash = hash;
       await maybeFinalize(fileId);
     },
     rangesFor() {
       const out = [];
-      for (const [fileId, f] of files) if (!f.finalized) out.push({ fileId, ivals: f.ranges.toJSON() });
+      for (const [fileId, f] of files) if (!f.finalized && !f.failed) out.push({ fileId, ivals: f.ranges.toJSON() });
       return out;
     },
     // Covered-bytes for ONE file, finalized or not — lets a caller (the
     // multi-flow receiver driver) build an aggregate progress figure without
     // reconstructing it from rangesFor() (which omits finalized files entirely).
+    // A terminally-failed file counts as fully "covered" too — it's RESOLVED
+    // (won't receive any more bytes), so aggregate progress should reach 100%
+    // rather than being permanently short by that file's size.
     coveredBytesFor(fileId) {
       const f = files.get(fileId);
       if (!f) return 0;
-      return f.finalized ? f.size : f.ranges.coveredBytes();
+      return (f.finalized || f.failed) ? f.size : f.ranges.coveredBytes();
     },
+    // A file counts as RESOLVED once it's either finalized (verified+written)
+    // OR terminally failed (I/O give-up after bounded retries) — the receive as
+    // a whole is complete once every file has reached one of these two states,
+    // so one un-writable file (e.g. AV-locked) can no longer wedge the others.
     isComplete() {
-      for (const f of files.values()) if (!f.finalized) return false;
+      for (const f of files.values()) if (!f.finalized && !f.failed) return false;
       return true;
+    },
+    // Which files gave up permanently (terminal I/O failure) — lets a caller
+    // report+record them (e.g. the multi-flow receiver driver's reportFiles()/
+    // jobs-store perFile) without re-deriving this from onFileDone events.
+    failedFiles() {
+      const out = new Set();
+      for (const [fileId, f] of files) if (f.failed) out.add(fileId);
+      return out;
     },
     async resetFile(fileId) {
       const f = files.get(fileId);

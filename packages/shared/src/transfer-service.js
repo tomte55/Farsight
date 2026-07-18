@@ -129,15 +129,25 @@ function ivalsCoverFile(ivals, size) {
 // more with the terminal state when the receive settles. store.save() is itself
 // serialized per jobId (jobs-store.js), so concurrent calls here are safe
 // (last-writer-wins, matching the existing send-side saves' discipline).
-async function saveReceiveRecordWithRanges({ store, jobId, tier, peer, destRoot, manifest, jobState, files }) {
+// `failedFileIds` (a Set, optional): per-file failure isolation — a file the
+// router terminally gave up on (bounded I/O retries exhausted, e.g. an
+// AV-locked .part) is recorded status:'error' regardless of what its ivals
+// say (reportFiles() reports it fully-covered so the sender's tracker
+// converges, which would otherwise read as ivalsCoverFile()->'done' — wrong,
+// the bytes are NOT verified-and-written for this file). This is the ONLY
+// terminal per-file status this helper can produce; everything else is the
+// existing done/pending-by-coverage logic, unchanged.
+async function saveReceiveRecordWithRanges({ store, jobId, tier, peer, destRoot, manifest, jobState, files, failedFileIds }) {
   if (!store || !manifest) return;
   const byId = new Map((files || []).map((f) => [f.fileId, f.ivals]));
+  const failed = failedFileIds || new Set();
   return store.save({
     jobId, dir: 'recv', tier: tier || 'adhoc', peer: peer || {}, destRoot,
     manifest,
     perFile: manifest.entries.map((e) => {
       const ivals = byId.get(e.fileId) || [];
-      return { fileId: e.fileId, ivals, status: ivalsCoverFile(ivals, e.size) ? 'done' : 'pending' };
+      const status = failed.has(e.fileId) ? 'error' : (ivalsCoverFile(ivals, e.size) ? 'done' : 'pending');
+      return { fileId: e.fileId, ivals, status };
     }),
     jobState, createdAt: 0,
   });
@@ -552,6 +562,23 @@ export function createTransferService({ store, transferDir, consent, openChannel
     const persistedRanges = await readPersistedRanges(store, jobId);
     const { consentFn: receiveConsent, getTier } = makeReceiveConsent(peerAuth);
     const destRoot = (typeof transferDir === 'function' ? transferDir() : transferDir);
+    // Per-file failure isolation: track which fileIds the router terminally
+    // gave up on (I/O retries exhausted — reported via onEvent, not by
+    // reaching into the router directly) so the jobs-store perFile status can
+    // record 'error' for exactly those files, distinct from a verify-mismatch
+    // 'file-failed' (no `reason`), which stays retryable and must NOT be
+    // recorded as a terminal error here.
+    const failedFileIds = new Set();
+    // createMultiFlowReceiver resolves {jobId, ok} from exactly two call
+    // sites: beginReceive's decline path (ok:false, before any transfer
+    // activity — 'accepted' never fires) and maybeComplete (a genuine
+    // completion, possibly WITH per-file failures — ok can be true or false).
+    // 'accepted' only fires on the latter path, so it's a reliable signal
+    // (without changing the resolved value's shape, which would break exact-
+    // match assertions elsewhere) that a resolve is "done reconciling", not
+    // "declined" — used below to keep a completed-with-failures receive
+    // recorded 'done' rather than 'error' (SP3 per-file-isolation).
+    let accepted = false;
 
     const receiver = createMultiFlowReceiver({
       ctrl: wrappedCtrl, flows, jobId, consent: receiveConsent,
@@ -569,10 +596,14 @@ export function createTransferService({ store, transferDir, consent, openChannel
         // bug as the .part fd leak this all guards against.
         return saveReceiveRecordWithRanges({
           store, jobId, tier: getTier(), peer: {}, destRoot,
-          manifest: currentManifest, jobState: 'active', files,
+          manifest: currentManifest, jobState: 'active', files, failedFileIds,
         }).catch(() => { /* best effort, matches single-flow saveRecord's discipline */ });
       },
-      onEvent: (ev) => emit(jobId, 'recv', ev),
+      onEvent: (ev) => {
+        if (ev.type === 'accepted') accepted = true;
+        if (ev.type === 'file-failed' && ev.reason === 'io_error') failedFileIds.add(ev.fileId);
+        emit(jobId, 'recv', ev);
+      },
     });
 
     activeReceives.set(jobId, { abort: (r) => receiver.abort(r) });
@@ -583,11 +614,22 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // a completed/failed job's record reflects final coverage, not whatever
       // the last periodic tick happened to catch.
       if (currentManifest) {
-        const files = currentManifest.entries.map((e) => ({ fileId: e.fileId, ivals: result.ok ? [[0, e.size]] : [] }));
+        // `accepted` means this resolve came from maybeComplete (a genuine
+        // completion, possibly WITH per-file failures — result.ok is false in
+        // that case) rather than beginReceive's decline path. A completed-
+        // with-failures receive is still DONE, not an error: the receiver has
+        // already finished reconciling, so it isn't resumable/retryable. A
+        // non-accepted resolve (declined before any transfer activity) keeps
+        // the old ok-derived jobState.
+        const jobState = accepted ? 'done' : (result.ok ? 'done' : 'error');
+        const files = currentManifest.entries.map((e) => ({
+          fileId: e.fileId,
+          ivals: failedFileIds.has(e.fileId) ? [] : ((accepted || result.ok) ? [[0, e.size]] : []),
+        }));
         try {
           await saveReceiveRecordWithRanges({
             store, jobId, tier: getTier(), peer: {}, destRoot,
-            manifest: currentManifest, jobState: result.ok ? 'done' : 'error', files,
+            manifest: currentManifest, jobState, files, failedFileIds,
           });
         } catch { /* best effort */ }
       }

@@ -157,4 +157,110 @@ describe('transfer-receive-router', () => {
       expect(closeCalls).toBe(1);
     });
   });
+
+  describe('per-file I/O failure isolation (AV-locked .part etc.)', () => {
+    // Real case this fixes: Windows AV locks/quarantines one file's .part
+    // (`UNKNOWN: unknown error, open ...setup.exe.part`). Before this feature,
+    // that throw propagated out of onBulkFrame and failed the WHOLE receive ->
+    // auto-resume -> the same file fails again -> infinite loop. Two files:
+    // file 0's openPart rejects EVERY time (persistent failure); file 1 is
+    // healthy. Injected `delay` resolves instantly so the bounded retry
+    // backoff doesn't slow the test down.
+    it('isolates a persistently-failing file: the other file still finalizes, isComplete() becomes true, a terminal onFileDone fires, and no throw escapes onBulkFrame', async () => {
+      const size = 8;
+      const doneEvents = [];
+      let opensFor0 = 0;
+      const part1 = sparseFile(size);
+      const router = createReceiveRouter({
+        manifest: { entries: [{ fileId: 0, size }, { fileId: 1, size }] },
+        openPart: (fileId) => {
+          if (fileId === 0) { opensFor0 += 1; return Promise.reject(new Error('UNKNOWN: unknown error, open ...setup.exe.part')); }
+          return Promise.resolve(part1);
+        },
+        verifyAndFinalize: () => Promise.resolve({ ok: true }),
+        onFileDone: (e) => doneEvents.push(e),
+        onProgress: () => {},
+        delay: () => Promise.resolve(), // instant — this test isn't about real timing
+      });
+
+      // Must NOT throw/reject — the whole point is isolation.
+      await expect(router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 8, payload: new Uint8Array(8).fill(1) }))).resolves.toBeUndefined();
+
+      // Bounded retry: 1 initial attempt + 2 backoff retries (default retryDelays: [150, 400]) = 3 total opens.
+      expect(opensFor0).toBe(3);
+      expect(router.failedFiles()).toEqual(new Set([0]));
+      expect(doneEvents).toContainEqual({ fileId: 0, ok: false, terminal: true });
+      expect(router.isComplete()).toBe(false); // file 1 still incomplete
+
+      // File 1 completes normally — the failure on file 0 must not have wedged it.
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 1, offset: 0, length: 8, payload: new Uint8Array(8).fill(2) }));
+      await router.onFileHash(1, 'H1');
+      expect(doneEvents).toContainEqual({ fileId: 1, ok: true });
+
+      // The failed file counts as RESOLVED for isComplete() — the whole receive
+      // reaches completion despite the one un-writable file.
+      expect(router.isComplete()).toBe(true);
+
+      // Further frames for the failed file are ignored (terminal, like `finalized`).
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 8, payload: new Uint8Array(8).fill(9) }));
+      expect(opensFor0).toBe(3); // no further open attempts
+    });
+
+    it('a transient failure (fails once, then succeeds) recovers via the retry — no terminal failure', async () => {
+      const size = 4;
+      const part = sparseFile(size);
+      const doneEvents = [];
+      let opens = 0;
+      const router = createReceiveRouter({
+        manifest: { entries: [{ fileId: 0, size }] },
+        openPart: () => {
+          opens += 1;
+          if (opens === 1) return Promise.reject(new Error('EBUSY: resource busy or locked'));
+          return Promise.resolve(part);
+        },
+        verifyAndFinalize: () => Promise.resolve({ ok: true }),
+        onFileDone: (e) => doneEvents.push(e),
+        onProgress: () => {},
+        delay: () => Promise.resolve(),
+      });
+
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array([1, 2, 3, 4]) }));
+      expect(opens).toBe(2); // first attempt failed, first retry succeeded
+      expect(router.failedFiles()).toEqual(new Set()); // recovered — not failed
+      expect([...part.buf]).toEqual([1, 2, 3, 4]); // the bytes actually landed
+
+      await router.onFileHash(0, 'H');
+      expect(router.isComplete()).toBe(true);
+      expect(doneEvents).toEqual([{ fileId: 0, ok: true }]); // only the success — no terminal event
+    });
+
+    // Mutation check (guards the isolation itself, not just the outcome): if the
+    // try/catch around the write were reverted to let the error rethrow, this
+    // must fail — proving the test actually pins the isolation, not merely a
+    // condition that happens to hold anyway.
+    it('mutation check: without the try/catch isolation, a persistent failure would reject onBulkFrame (this documents WHY the isolation matters)', async () => {
+      const size = 4;
+      const boom = () => Promise.reject(new Error('boom'));
+      // A minimal reproduction of the OLD (pre-fix) code path: no retry/catch at all.
+      async function oldOnBulkFrame(openPart) {
+        const f = { part: null, partPromise: null };
+        if (!f.partPromise) f.partPromise = openPart();
+        f.part = await f.partPromise; // this throws, uncaught
+      }
+      await expect(oldOnBulkFrame(boom)).rejects.toThrow('boom');
+
+      // The FIXED router, given the exact same persistently-failing openPart,
+      // must resolve (not reject) — this is the behavior change the feature relies on.
+      const router = createReceiveRouter({
+        manifest: { entries: [{ fileId: 0, size }] },
+        openPart: boom,
+        verifyAndFinalize: () => Promise.resolve({ ok: true }),
+        onFileDone: () => {},
+        onProgress: () => {},
+        delay: () => Promise.resolve(),
+      });
+      await expect(router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array(4) }))).resolves.toBeUndefined();
+      expect(router.isComplete()).toBe(true); // failed file counts as resolved
+    });
+  });
 });

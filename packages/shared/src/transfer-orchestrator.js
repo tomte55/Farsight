@@ -356,8 +356,16 @@ export function createMultiFlowSender({
     if (!f || f.jobId !== jobId) return;
     if (f.t === 'prompting') { onEvent({ type: 'prompting' }); return; }
     if (f.t === 'complete') {
+      // complete{ok:false} used to fail() the sender ('receiver_incomplete'),
+      // which the caller (transfer-service.js) treats as a recoverable
+      // failure for own-fleet/contact -> auto-resume kicks in and re-sends.
+      // But by the time the receiver sends `complete` at all, ITS OWN
+      // reconciliation has already retried everything it can — a per-file
+      // terminal I/O failure on the receiver won't be fixed by the sender
+      // re-sending the same bytes again. Resolving here (done-with-failures)
+      // instead of failing is what stops that resend/re-fail loop.
       if (f.ok) { onEvent({ type: 'completed' }); resolveOnce({ jobId, ok: true }); }
-      else { onEvent({ type: 'error', reason: 'receiver_incomplete' }); fail(new Error('receiver_incomplete')); }
+      else { onEvent({ type: 'completed', ok: false }); resolveOnce({ jobId, ok: false }); }
       return;
     }
     if (f.t === 'reject') { onEvent({ type: 'declined', reason: f.reason }); fail(new Error(`rejected: ${f.reason}`)); return; }
@@ -885,6 +893,11 @@ export function createMultiFlowReceiver({
   // Per-chunk progress would flood IPC (mirrors single-flow createReceiver's
   // emitProgress); throttle to a human-legible cadence. Clock injected for tests.
   progressIntervalMs = 250, now = () => Date.now(),
+  // Forwarded to createReceiveRouter's per-file I/O failure isolation (bounded
+  // retry of a failing open/write before giving up on that one file) — see its
+  // own doc in transfer-receive-router.js. Injectable so a test can prove the
+  // retry/terminal-failure path without waiting through real backoff delays.
+  retryDelays, delay,
 }) {
   let settled = false;
   let resolve, reject;
@@ -965,6 +978,15 @@ export function createMultiFlowReceiver({
   // beginReceive is guarded against re-entry — so a fresh Set at construction is
   // already "per receive").
   const finalizedFiles = new Set();
+  // Files the router gave up on permanently (a persistent I/O failure — e.g. an
+  // AV-locked .part — survived its bounded retries). Distinct from a verify
+  // MISMATCH (router.onFileDone({ok:false}) with no `terminal` flag), which
+  // stays retryable via router.resetFile — see the onFileDone handler in
+  // beginReceive below. A terminally-failed file is resolved-but-failed: it
+  // counts toward completion (router.isComplete()) and is reported fully
+  // covered (reportFiles(), below) so the paired sender's coverage tracker
+  // converges instead of re-sending into the same failure forever.
+  const terminalFailedFiles = new Set();
   // Reassembly buffer for a chunked OFFER (offer_begin -> offer_entries* -> offer_end).
   let offerAccum = null;
 
@@ -986,7 +1008,7 @@ export function createMultiFlowReceiver({
   let verifyingEmitted = false;
   function checkVerifying() {
     if (settled || verifyingEmitted || !router || !manifest) return;
-    if (finalizedFiles.size >= manifest.entries.length) return; // nothing left to verify
+    if (finalizedFiles.size + terminalFailedFiles.size >= manifest.entries.length) return; // nothing left to verify
     let received = 0, total = 0;
     for (const e of manifest.entries) { total += e.size; received += router.coveredBytesFor(e.fileId); }
     if (total > 0 && received < total) return; // still mid-transfer — not the verify tail
@@ -1040,7 +1062,11 @@ export function createMultiFlowReceiver({
   // full per-file list too.)
   function reportFiles() {
     const live = new Map(router.rangesFor().map((r) => [r.fileId, r.ivals]));
-    return manifest.entries.map((e) => (finalizedFiles.has(e.fileId)
+    // A terminally-failed file is reported fully covered too, alongside a
+    // finalized one — otherwise the paired sender's coverage tracker never
+    // converges for it and keeps re-sending into the same I/O failure forever
+    // (the receiver just fails it again -> the exact loop this feature fixes).
+    return manifest.entries.map((e) => ((finalizedFiles.has(e.fileId) || terminalFailedFiles.has(e.fileId))
       ? { fileId: e.fileId, ivals: [[0, e.size]] }
       : { fileId: e.fileId, ivals: live.get(e.fileId) || [] }));
   }
@@ -1080,10 +1106,16 @@ export function createMultiFlowReceiver({
   function maybeComplete() {
     if (settled || !router) return;
     if (!router.isComplete()) return;
-    ctrl.sendCtrl(completeFrame({ jobId, ok: true }));
+    // Every file has reached a resolved state (finalized OR terminally
+    // failed). ok reflects whether ANY file terminally failed — but either
+    // way this is a genuine, terminal COMPLETION: resolve (never reject), so
+    // a completed-with-failures receive reads as done, not interrupted, and
+    // does not trip auto-resume into re-fetching the same doomed file.
+    const ok = terminalFailedFiles.size === 0;
+    ctrl.sendCtrl(completeFrame({ jobId, ok }));
     stopReporter();
-    onEvent({ type: 'completed' });
-    resolveOnce({ jobId, ok: true });
+    onEvent({ type: 'completed', ok });
+    resolveOnce({ jobId, ok });
   }
 
   async function beginReceive(entries) {
@@ -1120,13 +1152,24 @@ export function createMultiFlowReceiver({
         return p;
       },
       verifyAndFinalize: ({ fileId, expectedHash }) => verifyAndFinalize({ ...findEntry(fileId), expectedHash, partFile: partFiles.get(fileId) }),
-      onFileDone: ({ fileId, ok: fileOk }) => {
-        if (fileOk) finalizedFiles.add(fileId);
-        else { router.resetFile(fileId); verifyingEmitted = false; } // real retry cycle — allow re-surfacing
-        onEvent({ type: fileOk ? 'file-done' : 'file-failed', fileId });
+      onFileDone: ({ fileId, ok: fileOk, terminal }) => {
+        if (fileOk) {
+          finalizedFiles.add(fileId);
+        } else if (terminal) {
+          // Persistent I/O failure (router gave up after bounded retries) —
+          // TERMINAL, unlike a verify-mismatch: do NOT resetFile/retry (the
+          // file's part is already closed+nulled by the router itself); it
+          // now counts as resolved for isComplete()/reportFiles() purposes.
+          terminalFailedFiles.add(fileId);
+        } else {
+          router.resetFile(fileId); verifyingEmitted = false; // verify-mismatch: real retry cycle — allow re-surfacing
+        }
+        onEvent({ type: fileOk ? 'file-done' : 'file-failed', fileId, ...(terminal ? { reason: 'io_error' } : {}) });
         maybeComplete();
       },
       onProgress: () => { emitProgress(); checkVerifying(); },
+      ...(retryDelays !== undefined ? { retryDelays } : {}),
+      ...(delay !== undefined ? { delay } : {}),
     });
     for (const flow of flows) flow.onBulk((buf) => run(() => { pokeWatchdog(); return router.onBulkFrame(buf); }));
     if (settled) return;
