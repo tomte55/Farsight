@@ -6,7 +6,7 @@
 import {
   offerFrame, offerBeginFrame, offerEntriesFrame, offerEndFrame,
   fileBeginFrame, fileEndFrame, jobDoneFrame, acceptFrame, rejectFrame, promptingFrame, completeFrame,
-  cancelFrame, parseCtrlFrame, TRANSFER_PROTOCOL_VERSION,
+  cancelFrame, parseCtrlFrame, rangeReportFrame, TRANSFER_PROTOCOL_VERSION,
 } from './transfer-protocol.js';
 
 // Split manifest entries into batches whose serialized size stays under maxBytes,
@@ -31,6 +31,7 @@ import { createHash } from 'node:crypto';
 import { createChunkProducer } from './transfer-producer.js';
 import { createSendPool } from './transfer-send-pool.js';
 import { createCoverageTracker } from './transfer-reconcile.js';
+import { createReceiveRouter } from './transfer-receive-router.js';
 
 // Serialize async event handlers so awaited writes never interleave. Handler
 // exceptions are surfaced to onErr (a `fail(err)`) instead of being swallowed —
@@ -771,6 +772,170 @@ export function createReceiver({
     abort(reason = 'aborted') {
       if (settled) return;
       try { if (jobId) channel.sendCtrl(cancelFrame(jobId)); } catch { /* best effort */ }
+      onEvent({ type: 'canceled' });
+      fail(new Error(reason));
+    },
+  };
+}
+
+// Multi-flow receiver: pairs with createMultiFlowSender. Reuses createReceiver's
+// OFFER reassembly (offer / offer_begin->offer_entries*->offer_end) and its
+// settled/abort discipline, but routes bulk bytes through Plan 1's
+// createReceiveRouter (positional writeAt + per-file RangeSet) instead of a
+// manifest-order cursor, since bytes now arrive striped across N independent
+// flows in ARBITRARY order — a cursor assumes one strictly-ordered stream, which
+// no longer holds.
+//
+// jobId is known up front (the pairing/rendezvous already assigned it), unlike
+// single-flow createReceiver where it's learned from the wire OFFER — so every
+// ctrl frame here (including the OFFER itself) is filtered by jobId match.
+export function createMultiFlowReceiver({
+  ctrl, flows, jobId, consent,
+  // Accepted for forward interface compatibility with the paired sender's
+  // constructor shape; this control flow only ever builds the manifest from the
+  // wire OFFER (see beginReceive below) — there is no alternate entries source.
+  entriesFromOffer = true,
+  openPart, verifyAndFinalize,
+  initialRangesFor = () => ({}),
+  persistRanges = () => {},
+  reportIntervalMs = 3000,
+  onEvent = () => {},
+  setTimer = setTimeout, clearTimer = clearTimeout,
+}) {
+  let settled = false;
+  let resolve, reject;
+  const finished = new Promise((res, rej) => { resolve = res; reject = rej; });
+  let reportTimer = null;
+  const stopReporter = () => { if (reportTimer) { clearTimer(reportTimer); reportTimer = null; } };
+  const resolveOnce = (v) => { if (!settled) { settled = true; stopReporter(); resolve(v); } };
+  const fail = (e) => { if (!settled) { settled = true; stopReporter(); reject(e); } };
+  const run = serializer(fail);
+
+  let manifest = null;
+  let router = null;
+  let jobDoneSeen = false; // noted for observability; completion is driven by router.isComplete(), not this flag
+  // Reassembly buffer for a chunked OFFER (offer_begin -> offer_entries* -> offer_end).
+  let offerAccum = null;
+
+  function findEntry(fileId) { return manifest.entries.find((e) => e.fileId === fileId); }
+  function pathOf(fileId) { const e = findEntry(fileId); return e ? e.path : undefined; }
+
+  // Sends the receiver's current per-file coverage so the paired
+  // createMultiFlowSender's reconciliation loop can see what's still missing.
+  // NOTE (Plan 2 design bound, see spec "Required Plan 2 design inputs"): this
+  // assumes a single file's `ivals` always fits in ONE range_report ft-ctrl
+  // frame. A very large/fragmented file's range list could in principle exceed
+  // the ~256KB data-channel message limit (the same failure mode the OFFER hit
+  // for many-file manifests) — paginated range_report framing is a Plan 3
+  // concern and is deliberately NOT implemented here.
+  function sendReport() {
+    if (settled || !router) return;
+    ctrl.sendCtrl(rangeReportFrame({ jobId, files: router.rangesFor() }));
+  }
+
+  function tick() {
+    if (settled || !router) return;
+    sendReport();
+    persistRanges(router.rangesFor());
+    reportTimer = setTimer(tick, reportIntervalMs);
+    if (reportTimer && reportTimer.unref) reportTimer.unref();
+  }
+  function startReporter() {
+    reportTimer = setTimer(tick, reportIntervalMs);
+    if (reportTimer && reportTimer.unref) reportTimer.unref();
+  }
+
+  // Checked after every finalize (via onFileDone below) and after job_done —
+  // router.isComplete() means every manifest file is written+hashed+verified,
+  // which is real completion regardless of whether job_done has been SEEN yet
+  // (ft-ctrl frames are independently ordered from bulk delivery, and a fully
+  // resumed/short job can finish before job_done's frame is even processed).
+  function maybeComplete() {
+    if (settled || !router) return;
+    if (!router.isComplete()) return;
+    ctrl.sendCtrl(completeFrame({ jobId, ok: true }));
+    stopReporter();
+    onEvent({ type: 'completed' });
+    resolveOnce({ jobId, ok: true });
+  }
+
+  async function beginReceive(entries) {
+    if (settled) return;
+    const m = buildManifest(entries);
+    manifest = m;
+    ctrl.sendCtrl(promptingFrame({ jobId }));
+    const consented = await consent({ jobId, manifest: m });
+    if (settled) return;
+    if (!consented) {
+      ctrl.sendCtrl(rejectFrame({ jobId, reason: 'declined' }));
+      resolveOnce({ jobId, ok: false });
+      return;
+    }
+    router = createReceiveRouter({
+      manifest: m,
+      initialRanges: initialRangesFor(m),
+      openPart: (fileId) => openPart(pathOf(fileId)),
+      verifyAndFinalize: ({ fileId, expectedHash }) => verifyAndFinalize({ ...findEntry(fileId), expectedHash }),
+      onFileDone: ({ fileId, ok: fileOk }) => {
+        if (!fileOk) router.resetFile(fileId);
+        onEvent({ type: fileOk ? 'file-done' : 'file-failed', fileId });
+        maybeComplete();
+      },
+      onProgress: (p) => onEvent({ type: 'progress', ...p }),
+    });
+    for (const flow of flows) flow.onBulk((buf) => run(() => router.onBulkFrame(buf)));
+    if (settled) return;
+    ctrl.sendCtrl(acceptFrame({ jobId, resume: [], ranges: router.rangesFor() }));
+    sendReport();
+    startReporter();
+  }
+
+  ctrl.onCtrl((str) => run(async () => {
+    if (settled) return;
+    const f = parseCtrlFrame(str);
+    if (!f || f.jobId !== jobId) return;
+    if (f.t === 'offer') {
+      if (router || offerAccum) return;
+      await beginReceive(f.entries);
+      return;
+    }
+    if (f.t === 'offer_begin') {
+      if (router || offerAccum) return;
+      offerAccum = { entries: [] };
+      return;
+    }
+    if (f.t === 'offer_entries') {
+      if (offerAccum) for (const e of f.entries) offerAccum.entries.push(e);
+      return;
+    }
+    if (f.t === 'offer_end') {
+      if (!offerAccum) return;
+      const entries = offerAccum.entries; offerAccum = null;
+      await beginReceive(entries);
+      return;
+    }
+    if (f.t === 'file_end') {
+      if (!router) return;
+      await router.onFileHash(f.fileId, f.hash);
+      sendReport();
+      maybeComplete();
+      return;
+    }
+    if (f.t === 'job_done') {
+      jobDoneSeen = true;
+      sendReport();
+      maybeComplete();
+      return;
+    }
+  }));
+
+  return {
+    start() { return finished; },
+    // Mirrors createReceiver's abort: tell the sender to stop, then fail. The
+    // paired createMultiFlowSender already honors an inbound `cancel` frame.
+    abort(reason = 'aborted') {
+      if (settled) return;
+      try { ctrl.sendCtrl(cancelFrame(jobId)); } catch { /* best effort */ }
       onEvent({ type: 'canceled' });
       fail(new Error(reason));
     },
