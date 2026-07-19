@@ -58,3 +58,18 @@ test('completing a non-active job just drops it from the waiting list', () => {
   expect(q.complete('c')).toBe('a'); // active unchanged
   expect(q.list()).toEqual(['a', 'b']);
 });
+
+test('moveUp/moveDown reorder waiting jobs but never touch the active head', () => {
+  const q = createQueue();
+  ['a', 'b', 'c', 'd'].forEach((id) => q.add(id)); // a=active(0), b,c,d wait
+  expect(q.moveUp('a')).toBe(false);           // head can't move
+  expect(q.moveUp('b')).toBe(false);           // would land at index 0
+  expect(q.moveDown('a')).toBe(false);         // head pinned
+  expect(q.moveUp('c')).toBe(true);            // c swaps with b
+  expect(q.list()).toEqual(['a', 'c', 'b', 'd']);
+  expect(q.moveDown('c')).toBe(true);          // back down
+  expect(q.list()).toEqual(['a', 'b', 'c', 'd']);
+  expect(q.moveDown('d')).toBe(false);         // already last
+  expect(q.moveUp('zzz')).toBe(false);         // not found
+  expect(q.active()).toBe('a');                // head never changed
+});

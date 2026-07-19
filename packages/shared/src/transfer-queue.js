@@ -26,5 +26,17 @@ export function createQueue() {
     list() { return [...order]; },
     complete(jobId) { const i = order.indexOf(jobId); if (i >= 0) order.splice(i, 1); return order.length ? order[0] : null; },
     remove(jobId) { const i = order.indexOf(jobId); if (i >= 0) order.splice(i, 1); return order.length ? order[0] : null; },
+    moveUp(jobId) {
+      const i = order.indexOf(jobId);
+      if (i <= 1) return false; // -1 not found, 0 active head, 1 would land at index 0
+      [order[i - 1], order[i]] = [order[i], order[i - 1]];
+      return true;
+    },
+    moveDown(jobId) {
+      const i = order.indexOf(jobId);
+      if (i <= 0 || i >= order.length - 1) return false; // not found / active head / already last
+      [order[i], order[i + 1]] = [order[i + 1], order[i]];
+      return true;
+    },
   };
 }
