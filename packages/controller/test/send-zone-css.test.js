@@ -11,7 +11,7 @@ test('send-zone markup present', () => {
   expect(html).toMatch(/id="send-host-id"/); // ad-hoc ids preserved
 });
 test('send-zone + drag-over CSS present', () => {
-  expect(css).toMatch(/\.xfer-send\./);  // compound selectors (.xfer-send.xfer-drop-over, etc.) remain
+  expect(css).toMatch(/\.xfer-send\.xfer-drop-over\s*\{/);  // the drag-over highlight rule specifically
   expect(css).toMatch(/\.xfer-drop-over\s*\{/);
   expect(css).toMatch(/\.xfer-recip\s*\{/);
 });
