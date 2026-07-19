@@ -1734,6 +1734,93 @@ test('REGRESSION: pause() disarms the orphaned send\'s approval timer so a same-
   }
 });
 
+test('REGRESSION: cancel() clears activeAbort so a later pause() of the NEXT queued job cannot abort/auto-resume the canceled send', async () => {
+  // Task 5 added a shared `activeAbort` handle (set in runSend ~ where
+  // activeClose is set, consumed by pause()) but cancel() was never updated to
+  // clear/consume it (it clears activeClose but not activeAbort). Canceling an
+  // UNACCEPTED active send does not settle its sender -- only closing the
+  // channel does, and even that alone doesn't make sender.start() reject (see
+  // the neighboring pause()-disarms-the-timer regression test's doc) -- so
+  // activeAbort is left pointing at the CANCELED job's sender. If the next
+  // queued job is then paused while it's still connecting (before its OWN
+  // runSend reaches the `activeAbort =` line), pause() calls the STALE abort
+  // -- aborting the WRONG (already-canceled) job's sender with reason
+  // 'paused'. That job's runSend catch is unguarded (`pausing` only ever has
+  // the NEW job's id, never the old one), so it classifies the rejection as
+  // 'interrupted' and pokes the resume watcher -- silently auto-resuming a
+  // fleet/contact transfer the user explicitly canceled.
+  const srcDir = tmp();
+  const srcFileA = join(srcDir, 'a.bin');
+  writeFileSync(srcFileA, Buffer.alloc(64, 1));
+  const { entries: entriesA, sources: sourcesA } = await walkSource([{ path: srcFileA }]);
+  const manifestA = buildManifestReal(entriesA);
+  const { manifest: manifestB, sources: sourcesB } = await oneFileSource();
+
+  const sendStore = createJobsStore({ dir: tmp() });
+  const events = [];
+  let openedA = false;
+  let releaseB = null;
+  // B's channel deliberately hangs here until the test explicitly releases
+  // it -- this guarantees B's own runSend CANNOT reach `activeAbort =
+  // abortFn` before pause(B) runs below, so the interleaving is deterministic
+  // rather than relying on scheduling luck.
+  const openBGate = new Promise((res) => { releaseB = res; });
+  const opens = []; // every openChannel({role:'initiate', ...}) call's target id, in order
+
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true,
+    onEvent: (ev) => events.push(ev),
+    getFleet: async () => [{ deviceId: 'dev-A', signalingId: 'sig-A', online: true }],
+    openChannel: async ({ target }) => {
+      opens.push(target.id);
+      if (target.id === 'sig-A') {
+        openedA = true;
+        return { channel: deadChannel(), close: async () => {} }; // never accepted
+      }
+      await openBGate; // sig-B: held open deliberately
+      return { channel: deadChannel(), close: async () => {} };
+    },
+  });
+
+  const jobA = newJobId();
+  const jobB = newJobId();
+  const pA = svc.startSend({ jobId: jobA, manifest: manifestA, sources: sourcesA, target: { id: 'sig-A', deviceId: 'dev-A', linked: true }, sourceRoots: [srcFileA] });
+  const pB = svc.startSend({ jobId: jobB, manifest: manifestB, sources: sourcesB, target: { id: 'sig-B' } });
+  await until(() => openedA); // jobA is now the active head, unaccepted
+
+  await svc.cancel(jobA); // A canceled -- WITHOUT the fix, activeAbort is left stale
+
+  // B is now the active head; its runSend has been invoked (advanceSendQueue,
+  // synchronously, inside cancel() above) but is still blocked in openChannel
+  // (the gate), so it has not yet set its OWN activeAbort. Pausing it now is
+  // exactly the failing interleaving described in the brief.
+  const pauseResultB = await svc.pause(jobB);
+  expect(pauseResultB.ok).toBe(true);
+
+  // Let A's runSend catch (if the stale abort fired it) finish persisting.
+  await new Promise((r) => setTimeout(r, 50));
+
+  const recA = await sendStore.load(jobA);
+  expect(recA.jobState).toBe('canceled'); // must NOT have flipped to 'interrupted'/'error'
+  expect(events.some((e) => e.jobId === jobA && e.type === 'interrupted')).toBe(false);
+
+  // Force an aggressive resume sweep -- proves the resume watcher genuinely
+  // never picked A up (not merely "hasn't gotten to it yet" via notify()'s
+  // debounced 20s poll timer).
+  svc.startResumeWatcher();
+  await svc.resumeSweepNow();
+  svc.stopResumeWatcher();
+  expect(events.some((e) => e.jobId === jobA && e.type === 'reconnecting')).toBe(false);
+  expect(opens.filter((id) => id === 'sig-A').length).toBe(1); // no re-dial attempt for A
+
+  // Cleanup: release B's gate so its orphaned runSend can settle, and confirm
+  // B itself ended up correctly 'paused' -- not corrupted by this interleaving.
+  releaseB();
+  await pB;
+  const recB = await sendStore.load(jobB);
+  expect(recB.jobState).toBe('paused');
+});
+
 test('receiver declining consent resolves ok:false with no file written, and settles the sender without hanging', async () => {
   const dest = tmp();
   const recvStore = createJobsStore({ dir: tmp() });

@@ -535,6 +535,18 @@ export function createTransferService({ store, transferDir, consent, openChannel
     if (isActive) {
       sendRunning = false;
       if (activeClose) { const c = activeClose; activeClose = null; try { await c(); } catch { /* ignore */ } }
+      // Clear the stale handle AND promptly settle an unaccepted canceled
+      // sender with reason 'canceled' (terminal -> recoverable=false ->
+      // classified 'canceled', no emit, no watcher notify) -- consistent with
+      // this cancel's own 'canceled' record. Without this, a later pause() of
+      // the NEXT queued job would find activeAbort still pointing at THIS
+      // job's sender and call it with reason 'paused' (not terminal), which
+      // gets misclassified 'interrupted' and auto-resumes a job the user just
+      // canceled (see the REGRESSION test above). It also fixes a latent
+      // pre-existing bug where a canceled-while-unaccepted send would
+      // otherwise flip to 'error' once its own 30s approval timer eventually
+      // fires.
+      if (activeAbort) { const a = activeAbort; activeAbort = null; try { a('canceled'); } catch { /* ignore */ } }
     }
 
     try {
