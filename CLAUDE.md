@@ -17,6 +17,20 @@ WebRTC (DTLS-SRTP), with a self-hosted WSS signaling server and a coturn TURN re
 > per-app guidance below that says "host does X / controller does Y" now describes **one app doing
 > both** — read it as capability, not separate binaries.
 
+## Ways of working (maintainer ⇄ assistant) — read `docs/WORKING-AGREEMENT.md`
+Adopted 2026-07-19 after the transfer reliability deep-dive, to stop piling features on an unstable
+base. **Roles:** the maintainer owns the WHAT/WHY (vision, priorities, go/no-go at gates); the
+assistant acts as **engineering manager** — owns the HOW/WHEN (sequencing, method), brings decisions
+with a recommendation, and says "not yet — here's where it goes" when work is premature, *especially*
+under time pressure. **Non-negotiables:** (R1) phases with a written spec + a "done" gate, no
+half-finished layers; (R2) stability before features — nothing new on a base that isn't one-path,
+loud-on-failure, and tested; (R3) brainstorm→spec→plan→build; (R4) tests pin BEHAVIOR not
+source-string greps, transfer-critical paths proven on a REAL wire, mutation-check every guard;
+(R5) fail loud — never swallow errors into a hang or a silent vanish; (R6) evidence before "done";
+(R7) delete dead code (tested dead code is worse), one implementation per capability; (R8) one
+source of truth for done/progress/resume; (R9) honest status, deferrals written down. The full text
++ current transfer roadmap live in `docs/WORKING-AGREEMENT.md`.
+
 ## Layout (npm workspaces)
 - `packages/shared` — runtime-agnostic logic, unit-tested in isolation: protocol, input/control
   event validation (security-critical), password, turn, host-id, credentials, signaling-url.
