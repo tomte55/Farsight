@@ -5,7 +5,7 @@ import { expect, test, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createTransferService, resolveFlowCount, isTerminalReason } from '../src/transfer-service.js';
+import { createTransferService, resolveFlowCount, isAuthoritativeFlowError } from '../src/transfer-service.js';
 import { createReceiver, createSender } from '@farsight/shared/transfer-orchestrator';
 import { walkSource } from '@farsight/shared/transfer-io';
 import { buildManifest as buildManifestReal } from '@farsight/shared/transfer-manifest';
@@ -1055,25 +1055,68 @@ test('a rendezvous error from the channel (e.g. bad_password) fails the send wit
   expect(events.some((e) => e.type === 'error' && e.reason === 'bad_password')).toBe(true);
 });
 
-// Common-mode-resilience Task 5: transfer-channel-assembly.js's slot-0 handler
-// reuses THIS predicate (not its own duplicated reason list) to decide which
-// `error:*` rendezvous states are authoritative enough to fail a multi-flow
-// send fast instead of letting the supervisor re-dial + swap ctrl. Pin the
-// exact classification both directions so a future edit to either list can't
-// silently drift them apart.
-test('isTerminalReason: auth_timeout and transfer_timeout are TRANSIENT (not terminal)', () => {
-  expect(isTerminalReason('auth_timeout')).toBe(false);
-  expect(isTerminalReason('transfer_timeout')).toBe(false);
+// Common-mode-resilience Task 5 (and its critical-regression follow-up):
+// transfer-channel-assembly.js's slot-0 handler reuses THIS predicate (not its
+// own duplicated reason list) to decide which `error:*` rendezvous states are
+// authoritative enough to fail a multi-flow send fast instead of letting the
+// supervisor re-dial + swap ctrl. Pin the exact classification both directions
+// so a future edit to either list can't silently drift them apart.
+//
+// isAuthoritativeFlowError is DELIBERATELY a different predicate from
+// isTerminalReason (below) — an earlier revision reused isTerminalReason
+// itself for the ctrl-flow gate and had to add `host_offline` to it to make
+// the gate escalate correctly, which silently broke fleet/contact
+// auto-resume (see the regression test further down): a briefly-offline
+// fleet host was persisted `error` (terminal) instead of `interrupted`
+// (resumable). The two questions disagree on `host_offline` on purpose: a
+// single ctrl FLOW re-dialing the same target can't reach an offline host
+// (gate: escalate), but the WHOLE TRANSFER should still auto-resume once the
+// host returns (resumability: not terminal).
+test('isAuthoritativeFlowError: auth_timeout and transfer_timeout are TRANSIENT (gate does not escalate)', () => {
+  expect(isAuthoritativeFlowError('auth_timeout')).toBe(false);
+  expect(isAuthoritativeFlowError('transfer_timeout')).toBe(false);
 });
 
-test('isTerminalReason: bad_password, host_offline, unknown_device, declined, nospace, bad_manifest, proto are AUTHORITATIVE (terminal)', () => {
-  expect(isTerminalReason('bad_password')).toBe(true);
-  expect(isTerminalReason('host_offline')).toBe(true);
-  expect(isTerminalReason('unknown_device')).toBe(true);
-  expect(isTerminalReason('declined')).toBe(true);
-  expect(isTerminalReason('nospace')).toBe(true);
-  expect(isTerminalReason('bad_manifest')).toBe(true);
-  expect(isTerminalReason('proto')).toBe(true);
+test('isAuthoritativeFlowError: bad_password, host_offline, unknown_device, declined, nospace, bad_manifest, proto ARE authoritative (gate escalates)', () => {
+  expect(isAuthoritativeFlowError('bad_password')).toBe(true);
+  expect(isAuthoritativeFlowError('host_offline')).toBe(true);
+  expect(isAuthoritativeFlowError('unknown_device')).toBe(true);
+  expect(isAuthoritativeFlowError('declined')).toBe(true);
+  expect(isAuthoritativeFlowError('nospace')).toBe(true);
+  expect(isAuthoritativeFlowError('bad_manifest')).toBe(true);
+  expect(isAuthoritativeFlowError('proto')).toBe(true);
+});
+
+// CRITICAL REGRESSION test (review caught this before it shipped): a fleet
+// send whose rendezvous fails with `host_offline` must persist a resumable
+// `interrupted`, NOT a permanent `error` — the resume watcher's
+// listInterrupted() only ever picks up 'interrupted' records, so misclassing
+// this as terminal would make a briefly-offline fleet host permanently
+// unreachable via auto-resume. This exercises the REAL recoverable/
+// isTerminalReason decision at transfer-service.js (not the exported
+// predicate directly), so it fails if isTerminalReason ever regains
+// `host_offline` (mutation-checked below).
+test('a fleet send failing with host_offline persists jobState:"interrupted" (resumable), not "error"', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const sendStore = createJobsStore({ dir: tmp() });
+  let fireError = null;
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({
+      channel: deadChannel(), close: async () => {},
+      onRendezvousError: (cb) => { fireError = cb; },
+    }),
+    rendezvousTimeoutMs: 60000, // long — the error path must fire well before this
+  });
+  const p = svc.startSend({ jobId: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4', manifest, sources, target: { id: 'sig-1', deviceId: 'dev-1', linked: true } });
+  await new Promise((r) => setTimeout(r, 20)); // let openChannel register the callback
+  expect(typeof fireError).toBe('function');
+  fireError('host_offline'); // target device is momentarily offline (server.js)
+  const res = await p;
+  expect(res.ok).toBe(false);
+  const rec = (await sendStore.list()).find((j) => j.jobId === 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4');
+  expect(rec.jobState).toBe('interrupted');
+  expect(rec.tier).toBe('fleet');
 });
 
 test('a prompting frame cancels the approval timeout — a slow human decision is not "no_response"', async () => {

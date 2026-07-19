@@ -50,26 +50,42 @@ function errMessage(err) {
   return (err && err.message) ? err.message : String(err);
 }
 
-// A send failure is TERMINAL/AUTHORITATIVE (won't fix itself on retry) or
-// TRANSIENT/recoverable (a transport/availability problem that a re-dial or a
-// later retry can fix). Recoverable own-fleet failures become a resumable
-// `interrupted`; everything else is `error`.
+// A send failure is TERMINAL (won't fix itself on retry) or recoverable (a
+// transport/availability problem). Recoverable own-fleet failures become a
+// resumable `interrupted`; everything else is `error`.
 //
-// Exported so packages/controller/src/transfer-channel-assembly.js's slot-0
-// handler can reuse this SAME predicate (common-mode-resilience Task 5) to
-// decide which `error:*` rendezvous states are authoritative enough to fail
-// the whole transfer fast via onRendezvousError. TRANSIENT reasons — notably
-// `auth_timeout` (a connection-auth handshake timeout during a connection
-// storm — see connection-auth.js) and `transfer_timeout` — must NOT match
-// here: they are exactly the recoverable case the supervisor's slot-0 re-dial
-// + ctrl-swap (Task 6) is built to handle, and did not appear anywhere in the
-// pre-Task-5 regex (relying on that is fragile — asserted directly by
-// transfer-service.test.js). `bad_password`/`host_offline`/`unknown_device`
-// are signaling-level rendezvous rejections (see server.js / connection-
-// auth.js) that retrying will never fix, so they're included alongside the
-// pre-existing local-exception terms below.
-export function isTerminalReason(reason) {
-  return /rejected:|receiver_incomplete|canceled|aborted|bad_manifest|nospace|proto|declined|bad_password|host_offline|unknown_device/.test(String(reason || ''));
+// NOTE this is the RESUMABILITY predicate, not a general "is this reason bad"
+// classifier — see `isAuthoritativeFlowError` below for the DIFFERENT
+// question a ctrl-flow gate needs answered. In particular `host_offline`
+// deliberately does NOT match here: a fleet/contact target that's merely
+// offline right now is exactly what auto-resume (the resume watcher) exists
+// to retry once the peer comes back online, so it must persist `interrupted`,
+// not `error`. (Task-5 common-mode-resilience review: an earlier revision of
+// this file added `host_offline` here to also serve the ctrl-flow gate, which
+// broke fleet auto-resume for a briefly-offline host — see
+// isAuthoritativeFlowError's doc for the correct split.)
+function isTerminalReason(reason) {
+  return /rejected:|receiver_incomplete|canceled|aborted|bad_manifest|nospace|proto|declined/.test(String(reason || ''));
+}
+
+// A DIFFERENT question from isTerminalReason above: "should a single ctrl
+// FLOW stop being re-dialed and escalate to whole-transfer handling?" (used by
+// packages/controller/src/transfer-channel-assembly.js's slot-0 handler,
+// common-mode-resilience Task 5) rather than "is the WHOLE TRANSFER
+// permanently dead vs. resumable-later?" (isTerminalReason, which drives the
+// fleet/contact auto-resume decision above). The two disagree on
+// `host_offline`: re-dialing the SAME flow can't reach an offline host, so the
+// gate should escalate (YES, authoritative-for-the-flow) — but the transfer
+// overall is very much resumable once the host comes back, so isTerminalReason
+// must stay false for it (see its doc above). `bad_password`/`unknown_device`
+// are included here too even though they're near-unreachable for fleet/
+// contact (device-key auth, not passwords) — they're still correctly
+// "re-dial won't help" for the ad-hoc/password-tier ctrl-flow gate case.
+// TRANSIENT reasons (`auth_timeout`, `transfer_timeout`, plain connection
+// failures, `no_response`) are NOT in this set — the supervisor's slot-0
+// re-dial + ctrl-swap (Task 6) is the correct recovery for those.
+export function isAuthoritativeFlowError(reason) {
+  return /bad_password|host_offline|declined|nospace|bad_manifest|unknown_device|proto/.test(String(reason || ''));
 }
 
 // Multi-flow selection (Plan 3 Task 3): flowCount > 1 drives the Plan-2

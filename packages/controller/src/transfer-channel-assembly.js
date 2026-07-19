@@ -14,7 +14,7 @@
 // RECEIVE uses it directly (it already has onBulk).
 
 import { createFlowSupervisor } from '@farsight/shared/transfer-flow-supervisor';
-import { isTerminalReason } from '@farsight/shared/transfer-service';
+import { isAuthoritativeFlowError } from '@farsight/shared/transfer-service';
 
 /**
  * SEND: build a flow SUPERVISOR that keeps `flowCount` slots filled — a
@@ -43,13 +43,20 @@ import { isTerminalReason } from '@farsight/shared/transfer-service';
  *       silently re-dialing 8× to exhaustion — but ONLY for AUTHORITATIVE/
  *       permanent reasons (bad_password/host_offline/declined/nospace/
  *       bad_manifest/unknown_device/proto), gated via transfer-service.js's
- *       isTerminalReason (imported, not duplicated, so the authoritative/
- *       transient split lives in one place). A TRANSIENT reason
- *       (auth_timeout/transfer_timeout/a plain connection failure) is NOT
- *       forwarded — those are exactly what the supervisor's slot-0 re-dial +
- *       ctrl-swap (Task 6, onCtrlReplaced above) is built to recover from;
- *       forwarding them anyway was one trigger of the whole-transfer resume
- *       loop on a flaky/DR link (common-mode-resilience Task 5). Since the
+ *       isAuthoritativeFlowError (imported, not duplicated, so the
+ *       authoritative/transient split for a CTRL FLOW lives in one place). A
+ *       TRANSIENT reason (auth_timeout/transfer_timeout/a plain connection
+ *       failure) is NOT forwarded — those are exactly what the supervisor's
+ *       slot-0 re-dial + ctrl-swap (Task 6, onCtrlReplaced above) is built to
+ *       recover from; forwarding them anyway was one trigger of the
+ *       whole-transfer resume loop on a flaky/DR link (common-mode-resilience
+ *       Task 5). NOTE: isAuthoritativeFlowError is a DIFFERENT predicate from
+ *       transfer-service.js's isTerminalReason (which decides fleet/contact
+ *       auto-RESUMABILITY) — they deliberately disagree on host_offline (a
+ *       flow can't be re-dialed to reach an offline host, so the GATE
+ *       escalates; but the whole TRANSFER should still auto-resume once the
+ *       host returns, so it must NOT be terminal there). Do not conflate them
+ *       — see both functions' doc comments in transfer-service.js. Since the
  *       supervisor claims onSessionState, we MULTIPLEX slot 0's worker: our
  *       wrapper fans every state out to BOTH our error-forwarder and the
  *       supervisor's handler.
@@ -92,11 +99,12 @@ export function assembleSendFlows({
       worker.onSessionState((state) => {
         if (typeof state === 'string' && state.startsWith('error:') && rendezvousErrorCb) {
           const reason = state.slice('error:'.length);
-          // Task 5: only AUTHORITATIVE/permanent reasons fail the whole
-          // transfer fast. TRANSIENT reasons (auth_timeout, transfer_timeout,
-          // …) are left unforwarded — the supervisor's own re-dial + ctrl-swap
-          // (below/Task 6) is the correct recovery for those.
-          if (isTerminalReason(reason)) rendezvousErrorCb(reason);
+          // Task 5: only AUTHORITATIVE/permanent (flow-level) reasons fail the
+          // whole transfer fast. TRANSIENT reasons (auth_timeout,
+          // transfer_timeout, …) are left unforwarded — the supervisor's own
+          // re-dial + ctrl-swap (below/Task 6) is the correct recovery for
+          // those. Deliberately NOT isTerminalReason — see header doc above.
+          if (isAuthoritativeFlowError(reason)) rendezvousErrorCb(reason);
         }
         if (supervisorCb) supervisorCb(state);
       });
