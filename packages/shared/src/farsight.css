@@ -362,6 +362,16 @@ body.in-session .cog, body.in-session .menu { display: none; }
 .xfer-lane.dead { background: var(--line); }
 .xfer-deck-flows .meta { font-size: 11px; color: var(--sub); }
 .xfer-deck-flows .meta b { font-family: var(--mono); color: var(--ink); }
+/* Deck Pause/Cancel — a right-aligned row of small square icon buttons, shared
+   with the flows line so it sits next to "N/M flows" per the mockup. Always
+   present (even for a single-flow send, where the lanes/meta either side are
+   CSSOM-hidden) so Pause/Cancel are never structurally absent. */
+.xfer-deck-ctl { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.ic-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel2); color: var(--sub); font-size: 12px; line-height: 1; cursor: pointer; }
+.ic-btn:hover { background: #1b1e27; color: var(--ink); }
+.ic-btn:disabled { opacity: .4; cursor: default; }
+.ic-btn.pause { color: var(--go-dim); border-color: rgba(44, 138, 114, .35); }
+.ic-btn.pause:hover { background: var(--go-bg); color: #a9f4ea; }
 
 /* Queue column — up next / receiving / history */
 .xfer-queue { display: flex; flex-direction: column; gap: 8px; }

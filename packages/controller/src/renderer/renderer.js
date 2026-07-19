@@ -1454,96 +1454,207 @@ function activeDeckJob() {
   return sends.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
 }
 
-function renderDeck(job) {
-  if (!job) { xferDeckEl.hidden = true; xferDeckEl.replaceChildren(); return; }
-  const m = deckModel(job, { now: Date.now(), peakRate: peakRateFor(job.jobId, job.rate) });
-  xferDeckEl.hidden = false;
+// One grid cell: a <span> (main value) + <small> (the " / total" suffix, if
+// any) so a same-job patch can update the text without touching structure —
+// mirrors the `.v small` CSS selector unchanged from the pre-refactor markup.
+function buildDeckCell(k) {
+  const c = document.createElement('div'); c.className = 'xfer-cell';
+  const kk = document.createElement('div'); kk.className = 'k'; kk.textContent = k;
+  const vv = document.createElement('div'); vv.className = 'v';
+  const main = document.createElement('span');
+  const small = document.createElement('small');
+  vv.append(main, small);
+  c.append(kk, vv);
+  return { el: c, main, small };
+}
+function patchDeckCell(refs, value) {
+  const v = value || '—';
+  if (v.includes(' / ')) {
+    const [a, b] = v.split(' / ');
+    refs.main.textContent = a;
+    refs.small.textContent = ` / ${b}`;
+  } else {
+    refs.main.textContent = v;
+    refs.small.textContent = '';
+  }
+}
 
-  const rate = m.rateText ? m.rateText.replace(/\s*[A-Za-z/]+$/, '') : '—';
-  const unit = m.rateText ? (m.rateText.match(/[A-Za-z/]+$/) || [''])[0] : '';
+// Pause/Cancel — built ONCE per job (never recreated on a progress tick, see
+// deckEls below). Both look up the job by jobId at CLICK time (transferJobs.get),
+// same as buildActionButton's cancel branch — a stale captured job object could
+// otherwise survive past a renderTransfers() that replaced the map entry.
+function buildDeckCtl(jobId) {
+  const ctl = document.createElement('div'); ctl.className = 'xfer-deck-ctl';
+  const pauseBtn = document.createElement('button');
+  pauseBtn.className = 'ic-btn pause';
+  pauseBtn.textContent = '❚❚';
+  pauseBtn.onclick = async () => {
+    // Guard against a double-fire before the 'paused' event flips job.state;
+    // the next patch re-enables it (or not) from the live state.
+    pauseBtn.disabled = true;
+    try { await window.farsightIpc.transferPause(jobId); } catch { /* best effort */ }
+    renderTransfers();
+  };
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'ic-btn';
+  cancelBtn.textContent = '✕';
+  cancelBtn.onclick = async () => {
+    cancelBtn.disabled = true;
+    try { await window.farsightIpc.transferCancel(jobId); } catch { /* best effort */ }
+    const cur = transferJobs.get(jobId);
+    if (cur) cur.state = 'canceled';
+    renderTransfers();
+  };
+  ctl.append(pauseBtn, cancelBtn);
+  return { ctl, pauseBtn, cancelBtn };
+}
 
-  // Build fresh each structural render; a progress tick reuses this via renderTransfers.
+// jobId -> live element refs for the deck currently on screen, valid only
+// while BOTH the jobId AND the flow-lane COUNT match the previous render (the
+// lane bars are the one piece of structure whose cardinality can change across
+// ticks of the SAME job). `null` when the deck is hidden (no active send).
+// onTransferEvent fires renderTransfers() per progress tick (~4/s while a send
+// is active) — same shape of problem the statusbarSegs/railButtons comments
+// above document: a plain rebuild-every-time (replaceChildren()) recreates the
+// Pause/Cancel buttons on every tick, dropping focus AND swallowing an
+// in-flight click (the old button is gone by the time the click handler would
+// fire). So a same-job, same-lane-count tick instead PATCHES the cached refs
+// in place; only a genuine structural change (job start/switch, or the
+// flow-lane count changing) tears down and rebuilds via replaceChildren().
+let deckEls = null;
+
+function buildDeck(job, m) {
   const frag = document.createElement('div');
   frag.className = 'xfer-deck-inner';
 
   const top = document.createElement('div'); top.className = 'xfer-deck-top';
   const topL = document.createElement('div');
   const name = document.createElement('div'); name.className = 'xfer-deck-name';
-  const dir = document.createElement('span'); dir.className = 'dir'; dir.textContent = m.arrow;
-  name.append(dir, document.createTextNode(`${transferLabel(job)} · ${fmtCount(job.manifest)}`));
+  const dir = document.createElement('span'); dir.className = 'dir';
+  const nameText = document.createElement('span');
+  name.append(dir, nameText);
   topL.append(name);
   const pill = document.createElement('span'); pill.className = 'xfer-pill';
   const pd = document.createElement('span'); pd.className = 'pd';
-  pill.append(pd, document.createTextNode(m.statePill));
+  const pillText = document.createElement('span');
+  pill.append(pd, pillText);
   top.append(topL, pill);
 
   const rateRow = document.createElement('div'); rateRow.className = 'xfer-rate';
-  const big = document.createElement('span'); big.className = 'xfer-rate-big'; big.textContent = rate;
-  const un = document.createElement('span'); un.className = 'xfer-rate-un'; un.textContent = unit;
-  rateRow.append(big, un);
-  if (m.peakText) {
-    const peak = document.createElement('span'); peak.className = 'xfer-rate-peak';
-    const pb = document.createElement('b'); pb.textContent = m.peakText;
-    peak.append(document.createTextNode('Peak'), pb);
-    rateRow.append(peak);
-  }
+  const rateBig = document.createElement('span'); rateBig.className = 'xfer-rate-big';
+  const rateUn = document.createElement('span'); rateUn.className = 'xfer-rate-un';
+  const peak = document.createElement('span'); peak.className = 'xfer-rate-peak';
+  const peakVal = document.createElement('b');
+  peak.append(document.createTextNode('Peak'), peakVal);
+  rateRow.append(rateBig, rateUn, peak);
 
   const bar = document.createElement('div'); bar.className = 'xfer-deck-bar';
   const barFill = document.createElement('div'); barFill.className = 'xfer-deck-bar-fill';
-  barFill.style.width = `${Math.round(m.fraction * 100)}%`;
   bar.append(barFill);
 
   const grid = document.createElement('div'); grid.className = 'xfer-grid';
-  const cell = (k, v, small) => {
-    const c = document.createElement('div'); c.className = 'xfer-cell';
-    const kk = document.createElement('div'); kk.className = 'k'; kk.textContent = k;
-    const vv = document.createElement('div'); vv.className = 'v';
-    if (small) { const [a, b] = v.split(' / '); vv.textContent = a; const s = document.createElement('small'); s.textContent = ` / ${b}`; vv.append(s); }
-    else vv.textContent = v || '—';
-    c.append(kk, vv); return c;
-  };
-  grid.append(
-    cell('Transferred', m.transferredText || '—', m.transferredText.includes(' / ')),
-    cell('Files', m.filesText || '—', m.filesText.includes(' / ')),
-    cell('Time left', m.etaText || '—'),
-    cell('Elapsed', m.elapsedText || '—'),
-  );
+  const cTransferred = buildDeckCell('Transferred');
+  const cFiles = buildDeckCell('Files');
+  const cEta = buildDeckCell('Time left');
+  const cElapsed = buildDeckCell('Elapsed');
+  grid.append(cTransferred.el, cFiles.el, cEta.el, cElapsed.el);
 
   // Live throughput waveform (network rate). SVG paths set via setAttribute('d', ...)
   // -- CSP-safe, no inline style. Empty until a couple of samples exist.
-  const samples = rateSamples.get(job.jobId) || [];
   const svgNS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(svgNS, 'svg');
   svg.setAttribute('class', 'xfer-wave');
   svg.setAttribute('viewBox', '0 0 600 64');
   svg.setAttribute('preserveAspectRatio', 'none');
-  const wp = waveformPath(samples, 600, 64, { pad: 3 });
   const areaP = document.createElementNS(svgNS, 'path');
   areaP.setAttribute('class', 'xfer-wave-area');
-  areaP.setAttribute('d', wp.area);
   const lineP = document.createElementNS(svgNS, 'path');
   lineP.setAttribute('class', 'xfer-wave-line');
-  lineP.setAttribute('d', wp.line);
   svg.append(areaP, lineP);
 
   frag.append(top, rateRow, svg, bar, grid);
 
-  if (m.lanes.length) {
-    const flows = document.createElement('div'); flows.className = 'xfer-deck-flows';
-    const lanes = document.createElement('div'); lanes.className = 'xfer-lanes';
-    for (const l of m.lanes) {
-      const bar2 = document.createElement('div');
-      bar2.className = l.state === 'dead' ? 'xfer-lane dead' : 'xfer-lane';
-      bar2.style.height = l.state === 'dead' ? '4px' : `${10 + Math.round(Math.abs(Math.sin((peakRates.get(job.jobId) || 1) + m.lanes.indexOf(l))) * 22)}px`;
-      lanes.append(bar2);
-    }
-    const meta = document.createElement('div'); meta.className = 'meta';
-    meta.textContent = m.flowText;
-    flows.append(lanes, meta);
-    frag.append(flows);
-  }
+  // Flow-lane equalizer + the Pause/Cancel ctl row. Always built (not just when
+  // multi-flow) so Pause/Cancel are always present; lanes/meta are hidden via
+  // CSSOM display when the job has no parallel flows (m.lanes.length === 0).
+  const flows = document.createElement('div'); flows.className = 'xfer-deck-flows';
+  const lanes = document.createElement('div'); lanes.className = 'xfer-lanes';
+  const laneEls = m.lanes.map(() => {
+    const bar2 = document.createElement('div'); bar2.className = 'xfer-lane';
+    lanes.append(bar2);
+    return bar2;
+  });
+  const meta = document.createElement('div'); meta.className = 'meta';
+  const { ctl, pauseBtn, cancelBtn } = buildDeckCtl(job.jobId);
+  flows.append(lanes, meta, ctl);
+  frag.append(flows);
 
   xferDeckEl.replaceChildren(frag);
+
+  deckEls = {
+    jobId: job.jobId,
+    laneCount: m.lanes.length,
+    dir, nameText, pillText,
+    rateBig, rateUn, peak, peakVal,
+    barFill,
+    cTransferred, cFiles, cEta, cElapsed,
+    areaP, lineP,
+    lanes, laneEls, meta,
+    pauseBtn, cancelBtn,
+  };
+}
+
+function patchDeck(job, m) {
+  const d = deckEls;
+  d.dir.textContent = m.arrow;
+  d.nameText.textContent = `${transferLabel(job)} · ${fmtCount(job.manifest)}`;
+  d.pillText.textContent = m.statePill;
+
+  const rate = m.rateText ? m.rateText.replace(/\s*[A-Za-z/]+$/, '') : '—';
+  const unit = m.rateText ? (m.rateText.match(/[A-Za-z/]+$/) || [''])[0] : '';
+  d.rateBig.textContent = rate;
+  d.rateUn.textContent = unit;
+  d.peak.style.display = m.peakText ? '' : 'none';
+  d.peakVal.textContent = m.peakText;
+
+  d.barFill.style.width = `${Math.round(m.fraction * 100)}%`;
+
+  patchDeckCell(d.cTransferred, m.transferredText || '—');
+  patchDeckCell(d.cFiles, m.filesText || '—');
+  patchDeckCell(d.cEta, m.etaText || '—');
+  patchDeckCell(d.cElapsed, m.elapsedText || '—');
+
+  const samples = rateSamples.get(job.jobId) || [];
+  const wp = waveformPath(samples, 600, 64, { pad: 3 });
+  d.areaP.setAttribute('d', wp.area);
+  d.lineP.setAttribute('d', wp.line);
+
+  d.lanes.style.display = m.lanes.length ? '' : 'none';
+  d.meta.style.display = m.flowText ? '' : 'none';
+  d.meta.textContent = m.flowText;
+  const peakRate = peakRates.get(job.jobId) || 1;
+  m.lanes.forEach((l, i) => {
+    const bar2 = d.laneEls[i];
+    bar2.classList.toggle('dead', l.state === 'dead');
+    bar2.style.height = l.state === 'dead' ? '4px' : `${10 + Math.round(Math.abs(Math.sin(peakRate + i)) * 22)}px`;
+  });
+
+  // Can only pause an actively-transferring send (not awaiting-approval /
+  // reconnecting / finishing / verifying).
+  d.pauseBtn.disabled = job.state !== 'active';
+}
+
+function renderDeck(job) {
+  if (!job) { xferDeckEl.hidden = true; xferDeckEl.replaceChildren(); deckEls = null; return; }
+  const m = deckModel(job, { now: Date.now(), peakRate: peakRateFor(job.jobId, job.rate) });
+  xferDeckEl.hidden = false;
+
+  if (deckEls && deckEls.jobId === job.jobId && deckEls.laneCount === m.lanes.length) {
+    patchDeck(job, m);
+  } else {
+    buildDeck(job, m);
+    patchDeck(job, m);
+  }
 }
 
 const xferQueueEl = document.getElementById('xfer-queue');
