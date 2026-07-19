@@ -24,3 +24,15 @@ export function generateHostId() {
 export function isValidHostId(s) {
   return typeof s === 'string' && /^[1-9]\d{8}$/.test(s);
 }
+
+// A transfer sessionId is a BEARER capability — ATTACH grants the session to
+// whoever presents the id, with no targetId check — so unlike a host id (guarded
+// by password + lockout) it must be unguessable on its own. 16 random bytes =
+// 128 bits, hex-encoded (32 chars). Web Crypto so this stays runtime-agnostic.
+export function generateSessionId() {
+  const buf = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(buf);
+  let hex = '';
+  for (let i = 0; i < buf.length; i++) hex += buf[i].toString(16).padStart(2, '0');
+  return hex;
+}

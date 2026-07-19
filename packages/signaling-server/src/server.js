@@ -2,7 +2,7 @@
 import { WebSocketServer } from 'ws';
 import { pathToFileURL } from 'node:url';
 import { MSG, parseMessage, buildMessage } from '@farsight/shared/protocol';
-import { generateHostId } from '@farsight/shared/host-id';
+import { generateHostId, generateSessionId } from '@farsight/shared/host-id';
 import { isJobId } from '@farsight/shared/transfer-protocol';
 import { constantTimeEqual } from '@farsight/shared/password';
 import { makeTurnCredential } from '@farsight/shared/turn';
@@ -162,8 +162,11 @@ export function createSignalingServer({ port, config } = {}) {
           // controlled. Auth (password/linked + lockouts) has already passed above.
           if (msg.kind === 'transfer') {
             limiter.reset(key);
+            // A 128-bit CSPRNG token, NOT a 9-digit host id: this sessionId is a
+            // bearer capability (ATTACH grants the session to whoever presents it,
+            // with no targetId check), so it must be unguessable on its own.
             let sessionId;
-            do { sessionId = generateHostId(); } while (sessions.has(sessionId));
+            do { sessionId = generateSessionId(); } while (sessions.has(sessionId));
             const sess = { a: socket, b: null, targetId: msg.targetId, timer: null, flowIndex: undefined };
             sessions.set(sessionId, sess);
             socket.farsight.transferSessionId = sessionId;

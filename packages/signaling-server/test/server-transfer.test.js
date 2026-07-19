@@ -21,8 +21,9 @@ test('CONNECT kind:transfer notifies the target with a sessionId', async () => {
 
   const req = await hostRead();
   expect(req.type).toBe(MSG.TRANSFER_REQUEST);
-  expect(typeof req.sessionId).toBe('string');
-  expect(req.sessionId.length).toBeGreaterThan(0);
+  // The sessionId is an unguessable bearer capability (ATTACH does no targetId
+  // check), so it must be a 128-bit token, NOT the ~30-bit 9-digit host id.
+  expect(req.sessionId).toMatch(/^[0-9a-f]{32}$/);
 
   host.close(); sender.close();
 });
