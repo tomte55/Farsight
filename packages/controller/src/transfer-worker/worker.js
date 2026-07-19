@@ -18,6 +18,7 @@ import { MSG } from '@farsight/shared/protocol';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
 import { parseDtlsFingerprint } from '@farsight/shared/connect-transcript';
 import { createTransferAuthGate } from '@farsight/shared/transfer-auth-gate';
+import { computeSendWindow, selectedPairRttSeconds } from '@farsight/shared/transfer-window';
 
 let pc = null;
 let signal = null;
@@ -67,6 +68,28 @@ function logStatus(extra) {
   } catch { /* guarded */ }
 }
 setInterval(() => logStatus({ tick: true }), 1000);
+
+// ── Adaptive ft-bulk send window ───────────────────────────────────────────────
+// The window backing the credit backpressure (bufferedAmountLowThreshold) IS the
+// per-flow throughput ceiling: at most that many bytes ride in flight, so
+// throughput <= window / RTT. Size it to the bandwidth-delay product at the
+// MEASURED selected-pair RTT (@farsight/shared/transfer-window), clamped to a safe
+// band. Sampled off getStats on an interval; before the first sample the window is
+// computeSendWindow(null) == the mid-band default. The credit check in onSendBulk
+// reads bufferedAmountLowThreshold live, so updating it here is all that's needed.
+// Like the heartbeat above, the interval is torn down when main destroys the
+// worker window — no explicit clear.
+let lastRttSeconds = null;
+async function adaptSendWindow() {
+  if (!pc || !bulkChannel || bulkChannel.readyState !== 'open') return;
+  try {
+    const report = await pc.getStats();
+    const rtt = selectedPairRttSeconds([...report.values()]);
+    if (rtt != null) lastRttSeconds = rtt;
+    bulkChannel.bufferedAmountLowThreshold = computeSendWindow(lastRttSeconds);
+  } catch { /* guarded */ }
+}
+setInterval(adaptSendWindow, 2000);
 
 function reportState(state) {
   logStatus({ event: `conn:${state}` });
@@ -166,13 +189,10 @@ function wireDataChannel(ch) {
   }
   if (ch.label === 'ft-bulk') {
     try { ch.binaryType = 'arraybuffer'; } catch { /* guarded */ }
-    // The send window backing the credit signal below: the credit backpressure
-    // keeps at most this many bytes in flight per flow, so throughput <= window /
-    // RTT. The old 256 KB capped a single flow at ~1.8 MB/s over a 210ms
-    // NL<->South-America RTT regardless of link speed. 4 MiB lifts that ceiling to
-    // ~19 MB/s at 210ms. Kept <=8 MiB: ft-ctrl shares this SCTP association, so a
-    // deeper bulk backlog would delay cancel/progress frames.
-    try { ch.bufferedAmountLowThreshold = 4 * 1024 * 1024; } catch { /* guarded */ }
+    // Seed the send window at the mid-band default; adaptSendWindow() re-sizes it
+    // to the bandwidth-delay product once the selected-pair RTT is measured. See
+    // the adaptive block above and @farsight/shared/transfer-window.
+    try { ch.bufferedAmountLowThreshold = computeSendWindow(lastRttSeconds); } catch { /* guarded */ }
     bulkChannel = ch;
     ch.addEventListener('message', (m) => {
       if (!(m.data instanceof ArrayBuffer)) return;

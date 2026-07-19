@@ -147,17 +147,20 @@ describe('transfer-worker/worker.js bridges IPC <-> the ft-ctrl/ft-bulk/auth dat
   // The ft-bulk send window (bufferedAmountLowThreshold) IS the throughput
   // ceiling: the credit backpressure keeps at most this many bytes in flight per
   // flow, so throughput <= window / RTT. A 256 KB window caps a single flow at
-  // ~1.8 MB/s over a 210ms NL<->South-America RTT regardless of link speed. This
-  // guards the CLASS of regression, not a literal: the window must stay a
-  // BDP-sized 4-8 MiB (>=19 MB/s at 210ms), never drop back to a ~256 KB value.
-  // Kept <=8 MiB because ft-ctrl shares the SCTP association — a deeper bulk
-  // backlog delays cancel/progress frames.
-  test('sizes the ft-bulk send window to the bandwidth-delay product (4-8 MiB), not the old 256 KB cap', () => {
-    const m = workerRenderer.match(/bufferedAmountLowThreshold\s*=\s*([0-9*\s]+?)\s*;/);
-    expect(m).toBeTruthy();
-    const windowBytes = Function(`"use strict"; return (${m[1]});`)();
-    expect(windowBytes).toBeGreaterThanOrEqual(4 * 1024 * 1024);
-    expect(windowBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+  // ~1.8 MB/s over a 210ms NL<->South-America RTT regardless of link speed. The
+  // window is now ADAPTIVE — sized to the bandwidth-delay product at the measured
+  // RTT via computeSendWindow (@farsight/shared/transfer-window). Guard the
+  // wiring: both the initial seed AND the periodic re-size must go through
+  // computeSendWindow, never a raw literal that could reintroduce the 256 KB cap.
+  // The numeric band (MIN/MAX/DEFAULT) is pinned by transfer-window.test.js.
+  test('sizes the ft-bulk send window via computeSendWindow (adaptive BDP), never a raw literal', () => {
+    // No bare-number assignment survives — the seed and the sampler both compute it.
+    expect(workerRenderer).not.toMatch(/bufferedAmountLowThreshold\s*=\s*\d/);
+    // Seed at channel setup and the adaptive re-size both call computeSendWindow.
+    const uses = workerRenderer.match(/bufferedAmountLowThreshold\s*=\s*computeSendWindow\(/g) || [];
+    expect(uses.length).toBeGreaterThanOrEqual(2);
+    expect(workerRenderer).toMatch(/selectedPairRttSeconds/);
+    expect(workerRenderer).toMatch(/getStats\(\)/);
   });
 
   test('emits a credit signal on ft-bulk bufferedamountlow', () => {
