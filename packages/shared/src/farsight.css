@@ -390,3 +390,20 @@ body.in-session .cog, body.in-session .menu { display: none; }
 @media (prefers-reduced-motion: reduce) { .xfer-lane, .xfer-pill .pd { animation: none !important; transition: none !important; } }
 .xfer-wave-area { fill: rgba(74, 168, 255, .22); stroke: none; }
 .xfer-wave-line { fill: none; stroke: var(--acc2); stroke-width: 2; }
+/* Send zone (Plan 2) — drop-first, fleet/contacts as drop targets */
+.xfer-send { }
+.xfer-send.xfer-drop-over { border-color: var(--go-dim); box-shadow: 0 0 0 3px var(--go-bg); }
+.xfer-recips { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.xfer-recip { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 11px; background: var(--panel2); border: 1px solid var(--line); cursor: pointer; min-width: 150px; }
+.xfer-recip:hover { border-color: var(--go); }
+.xfer-recip.xfer-drop-over { border-color: var(--go-dim); background: var(--go-bg); box-shadow: 0 0 0 3px var(--go-bg); }
+.xfer-recip.off { opacity: .55; }
+.xfer-recip .av { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 13px; background: linear-gradient(135deg, var(--acc), var(--acc2)); flex: 0 0 auto; }
+.xfer-recip .av.c { background: linear-gradient(135deg, #3a8f78, var(--go)); }
+.xfer-recip .rn { font-family: var(--mono); font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.xfer-recip .rs { font-size: 10px; color: var(--sub2); text-transform: uppercase; letter-spacing: .06em; margin-top: 2px; display: flex; align-items: center; gap: 5px; }
+.xfer-recip .rdot { width: 6px; height: 6px; border-radius: 50%; background: #3a3f4c; flex: 0 0 auto; }
+.xfer-recip.on .rdot { background: var(--ok); box-shadow: 0 0 6px rgba(67, 209, 158, .8); }
+.xfer-recip.adhoc { border-style: dashed; justify-content: center; background: transparent; color: var(--sub); }
+.xfer-send-foot { display: flex; gap: 8px; flex-wrap: wrap; }
+.xfer-adhoc { margin-top: 12px; }

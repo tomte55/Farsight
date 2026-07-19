@@ -157,16 +157,24 @@
 
       <section id="page-transfers" class="page" hidden>
         <div class="stack">
-          <div class="card">
-            <div class="page-title">Send files</div>
-            <div class="statusline u-tight u-mb16">Send files or a folder directly to another Farsight device.</div>
-            <div class="lbl">Host ID</div>
-            <input id="send-host-id" class="input" placeholder="947 188 129" />
-            <div class="lbl">Password</div>
-            <input id="send-host-pw" class="input" placeholder="Password" />
-            <div class="u-row">
-              <button id="send-files-btn" class="btn btn-primary u-flex1">Send files…</button>
-              <button id="send-folder-btn" class="btn btn-ghost u-flex1">Send folder…</button>
+          <div class="card xfer-send" id="xfer-send">
+            <div class="page-title">Send</div>
+            <div class="statusline u-tight u-mb16">Drop files or a folder onto a device or contact to send — no ID needed. Or use a Host ID.</div>
+            <div id="xfer-recipients" class="xfer-recips"></div>
+            <div class="xfer-send-foot">
+              <button id="send-files-btn" class="btn btn-ghost">Browse files…</button>
+              <button id="send-folder-btn" class="btn btn-ghost">Browse folder…</button>
+              <button id="xfer-adhoc-toggle" class="btn btn-ghost">Host ID…</button>
+            </div>
+            <div id="xfer-adhoc" class="xfer-adhoc" hidden>
+              <div class="lbl">Host ID</div>
+              <input id="send-host-id" class="input" placeholder="947 188 129" />
+              <div class="lbl">Password</div>
+              <input id="send-host-pw" class="input" placeholder="Password" />
+              <div class="u-row">
+                <button id="send-adhoc-go" class="btn btn-primary u-flex1">Send files…</button>
+                <button id="send-adhoc-go-folder" class="btn btn-ghost u-flex1">Send folder…</button>
+              </div>
             </div>
             <p id="send-status" class="statusline"></p>
           </div>
