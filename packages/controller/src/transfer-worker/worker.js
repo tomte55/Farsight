@@ -45,6 +45,14 @@ const pendingCtrlIn = [];  // inbound ctrl frames held until authOk (linked)
 // receiver never sees the offer, never consents, never accepts).
 const pendingCtrlOut = [];
 
+// Plan-1b Task 4: transport fault-injection state (test-hooks only — the
+// onTestFault listener at the bottom is wired ONLY when the preload exposes it,
+// i.e. this worker was launched with --ft-test-hooks=1). `stallFlow` holds
+// outbound bulk here (granting no credit) so the flow stops moving bytes without
+// dying; `resumeFlow` flushes it.
+let testStalled = false;
+const testStallQueue = [];
+
 // ── Diagnostics ──────────────────────────────────────────────────────────────
 // Counters + a 1s heartbeat, surfaced in the app log. If a transfer stalls the
 // log shows exactly where: `tick` stopping = the hidden window was throttled/
@@ -314,19 +322,25 @@ window.farsightTransfer.onStartRendezvous(async (params) => {
   }
 });
 
-// Frames main wants sent OUT over the data channels.
-window.farsightTransfer.onSendCtrl((str) => {
-  // Buffer until the ft-ctrl channel is open AND (linked) the handshake has
-  // passed — then flush in order (see pendingCtrlOut / releaseAfterAuth).
-  // Dropping pre-open frames deadlocked the transfer; sending the OFFER before
-  // auth would leak the manifest to an unverified peer.
+// Frames main wants sent OUT over the data channels. One seam (sendCtrlOut) so the
+// oversize-ctrl fault (Task 4) and any Task-7 hardening live in one place (R7).
+// Buffer until the ft-ctrl channel is open AND (linked) the handshake has passed —
+// then flush in order (see pendingCtrlOut / releaseAfterAuth). Dropping pre-open
+// frames deadlocked the transfer; sending the OFFER before auth would leak the
+// manifest to an unverified peer.
+function sendCtrlOut(str) {
   try {
     if (ctrlChannel && ctrlChannel.readyState === 'open' && authGate.state === 'open') { ctrlChannel.send(str); ctrlOut += 1; }
     else pendingCtrlOut.push(str);
   } catch { /* guarded */ }
-});
+}
+window.farsightTransfer.onSendCtrl((str) => sendCtrlOut(str));
 window.farsightTransfer.onSendBulk((buf) => {
   try {
+    // Task-4 stallFlow: hold the chunk and grant NO credit, so main's pool
+    // backpressures this flow (its per-chunk credit await pends) without losing
+    // the byte — resumeFlow sends it and grants the credit.
+    if (testStalled) { testStallQueue.push(buf); return; }
     if (authGate.state !== 'open') return; // linked: no bytes before auth passes
     if (!(bulkChannel && bulkChannel.readyState === 'open')) return;
     bulkChannel.send(buf); bulkOut += 1;
@@ -341,6 +355,38 @@ window.farsightTransfer.onSendBulk((buf) => {
     }
   } catch { /* guarded */ }
 });
+
+// Plan-1b Task 4: transport fault injection. window.farsightTransfer.onTestFault
+// is exposed by the preload ONLY when this worker was launched with
+// --ft-test-hooks=1 (FARSIGHT_TEST_HOOKS=1); otherwise it is null and NO fault
+// path is live here. Each fault reproduces a real silent-failure class so a
+// real-wire test (Tasks 5-8) can prove the fix makes it loud.
+function applyTestFault(cmd, args = {}) {
+  logStatus({ event: `test-fault:${cmd}` });
+  if (cmd === 'dropFlowSocket') {
+    // F-B1: yank the signaling WebSocket out from under the worker.
+    try { signal && signal.close && signal.close(); } catch { /* guarded */ }
+  } else if (cmd === 'injectOversizeCtrl') {
+    // F-B3: a single ctrl frame over the ~256KB WebRTC data-channel send() limit —
+    // throws and KILLS the ctrl channel. Routed through the SAME sendCtrlOut seam
+    // production ctrl frames use, so Task 7's hardening of that seam is what the
+    // real-wire test exercises.
+    const n = Number(args.bytes) > 0 ? Number(args.bytes) : 300000;
+    sendCtrlOut('Z'.repeat(n));
+  } else if (cmd === 'stallFlow') {
+    testStalled = true;
+  } else if (cmd === 'resumeFlow') {
+    testStalled = false;
+    while (testStallQueue.length) {
+      const buf = testStallQueue.shift();
+      try { bulkChannel.send(buf); bulkOut += 1; } catch { /* guarded */ }
+      try { window.farsightTransfer.emitCredit(); } catch { /* guarded */ }
+    }
+  }
+}
+if (window.farsightTransfer.onTestFault) {
+  window.farsightTransfer.onTestFault(({ cmd, args } = {}) => { try { applyTestFault(cmd, args); } catch { /* guarded */ } });
+}
 
 // getStats bridge: the RTCPeerConnection lives here, not in main.
 window.farsightTransfer.onStatsRequest(async () => {

@@ -8,6 +8,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const workerIdArg = process.argv.find((a) => a.startsWith('--ft-worker-id='));
 const workerId = workerIdArg ? workerIdArg.slice('--ft-worker-id='.length) : 'unknown';
+// Plan-1b Task 4: only when main launched this worker with --ft-test-hooks=1
+// (i.e. FARSIGHT_TEST_HOOKS=1) is the transport-fault bridge exposed at all — a
+// production worker has no fault surface.
+const testHooks = process.argv.includes('--ft-test-hooks=1');
 
 // MUST mirror transfer-worker.js's topicsFor() — checked by
 // transfer-worker-wiring.test.js.
@@ -23,6 +27,7 @@ const topics = {
   statsResponse: `ft-stats-response:${workerId}`,
   statusLog: `ft-status-log:${workerId}`,
   peerAuth: `ft-peer-auth:${workerId}`,
+  testFault: `ft-test-fault:${workerId}`,
 };
 
 contextBridge.exposeInMainWorld('farsightTransfer', {
@@ -49,6 +54,10 @@ contextBridge.exposeInMainWorld('farsightTransfer', {
   // SP3 Task 5: the device-keypair-VERIFIED peer, reported once on auth-ok so
   // main can classify it (fleet vs contact) for the consent decision (Task 6).
   reportPeerAuth: (obj) => ipcRenderer.send(topics.peerAuth, obj),
+  // Plan-1b Task 4: transport fault injection from main ({ cmd, args }). ONLY
+  // present when this worker was launched with --ft-test-hooks=1 — a production
+  // worker exposes `onTestFault: null`, so worker.js wires no fault listener.
+  onTestFault: testHooks ? (cb) => ipcRenderer.on(topics.testFault, (_e, fault) => cb(fault)) : null,
 });
 
 // SP3 Phase 4: own-fleet device-keypair handshake (shared/connection-auth.js) run

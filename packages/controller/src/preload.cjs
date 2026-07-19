@@ -82,6 +82,11 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   transferQueueOrder: () => ipcRenderer.invoke('transfer:queue-order'),
   onTransferEvent: (cb) => ipcRenderer.on('transfer:event', (_e, ev) => cb(ev)),
   pathForFile: (file) => webUtils.getPathForFile(file),
+  // Plan-1b Task 4: real-wire fault injection. Inert in production — main only
+  // registers the 'ft-test:fault' handler under FARSIGHT_TEST_HOOKS=1, so this
+  // invoke rejects ("No handler registered") when the flag is off. The harness
+  // drives it over CDP to kill/drop/oversize/stall a specific transfer flow.
+  ftTestFault: (input) => ipcRenderer.invoke('ft-test:fault', input),
   // SP3 receive path (v2): the host-registration socket relays a TRANSFER_REQUEST,
   // which the renderer forwards to main; main round-trips consent (manifest preview)
   // before anything touches disk.

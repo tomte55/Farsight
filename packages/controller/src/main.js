@@ -41,7 +41,30 @@ import { newJobId } from '@farsight/shared/transfer-queue';
 // consent/receive.
 import { assembleSendFlows, assembleReceiveGroup, dispatchReceiveFlowJoin } from './transfer-channel-assembly.js';
 import { createGroupRendezvous } from '@farsight/shared/transfer-group-rendezvous';
+import { createFaultHooks } from './transfer-fault-hooks.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Plan-1b Task 4: real-wire fault-injection, gated behind FARSIGHT_TEST_HOOKS=1.
+// DISABLED by default (and in every production build, which never sets the flag):
+// faultHooks then registers nothing, the ft-test:fault IPC handler below is never
+// registered, and createTransferWorker gets no test-hook flag — so the fault
+// machinery is entirely absent, not merely dormant. The harness sets the env var
+// to drive killWorker/dropFlowSocket/injectOversizeCtrl/stallFlow against a live
+// transfer's individual flows.
+const TEST_HOOKS = process.env.FARSIGHT_TEST_HOOKS === '1';
+const faultHooks = createFaultHooks({ enabled: TEST_HOOKS });
+
+// Register a freshly-created transfer worker under its (side, flowIndex) so the
+// fault IPC can address it, and unregister it when it closes (a re-dial replaces
+// the slot; the registry keeps only the current occupant). A no-op that returns
+// the worker untouched when hooks are disabled — zero production overhead.
+function trackWorker(side, flowIndex, worker) {
+  if (!faultHooks.enabled) return worker;
+  faultHooks.register(side, flowIndex, worker);
+  const origClose = worker.close.bind(worker);
+  worker.close = async () => { faultHooks.unregister(side, flowIndex, worker); return origClose(); };
+  return worker;
+}
 
 // Account service (SP2 saved-hosts console) — lazily built so safeStorage /
 // app.getPath are ready. The refresh token is stored encrypted under userData;
@@ -220,7 +243,7 @@ function currentSignalingUrl() {
 // on which flow that is or it listens for the manifest OFFER on the wrong
 // data channel.
 function openAttachFlow({ sessionId, flowIndex, groupId, linked }) {
-  const worker = createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)) });
+  const worker = trackWorker('receive', flowIndex, createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)), testHooks: TEST_HOOKS }));
   let rendezvousErrorCb = null;
   worker.onSessionState((state) => {
     if (typeof state === 'string' && state.startsWith('error:') && rendezvousErrorCb) {
@@ -341,7 +364,7 @@ function getTransferService() {
           const groupId = newJobId();
           return assembleSendFlows({
             flowCount,
-            createWorker: () => createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)) }),
+            createWorker: (flowIndex) => trackWorker('send', flowIndex, createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)), testHooks: TEST_HOOKS })),
             makeParams: (flowIndex) => ({
               role: 'initiator',
               signalingUrl: currentSignalingUrl(),
@@ -375,7 +398,7 @@ function getTransferService() {
         }
 
         // ---- existing single-worker SEND path (flowCount<=1), unchanged ----
-        const worker = createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)) });
+        const worker = trackWorker('send', 0, createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)), testHooks: TEST_HOOKS }));
         const signalingUrl = currentSignalingUrl();
         // Surface signaling-level rendezvous failures (host_offline, bad_password,
         // transfer_timeout, busy, locked) to the transfer-service so a send fails
@@ -495,6 +518,17 @@ ipcMain.handle('transfer:send', async (_e, input) => {
 });
 
 ipcMain.handle('transfer:list', () => getTransferService().listJobs());
+
+// Plan-1b Task 4: the fault-injection IPC — REGISTERED ONLY under FARSIGHT_TEST_HOOKS=1
+// (a production build never sets the flag, so this handler simply does not exist —
+// invoking the channel there rejects with "No handler registered"). The harness
+// drives it over CDP via window.farsightIpc.ftTestFault({ cmd, side, flowIndex, ... }).
+if (TEST_HOOKS) {
+  ipcMain.handle('ft-test:fault', async (_e, input) => {
+    try { return await faultHooks.dispatch(input || {}); }
+    catch (e) { return { error: (e && e.message) ? e.message : String(e) }; }
+  });
+}
 
 // SP3 coherence contract #3: cancel() now actually aborts an in-flight send —
 // transfer-service.cancel() tears down the active job's channel (via the

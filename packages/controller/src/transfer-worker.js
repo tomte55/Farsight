@@ -36,6 +36,7 @@ function topicsFor(workerId) {
     statsResponse: `ft-stats-response:${workerId}`, // worker renderer -> main: getStats() result
     statusLog: `ft-status-log:${workerId}`, // worker renderer -> main: periodic diagnostic status
     peerAuth: `ft-peer-auth:${workerId}`, // worker renderer -> main: device-keypair-verified peer publicKey (on auth-ok)
+    testFault: `ft-test-fault:${workerId}`, // main -> worker renderer: Plan-1b Task 4 transport fault injection (test-hooks only)
   };
 }
 
@@ -59,7 +60,7 @@ function inboundFrameBytes(payload) {
   return 0;
 }
 
-export function createTransferWorker({ onLog, inboundBufferMaxBytes = INBOUND_BUFFER_MAX_BYTES } = {}) {
+export function createTransferWorker({ onLog, inboundBufferMaxBytes = INBOUND_BUFFER_MAX_BYTES, testHooks = false } = {}) {
   workerCounter += 1;
   const workerId = `w${workerCounter}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const topics = topicsFor(workerId);
@@ -77,7 +78,11 @@ export function createTransferWorker({ onLog, inboundBufferMaxBytes = INBOUND_BU
       // window rendering the Transfers panel) the transfer starves and stalls
       // mid-flight. Keep it running at full speed.
       backgroundThrottling: false,
-      additionalArguments: [`--ft-worker-id=${workerId}`],
+      // Plan-1b Task 4: the worker renderer only wires its transport fault
+      // listener (dropFlowSocket/injectOversizeCtrl/stallFlow) when this flag is
+      // present, so no fault code path is live in a production worker. Main passes
+      // testHooks:true only under FARSIGHT_TEST_HOOKS=1.
+      additionalArguments: [`--ft-worker-id=${workerId}`, ...(testHooks ? ['--ft-test-hooks=1'] : [])],
     },
   });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -212,6 +217,11 @@ export function createTransferWorker({ onLog, inboundBufferMaxBytes = INBOUND_BU
     channel,
     onSessionState(cb) { sessionStateCb = cb; },
     onPeerAuth(cb) { peerAuthCb = cb; },
+    // Plan-1b Task 4: forward a transport fault into this worker's renderer
+    // (dropFlowSocket/injectOversizeCtrl/stallFlow/resumeFlow). Only ever called
+    // by the env-gated faultHooks.dispatch; the renderer only acts on it when
+    // launched with --ft-test-hooks=1. sendToWorker queues until did-finish-load.
+    sendTestFault(cmd, args) { sendToWorker(topics.testFault, { cmd, args: args || {} }); },
     // Round-trips a getStats() request to the worker renderer's
     // RTCPeerConnection (main has no direct WebRTC handle — the PC lives in
     // the worker renderer). Resolves [] on timeout/teardown rather than

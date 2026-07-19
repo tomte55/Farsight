@@ -85,7 +85,7 @@ describe('transfer-worker/worker.js survives the real-WebRTC channel timing', ()
 });
 
 describe('per-worker IPC topics are namespaced by workerId (no cross-worker leakage)', () => {
-  const topicBases = ['ft-ctrl', 'ft-bulk', 'ft-ctrl-in', 'ft-bulk-in', 'ft-bulk-credit', 'ft-start-rendezvous', 'ft-session-state', 'ft-stats-request', 'ft-stats-response'];
+  const topicBases = ['ft-ctrl', 'ft-bulk', 'ft-ctrl-in', 'ft-bulk-in', 'ft-bulk-credit', 'ft-start-rendezvous', 'ft-session-state', 'ft-stats-request', 'ft-stats-response', 'ft-test-fault'];
 
   test('transfer-worker.js builds every topic as `${base}:${workerId}`', () => {
     for (const base of topicBases) {
