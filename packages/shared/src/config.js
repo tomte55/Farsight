@@ -29,6 +29,17 @@ export function resolveParallelConnections(value) {
   return Math.min(MAX_PARALLEL_CONNECTIONS, Math.max(MIN_PARALLEL_CONNECTIONS, Math.round(n)));
 }
 
+// rateLimitMbps: the "Rate limit" send setting (Plan 3 Task 3)
+// — bandwidth ceiling in Mbps for parallel sends; 0 = unlimited, else [1,1000].
+// Like parallelConnections, a bad value is CLAMPED/DEFAULTED (to 0=unlimited)
+// rather than DROPPED, since a send always needs a concrete limit to proceed.
+export function resolveRateLimit(value) {
+  const n = typeof value === 'number' ? value
+    : (typeof value === 'string' && value.trim() !== '') ? Number(value) : NaN;
+  if (!Number.isFinite(n) || n < 1) return 0; // 0 = unlimited (also catches negatives / sub-1)
+  return Math.min(1000, Math.round(n));
+}
+
 // Tolerant parse: bad/missing/corrupt input yields an empty config, never throws.
 export function parseConfig(text) {
   try {
@@ -56,6 +67,12 @@ export function parseConfig(text) {
       if (Object.prototype.hasOwnProperty.call(obj, 'parallelConnections')) {
         out.parallelConnections = resolveParallelConnections(obj.parallelConnections);
       }
+      // rateLimitMbps: same pattern as parallelConnections — only included when
+      // the KEY is present, and invalid/bad values resolve to 0 (unlimited) instead
+      // of being dropped.
+      if (Object.prototype.hasOwnProperty.call(obj, 'rateLimitMbps')) {
+        out.rateLimitMbps = resolveRateLimit(obj.rateLimitMbps);
+      }
       return out;
     }
   } catch { /* fall through to empty */ }
@@ -80,6 +97,11 @@ export function serializeConfig(cfg) {
   // out-of-range/invalid in-memory value can never be persisted verbatim.
   if (cfg && cfg.parallelConnections !== undefined) {
     out.parallelConnections = resolveParallelConnections(cfg.parallelConnections);
+  }
+  // rateLimitMbps: same pattern — serialize whenever set at all, always through
+  // resolveRateLimit so an invalid/out-of-range value can never be persisted.
+  if (cfg && cfg.rateLimitMbps !== undefined) {
+    out.rateLimitMbps = resolveRateLimit(cfg.rateLimitMbps);
   }
   return JSON.stringify(out, null, 2);
 }

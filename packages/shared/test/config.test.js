@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest';
 import {
   parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl,
-  resolveParallelConnections, DEFAULT_PARALLEL_CONNECTIONS,
+  resolveParallelConnections, DEFAULT_PARALLEL_CONNECTIONS, resolveRateLimit,
 } from '../src/config.js';
 
 test('parseConfig reads a valid signalingUrl', () => {
@@ -130,4 +130,18 @@ test('resolveSignalingUrl: env wins, then config, then null', () => {
   expect(resolveSignalingUrl({})).toEqual({ url: null, source: null });
   expect(resolveSignalingUrl({ envUrl: '   ' , storedUrl: '  wss://s.example.org ' }))
     .toEqual({ url: 'wss://s.example.org', source: 'config' });
+});
+
+test('resolveRateLimit clamps to 0-or-[1,1000], 0=unlimited', () => {
+  expect(resolveRateLimit(0)).toBe(0);
+  expect(resolveRateLimit(-5)).toBe(0);
+  expect(resolveRateLimit('')).toBe(0);
+  expect(resolveRateLimit(2000)).toBe(1000);
+  expect(resolveRateLimit(0.4)).toBe(0);   // rounds below 1 → 0/unlimited
+  expect(resolveRateLimit(200)).toBe(200);
+});
+
+test('rateLimitMbps round-trips through parse/serialize', () => {
+  const s = serializeConfig({ rateLimitMbps: 200 });
+  expect(parseConfig(s).rateLimitMbps).toBe(200);
 });
