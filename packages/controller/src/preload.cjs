@@ -29,6 +29,11 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   // (default 8, clamped 1-32 — see resolveParallelConnections in @farsight/shared/config).
   getParallelConnections: () => ipcRenderer.invoke('parallel-connections:get'),
   setParallelConnections: (n) => ipcRenderer.invoke('parallel-connections:set', n),
+  // Rate limit (Settings): bandwidth ceiling in Mbps for a send's parallel
+  // flows (0 = unlimited, clamped 1-1000 — see resolveRateLimit in
+  // @farsight/shared/config).
+  getRateLimit: () => ipcRenderer.invoke('rate-limit:get'),
+  setRateLimit: (mbps) => ipcRenderer.invoke('rate-limit:set', mbps),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   setSessionActive: (active) => ipcRenderer.send('updater:set-session-active', active),
@@ -69,6 +74,12 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   transferList: () => ipcRenderer.invoke('transfer:list'),
   transferCancel: (jobId) => ipcRenderer.invoke('transfer:cancel', jobId),
   transferRemove: (jobId) => ipcRenderer.invoke('transfer:remove', jobId),
+  // Plan 3 Task 7: pause/resume the active send, reorder a WAITING send
+  // within the queue, and read the current queue order.
+  transferPause: (jobId) => ipcRenderer.invoke('transfer:pause', jobId),
+  transferResume: (jobId) => ipcRenderer.invoke('transfer:resume', jobId),
+  transferReorder: (jobId, dir) => ipcRenderer.invoke('transfer:reorder', { jobId, dir }),
+  transferQueueOrder: () => ipcRenderer.invoke('transfer:queue-order'),
   onTransferEvent: (cb) => ipcRenderer.on('transfer:event', (_e, ev) => cb(ev)),
   pathForFile: (file) => webUtils.getPathForFile(file),
   // SP3 receive path (v2): the host-registration socket relays a TRANSFER_REQUEST,

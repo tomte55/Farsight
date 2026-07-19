@@ -16,7 +16,7 @@ import { listDisplays } from './capture.js';
 import { generateSessionPassword } from '@farsight/shared/password';
 import { windowAttentionPlan } from './window-attention.js';
 import { createAppLogger } from '@farsight/shared/app-log';
-import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl, resolveParallelConnections } from '@farsight/shared/config';
+import { parseConfig, serializeConfig, validateSignalingUrl, resolveSignalingUrl, resolveParallelConnections, resolveRateLimit } from '@farsight/shared/config';
 import { createUpdater } from '@farsight/shared/updater';
 import { shouldConverge } from '@farsight/shared/update-policy';
 import { createAccountService, DEFAULT_ACCOUNT_URL } from './account.js';
@@ -323,6 +323,11 @@ function getTransferService() {
       store: getJobsStore(),
       transferDir: ensureReceivedFilesDir,
       consent: requestReceiveConsent,
+      // Plan 3 Task 7: the configured "Rate limit" setting (0 = unlimited)
+      // seeds the service's limiter at construction; rate-limit:set below
+      // additionally calls setRateLimit() live so a Settings change takes
+      // effect on THIS service instance without recreating it.
+      rateLimitMbps: rateLimit(),
       // Canonical rendezvous shape (SP3 coherence contract #1), identical to
       // the host's openChannel: transfer-service always calls this as
       // { role, target, sessionId } — 'initiate' carries target (sessionId
@@ -500,6 +505,14 @@ ipcMain.handle('transfer:cancel', async (_e, jobId) => getTransferService().canc
 // Forget a finished/failed job so it leaves the Transfers list (deletes its
 // persisted jobs-store record). Refused for a job still in flight — see removeJob.
 ipcMain.handle('transfer:remove', async (_e, jobId) => getTransferService().removeJob(jobId));
+// Plan 3 Task 7: pause/resume the active send in place, reorder a WAITING
+// send within the queue, and read the current queue order (active head
+// first) so the renderer can render it without guessing at insertion order.
+// All four delegate straight to the transfer-service API built in Tasks 1/4/5.
+ipcMain.handle('transfer:pause', async (_e, jobId) => getTransferService().pause(jobId));
+ipcMain.handle('transfer:resume', async (_e, jobId) => getTransferService().resume(jobId));
+ipcMain.handle('transfer:reorder', async (_e, { jobId, dir }) => getTransferService().reorder(jobId, dir));
+ipcMain.handle('transfer:queue-order', async () => getTransferService().queueOrder());
 // RECEIVE path: the renderer's host-registration socket relays a TRANSFER_REQUEST
 // here (a peer wants to push files at this machine). Fire-and-forget — startReceive
 // only settles when the whole job does, so awaiting it would hang this call for the
@@ -609,6 +622,24 @@ ipcMain.handle('parallel-connections:set', (_e, v) => {
   // Merge onto the existing stored config — see the set-signaling-url note above.
   writeFileSync(configFilePath(), serializeConfig({ ...readStoredConfig(), parallelConnections: n }), { encoding: 'utf8', mode: 0o600 });
   return { ok: true, parallelConnections: n };
+});
+
+// "Rate limit" (Plan 3 Task 7) — bandwidth ceiling in Mbps for a send's
+// parallel flows; 0 = unlimited, else [1,1000] (resolveRateLimit, shared with
+// config.js's parse/serialize so the clamp/default logic lives in ONE place —
+// same pattern as parallelConnections above).
+function rateLimit() {
+  return resolveRateLimit(readStoredConfig().rateLimitMbps);
+}
+ipcMain.handle('rate-limit:get', () => rateLimit());
+ipcMain.handle('rate-limit:set', (_e, v) => {
+  const n = resolveRateLimit(v);
+  // Merge onto the existing stored config — see the set-signaling-url note above.
+  writeFileSync(configFilePath(), serializeConfig({ ...readStoredConfig(), rateLimitMbps: n }), { encoding: 'utf8', mode: 0o600 });
+  // Apply live to the already-constructed service (Settings changes a
+  // running app's limiter without recreating the service instance).
+  getTransferService().setRateLimit(n);
+  return { ok: true, rateLimitMbps: n };
 });
 
 // Provide the primary screen source id to the renderer on request.
