@@ -998,7 +998,7 @@ app.whenReady().then(async () => {
   // watcher starts, so its first sweep actually sees the swept records — this
   // is the single-instance lock above's real payoff (a second instance sweeping
   // concurrently could stomp a genuinely-live 'active' record).
-  try { await getTransferService().recoverStaleSends(); } catch (e) { log?.child('transfer').warn(`stale-send sweep failed: ${e?.message || e}`); }
+  try { await getTransferService().recoverStaleJobs(); } catch (e) { log?.child('transfer').warn(`stale-job sweep failed: ${e?.message || e}`); }
   // SP3 Phase 4 auto-resume: start the resume watcher on launch so an own-fleet
   // send interrupted in a PREVIOUS run resumes once its device is online again
   // (across-restart). Idle/no-op until signed in and an interrupted job exists.

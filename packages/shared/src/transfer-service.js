@@ -640,22 +640,22 @@ export function createTransferService({ store, transferDir, consent, openChannel
     return { ok: true };
   }
 
-  // A dir:'send' record still saying 'active' at process START is
-  // impossible-by-definition — the process that owned it is gone (this app
-  // just launched). Rewrite each one to a terminal-but-honest state, mirroring
-  // the RECEIVE side's own inactivity watchdog exactly (transfer-orchestrator.js:
-  // `resumable = tier === 'fleet' || tier === 'contact'`): a resumable tier
-  // becomes 'interrupted' so the resume watcher re-establishes it; anything
-  // else (adhoc) becomes 'error', because nothing will ever resume it and
-  // showing "Interrupted — will resume" would be a lie. dir:'recv' records are
-  // deliberately NOT touched here — the receive side has its own watchdog and
-  // its own tier semantics; sweeping them here would be a second, uncoordinated
-  // writer over the same records.
-  async function recoverStaleSends() {
+  // At launch, any record still marked 'active' is impossible-by-definition — the
+  // process that owned it (a send OR a receive) is gone. Rewrite each to a
+  // terminal-but-honest state: a resumable tier (fleet/contact) → 'interrupted'
+  // (the own-fleet sender's resume watcher re-establishes it, and for a receive
+  // the paired sender re-sends the same jobId); anything else (adhoc) → 'error',
+  // because nothing will ever resume it and "Interrupted — will resume" would be a
+  // lie. Receives are swept here too: their in-receive inactivity watchdog only
+  // runs inside a LIVE receive, so a crash leaves an 'active' recv record with
+  // nothing to sweep it — a permanent zombie in the Transfers list (F-C6). A
+  // startup sweep is not a concurrent writer (no receive is running yet).
+  async function recoverStaleJobs() {
     let jobs = [];
     try { jobs = await store.list(); } catch { jobs = []; }
     for (const job of jobs) {
-      if (!job || job.dir !== 'send' || job.jobState !== 'active') continue;
+      if (!job || job.jobState !== 'active') continue;
+      if (job.dir !== 'send' && job.dir !== 'recv') continue;
       const resumable = job.tier === 'fleet' || job.tier === 'contact';
       try { await store.save({ ...job, jobState: resumable ? 'interrupted' : 'error' }); } catch { /* best effort */ }
     }
@@ -905,7 +905,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
   }
 
   const api = {
-    recoverStaleSends,
+    recoverStaleJobs,
 
     // Plan 3 Task 6: retune the ONE shared limiter live -- affects the ACTIVE
     // send (single- or multi-flow) immediately, mid-transfer, since both

@@ -2007,7 +2007,7 @@ test('BUGFIX: a send is persisted as active BEFORE it settles, with the right di
   await svc.cancel(jobId); // cleanup so the test doesn't leave a dangling promise
 });
 
-test('recoverStaleSends() rewrites a stale active SEND record by tier: fleet/contact -> interrupted, adhoc -> error', async () => {
+test('recoverStaleJobs() rewrites a stale active SEND record by tier: fleet/contact -> interrupted, adhoc -> error', async () => {
   const store = createJobsStore({ dir: tmp() });
   const blankManifest = { entries: [], totalBytes: 0, totalFiles: 0 };
   await store.save({ jobId: 'stale-fleet', dir: 'send', tier: 'fleet', peer: {}, sourceRoots: [], destRoot: null, manifest: blankManifest, perFile: [], jobState: 'active', createdAt: 1 });
@@ -2018,7 +2018,7 @@ test('recoverStaleSends() rewrites a stale active SEND record by tier: fleet/con
     store, transferDir: tmp(), consent: async () => true,
     openChannel: async () => { throw new Error('not used in this test'); },
   });
-  await svc.recoverStaleSends();
+  await svc.recoverStaleJobs();
 
   const jobs = await store.list();
   // fleet/contact are resumable — the resume watcher will re-establish them.
@@ -2028,32 +2028,32 @@ test('recoverStaleSends() rewrites a stale active SEND record by tier: fleet/con
   expect(jobs.find((j) => j.jobId === 'stale-adhoc').jobState).toBe('error');
 });
 
-test('recoverStaleSends() leaves done/canceled/error SEND records and ALL dir:recv records untouched', async () => {
+test('recoverStaleJobs() leaves done/canceled/error SEND records untouched, and now also sweeps a stale active dir:recv record by tier (F-C6)', async () => {
   const store = createJobsStore({ dir: tmp() });
   const blankManifest = { entries: [], totalBytes: 0, totalFiles: 0 };
   await store.save({ jobId: 'send-done', dir: 'send', tier: 'fleet', jobState: 'done', peer: {}, sourceRoots: [], destRoot: null, manifest: blankManifest, perFile: [], createdAt: 1 });
   await store.save({ jobId: 'send-canceled', dir: 'send', tier: 'fleet', jobState: 'canceled', peer: {}, sourceRoots: [], destRoot: null, manifest: blankManifest, perFile: [], createdAt: 2 });
   await store.save({ jobId: 'send-error', dir: 'send', tier: 'adhoc', jobState: 'error', peer: {}, sourceRoots: [], destRoot: null, manifest: blankManifest, perFile: [], createdAt: 3 });
-  // A dir:'recv' record left 'active' by a killed process: the RECEIVE side has
-  // its own watchdog and its own tier semantics (transfer-orchestrator.js's
-  // inactivity watchdog, already fixed separately) — this sweep is send-only
-  // and must not touch it.
+  // A dir:'recv' record left 'active' by a killed process used to be left alone
+  // (the receive side's own in-receive watchdog only runs during a LIVE
+  // receive, so nothing ever swept it — a permanent zombie, F-C6). A startup
+  // sweep now rewrites it too, by the same tier rule as the send side.
   await store.save({ jobId: 'recv-active', dir: 'recv', tier: 'fleet', jobState: 'active', peer: {}, destRoot: '/x', manifest: blankManifest, perFile: [], createdAt: 4 });
 
   const svc = createTransferService({
     store, transferDir: tmp(), consent: async () => true,
     openChannel: async () => { throw new Error('not used in this test'); },
   });
-  await svc.recoverStaleSends();
+  await svc.recoverStaleJobs();
 
   const jobs = await store.list();
   expect(jobs.find((j) => j.jobId === 'send-done').jobState).toBe('done');
   expect(jobs.find((j) => j.jobId === 'send-canceled').jobState).toBe('canceled');
   expect(jobs.find((j) => j.jobId === 'send-error').jobState).toBe('error');
-  expect(jobs.find((j) => j.jobId === 'recv-active').jobState).toBe('active'); // untouched
+  expect(jobs.find((j) => j.jobId === 'recv-active').jobState).toBe('interrupted'); // fleet -> resumable
 });
 
-test('after recoverStaleSends(), the resume watcher picks up the swept fleet record and re-establishes it (listInterrupted sees it)', async () => {
+test('after recoverStaleJobs(), the resume watcher picks up the swept fleet record and re-establishes it (listInterrupted sees it)', async () => {
   const srcDir = tmp();
   const srcFile = join(srcDir, 'stale-resume.txt');
   writeFileSync(srcFile, Buffer.from('stale payload '.repeat(20)));
@@ -2077,7 +2077,7 @@ test('after recoverStaleSends(), the resume watcher picks up the swept fleet rec
     openChannel: async (args) => { capturedTarget = args.target; return { channel: deadChannel(), close: async () => {} }; },
   });
 
-  await svc.recoverStaleSends();
+  await svc.recoverStaleJobs();
   expect((await sendStore.list()).find((j) => j.jobId === 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa').jobState).toBe('interrupted');
 
   svc.startResumeWatcher();
@@ -2087,6 +2087,22 @@ test('after recoverStaleSends(), the resume watcher picks up the swept fleet rec
   // openChannel was called with the resolved CURRENT signalingId — proof the
   // resume watcher's listInterrupted actually returned the swept record.
   expect(capturedTarget).toMatchObject({ id: 'sig-CURRENT', deviceId: 'dev-1', linked: true });
+});
+
+test('recoverStaleJobs() sweeps crashed RECEIVE records too, to a terminal-honest state by tier (F-C6)', async () => {
+  const dir = tmp();
+  const store = createJobsStore({ dir });
+  const base = { manifest: { entries: [{ fileId: 0, path: 'a', size: 1, mtime: 1 }] }, perFile: [], createdAt: 0, peer: {}, destRoot: dir };
+  await store.save({ ...base, jobId: 'a'.repeat(32), dir: 'recv', tier: 'fleet', jobState: 'active' });
+  await store.save({ ...base, jobId: 'b'.repeat(32), dir: 'recv', tier: 'adhoc', jobState: 'active' });
+  await store.save({ ...base, jobId: 'c'.repeat(32), dir: 'recv', tier: 'adhoc', jobState: 'done' });
+
+  const svc = createTransferService({ store, transferDir: dir, consent: async () => true, openChannel: async () => ({ channel: { sendCtrl() {}, onCtrl() {}, onBulk() {} }, close: async () => {} }) });
+  await svc.recoverStaleJobs();
+
+  expect((await store.load('a'.repeat(32))).jobState).toBe('interrupted'); // fleet → resumable
+  expect((await store.load('b'.repeat(32))).jobState).toBe('error');       // adhoc → dead
+  expect((await store.load('c'.repeat(32))).jobState).toBe('done');        // terminal already → untouched
 });
 
 test('removeJob deletes a persisted (terminal) job so it leaves the Transfers list', async () => {
