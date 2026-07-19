@@ -10,6 +10,7 @@ import { transferLabel } from '@farsight/shared/transfer-label';
 // the failed-file dedupe accumulator, filename resolution, and the verify-tail
 // rate/ETA fix. Pure/runtime-agnostic, unit-tested in packages/shared/test.
 import { reasonLabel, flowHealthLabel, upsertFailedFile, fileNameFor, aggregateDetail } from '@farsight/shared/transfer-detail';
+import { deckModel, flowLaneSpec } from '@farsight/shared/transfer-deck';
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
@@ -1571,7 +1572,108 @@ async function clearFinishedTransfers() {
   renderTransfers();
 }
 
+// Peak send rate per job — the deck shows the max rate seen, tracked here because
+// the event stream carries no history (same reason as sendRateEstimators).
+const peakRates = new Map(); // jobId -> peak bytes/sec
+function peakRateFor(jobId, rate) {
+  if (!Number.isFinite(rate) || rate <= 0) return peakRates.get(jobId) || 0;
+  const next = Math.max(peakRates.get(jobId) || 0, rate);
+  peakRates.set(jobId, next);
+  return next;
+}
+
+const xferDeckEl = document.getElementById('xfer-deck');
+
+// The active head SEND is what the deck shows (receives live in the queue column).
+// Awaiting-approval/reconnecting/finishing/verifying all still occupy the deck —
+// only a terminal state or a receive is excluded. 'interrupted' is non-terminal
+// but is routed to History as "Resuming" (Task 7) — excluding it here keeps an
+// interrupted send from rendering in BOTH the deck (with a wrong "Transferring"
+// pill) and History at the same time.
+function activeDeckJob() {
+  const sends = [...transferJobs.values()].filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted');
+  if (sends.length === 0) return null;
+  // The engine runs the oldest queued send first (FIFO); the deck follows suit.
+  return sends.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
+}
+
+function renderDeck(job) {
+  if (!job) { xferDeckEl.hidden = true; xferDeckEl.replaceChildren(); return; }
+  const m = deckModel(job, { now: Date.now(), peakRate: peakRateFor(job.jobId, job.rate) });
+  xferDeckEl.hidden = false;
+
+  const rate = m.rateText ? m.rateText.replace(/\s*[A-Za-z/]+$/, '') : '—';
+  const unit = m.rateText ? (m.rateText.match(/[A-Za-z/]+$/) || [''])[0] : '';
+
+  // Build fresh each structural render; a progress tick reuses this via renderTransfers.
+  const frag = document.createElement('div');
+  frag.className = 'xfer-deck-inner';
+
+  const top = document.createElement('div'); top.className = 'xfer-deck-top';
+  const topL = document.createElement('div');
+  const name = document.createElement('div'); name.className = 'xfer-deck-name';
+  const dir = document.createElement('span'); dir.className = 'dir'; dir.textContent = m.arrow;
+  name.append(dir, document.createTextNode(`${transferLabel(job)} · ${fmtCount(job.manifest)}`));
+  topL.append(name);
+  const pill = document.createElement('span'); pill.className = 'xfer-pill';
+  const pd = document.createElement('span'); pd.className = 'pd';
+  pill.append(pd, document.createTextNode(m.statePill));
+  top.append(topL, pill);
+
+  const rateRow = document.createElement('div'); rateRow.className = 'xfer-rate';
+  const big = document.createElement('span'); big.className = 'xfer-rate-big'; big.textContent = rate;
+  const un = document.createElement('span'); un.className = 'xfer-rate-un'; un.textContent = unit;
+  rateRow.append(big, un);
+  if (m.peakText) {
+    const peak = document.createElement('span'); peak.className = 'xfer-rate-peak';
+    const pb = document.createElement('b'); pb.textContent = m.peakText;
+    peak.append(document.createTextNode('Peak'), pb);
+    rateRow.append(peak);
+  }
+
+  const bar = document.createElement('div'); bar.className = 'xfer-deck-bar';
+  const barFill = document.createElement('div'); barFill.className = 'xfer-deck-bar-fill';
+  barFill.style.width = `${Math.round(m.fraction * 100)}%`;
+  bar.append(barFill);
+
+  const grid = document.createElement('div'); grid.className = 'xfer-grid';
+  const cell = (k, v, small) => {
+    const c = document.createElement('div'); c.className = 'xfer-cell';
+    const kk = document.createElement('div'); kk.className = 'k'; kk.textContent = k;
+    const vv = document.createElement('div'); vv.className = 'v';
+    if (small) { const [a, b] = v.split(' / '); vv.textContent = a; const s = document.createElement('small'); s.textContent = ` / ${b}`; vv.append(s); }
+    else vv.textContent = v || '—';
+    c.append(kk, vv); return c;
+  };
+  grid.append(
+    cell('Transferred', m.transferredText || '—', m.transferredText.includes(' / ')),
+    cell('Files', m.filesText || '—', m.filesText.includes(' / ')),
+    cell('Time left', m.etaText ? m.etaText.replace('~', '~') : '—'),
+    cell('Elapsed', m.elapsedText || '—'),
+  );
+
+  frag.append(top, rateRow, bar, grid);
+
+  if (m.lanes.length) {
+    const flows = document.createElement('div'); flows.className = 'xfer-deck-flows';
+    const lanes = document.createElement('div'); lanes.className = 'xfer-lanes';
+    for (const l of m.lanes) {
+      const bar2 = document.createElement('div');
+      bar2.className = l.state === 'dead' ? 'xfer-lane dead' : 'xfer-lane';
+      bar2.style.height = l.state === 'dead' ? '4px' : `${10 + Math.round(Math.abs(Math.sin((peakRates.get(job.jobId) || 1) + m.lanes.indexOf(l))) * 22)}px`;
+      lanes.append(bar2);
+    }
+    const meta = document.createElement('div'); meta.className = 'meta';
+    meta.textContent = m.flowText;
+    flows.append(lanes, meta);
+    frag.append(flows);
+  }
+
+  xferDeckEl.replaceChildren(frag);
+}
+
 function renderTransfers() {
+  renderDeck(activeDeckJob());
   const jobs = [...transferJobs.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   transfersEmptyEl.hidden = jobs.length > 0;
 
