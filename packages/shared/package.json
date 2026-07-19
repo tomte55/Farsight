@@ -27,6 +27,7 @@
     "./config": "./src/config.js",
     "./transfer-manifest": "./src/transfer-manifest.js",
     "./transfer-protocol": "./src/transfer-protocol.js",
+    "./rate-limiter": "./src/rate-limiter.js",
     "./remote-fs-protocol": "./src/remote-fs-protocol.js",
     "./transfer-engine": "./src/transfer-engine.js",
     "./transfer-channel": "./src/transfer-channel.js",
