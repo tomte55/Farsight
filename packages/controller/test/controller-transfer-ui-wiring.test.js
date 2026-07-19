@@ -146,7 +146,11 @@ describe('renderer: Send… entry point + Transfers panel', () => {
     // COMMENT — sendFraction stopped reading p.fraction when the bar went
     // byte-based, so the test passed while asserting nothing executable.
     expect(renderer).toMatch(/bytesDone\(p\)\s*\/\s*p\.total/);
-    expect(renderer).toMatch(/xfer-bar-fill/);
+    // Task 7: the flat-list's single xfer-bar-fill row was retired in favor of
+    // the deck's bar (xfer-deck-bar-fill) and the queue's per-row mini bar
+    // (xfer-mini-fill), both still sized via sendFraction/CSSOM width.
+    expect(renderer).toMatch(/xfer-deck-bar-fill/);
+    expect(renderer).toMatch(/xfer-mini-fill/);
     expect(renderer).toMatch(/barFill\.style\.width/);
   });
 

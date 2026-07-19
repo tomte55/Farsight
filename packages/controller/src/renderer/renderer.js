@@ -6,11 +6,10 @@ import { createRateEstimator, etaSeconds, bytesDone, filesDone, formatBytes, for
 import { railItems, activeTransferCount, TERMINAL_TRANSFER_STATES, isShellPage, SHELL_PAGES } from '@farsight/shared/shell-nav';
 import { buildStatusSegments } from '@farsight/shared/status-bar';
 import { transferLabel } from '@farsight/shared/transfer-label';
-// Task 10: the expandable transfer detail panel's pure helpers — flow health,
-// the failed-file dedupe accumulator, filename resolution, and the verify-tail
-// rate/ETA fix. Pure/runtime-agnostic, unit-tested in packages/shared/test.
-import { reasonLabel, flowHealthLabel, upsertFailedFile, fileNameFor, aggregateDetail } from '@farsight/shared/transfer-detail';
-import { deckModel, flowLaneSpec } from '@farsight/shared/transfer-deck';
+// Task 10: the failed-file dedupe accumulator. Pure/runtime-agnostic,
+// unit-tested in packages/shared/test.
+import { upsertFailedFile } from '@farsight/shared/transfer-detail';
+import { deckModel } from '@farsight/shared/transfer-deck';
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
@@ -1179,7 +1178,6 @@ const sendHostPw = document.getElementById('send-host-pw');
 const sendFilesBtn = document.getElementById('send-files-btn');
 const sendFolderBtn = document.getElementById('send-folder-btn');
 const sendStatusEl = document.getElementById('send-status');
-const transfersListEl = document.getElementById('transfers-list');
 const transfersEmptyEl = document.getElementById('transfers-empty');
 
 // ── SP3 file transfer (receive path, v2) ────────────────────────────────────
@@ -1367,100 +1365,9 @@ function sendDetailText(j) {
   return parts.join(' · ');
 }
 
-// Task 10: which jobs currently have their detail panel open. A plain Set
-// outside the DOM — expand/collapse state survives any rebuild of the list
-// (structural or not), keyed by jobId rather than by row element.
-const expandedJobs = new Set();
-
-// jobId -> its live row's element refs, valid only while the ROW IDENTITY LIST
-// (transferRowIds) is unchanged from the previous render. Mirrors
-// renderStatusBar's statusbarSegs/renderRail's railButtons pattern (see their
-// comments): onTransferEvent fires renderTransfers() per-file and UNTHROTTLED, so
-// a plain rebuild-every-time (replaceChildren()) would blur focus on a row's
-// Cancel/Details button AND — new in Task 10 — collapse an OPEN detail panel
-// back closed on every tick, since expandedJobs.has() would still say "open" but
-// the freshly-recreated row would start from its default (hidden) DOM state. A
-// progress tick never changes WHICH jobs exist, only their text/bar/detail
-// content — so the hot path mutates existing nodes in place and never removes
-// them. Only a genuine structural change (job added/removed) rebuilds the list
-// from scratch; jobRow()+applyExpanded() below restore each row to its correct
-// open/closed state from expandedJobs on that rarer path too.
-let transferRowIds = [];
-const transferRowEls = new Map();
-
-// Builds a row's DOM ONCE — the summary line (name/bar/state), its Details
-// toggle + Cancel/Remove action, and the (initially hidden) detail panel.
-// Returns the element refs updateJobRow()/applyExpanded() mutate in place on
-// every later tick, per the transferRowEls comment above.
-function jobRow(j) {
-  const row = document.createElement('div');
-  row.className = 'host-row xfer-row';
-
-  const main = document.createElement('div');
-  main.className = 'host-main';
-  const title = document.createElement('div');
-  title.className = 'host-name';
-  const barWrap = document.createElement('div');
-  barWrap.className = 'xfer-bar';
-  const barFill = document.createElement('div');
-  barFill.className = 'xfer-bar-fill';
-  barWrap.appendChild(barFill);
-  const meta = document.createElement('div');
-  meta.className = 'host-meta';
-  main.append(title, barWrap, meta);
-
-  const right = document.createElement('div');
-  right.className = 'host-right';
-  const toggleBtn = document.createElement('button');
-  toggleBtn.className = 'btn btn-ghost xfer-toggle';
-  toggleBtn.setAttribute('aria-expanded', 'false');
-  const actionSlot = document.createElement('span');
-  actionSlot.className = 'xfer-action-slot';
-  right.append(toggleBtn, actionSlot);
-
-  row.append(main, right);
-
-  const detail = document.createElement('div');
-  detail.className = 'xfer-detail';
-  detail.hidden = true;
-  const detailFlow = document.createElement('div');
-  detailFlow.className = 'xfer-detail-flow';
-  const detailAgg = document.createElement('div');
-  detailAgg.className = 'xfer-detail-agg';
-  const detailFailedWrap = document.createElement('div');
-  detailFailedWrap.className = 'xfer-detail-failed';
-  // Defensive: don't rely on the .xfer-detail parent starting hidden — set this
-  // panel's own hidden state explicitly at creation too (renderJobDetail is the
-  // only other place that touches it, and only reactively once populated).
-  detailFailedWrap.hidden = true;
-  const detailFailedLabel = document.createElement('div');
-  detailFailedLabel.className = 'xfer-detail-label';
-  detailFailedLabel.textContent = 'Failed files';
-  const detailFailedList = document.createElement('ul');
-  detailFailedList.className = 'xfer-failed-list';
-  detailFailedWrap.append(detailFailedLabel, detailFailedList);
-  detail.append(detailFlow, detailAgg, detailFailedWrap);
-  row.appendChild(detail);
-
-  const entry = {
-    row, title, barFill, meta, toggleBtn, actionSlot,
-    detail, detailFlow, detailAgg, detailFailedWrap, detailFailedList,
-    jobId: j.jobId, activeState: null,
-  };
-
-  toggleBtn.onclick = () => {
-    if (expandedJobs.has(entry.jobId)) expandedJobs.delete(entry.jobId);
-    else expandedJobs.add(entry.jobId);
-    applyExpanded(entry, transferJobs.get(entry.jobId) || j);
-  };
-
-  return entry;
-}
-
 // Builds a Cancel (active) or Remove (terminal) button for jobId. Looked up by
 // jobId at CLICK time (transferJobs.get), not captured by reference at build
-// time — a row is only rebuilt when its active/terminal-ness flips (see
-// updateJobRow), so a stale captured job object could otherwise survive past a
+// time — a stale captured job object could otherwise survive past a
 // refreshTransfersList() that replaced the map entry with a new object.
 function buildActionButton(jobId, active) {
   if (active) {
@@ -1487,76 +1394,11 @@ function buildActionButton(jobId, active) {
       try { await window.farsightIpc.transferRemove(jobId); } catch { /* best effort */ }
       transferJobs.delete(jobId);
       sendRateEstimators.delete(jobId);
-      expandedJobs.delete(jobId);
+      peakRates.delete(jobId);
       renderTransfers();
     };
     return removeBtn;
   }
-}
-
-// Show/hide a row's detail panel per expandedJobs, and (when opening) refresh
-// its content immediately rather than waiting for the next tick.
-function applyExpanded(entry, j) {
-  const expanded = expandedJobs.has(entry.jobId);
-  entry.detail.hidden = !expanded;
-  entry.toggleBtn.textContent = expanded ? 'Hide details' : 'Details';
-  entry.toggleBtn.setAttribute('aria-expanded', String(expanded));
-  if (expanded) renderJobDetail(entry, j);
-}
-
-// Fills in the detail panel: (a) flow health, (b) terminally-failed files (name
-// + human reason), (c) the aggregate bytes/rate/ETA/files line — the last with
-// the verify-tail fix (aggregateDetail suppresses a stale rate/ETA once the
-// state is 'finishing'/'verifying').
-function renderJobDetail(entry, j) {
-  const flowText = flowHealthLabel(j.progress || {});
-  entry.detailFlow.hidden = !flowText;
-  entry.detailFlow.textContent = flowText;
-
-  const agg = aggregateDetail({ progress: j.progress, rate: j.rate, state: j.state });
-  const parts = [agg.bytesText];
-  if (agg.rateText) parts.push(agg.rateText);
-  if (agg.etaText) parts.push(agg.etaText);
-  if (agg.filesText) parts.push(agg.filesText);
-  entry.detailAgg.textContent = parts.join(' · ');
-
-  const failed = j.failedFiles || [];
-  entry.detailFailedWrap.hidden = failed.length === 0;
-  entry.detailFailedList.replaceChildren();
-  for (const f of failed) {
-    const li = document.createElement('li');
-    const name = document.createElement('span');
-    name.className = 'xfer-failed-name';
-    name.textContent = fileNameFor(j.manifest, f.fileId);
-    const reason = document.createElement('span');
-    reason.className = 'xfer-failed-reason';
-    reason.textContent = reasonLabel(f.reason);
-    li.append(name, document.createTextNode(' — '), reason);
-    entry.detailFailedList.appendChild(li);
-  }
-}
-
-// Updates an existing row's text/bar/action-button/detail content from the
-// CURRENT job record — the hot path a progress tick runs, never touching the
-// row's own DOM identity (so focus and the open/closed detail panel survive).
-function updateJobRow(entry, j) {
-  const arrow = j.direction === 'recv' ? '↓' : '↑';
-  // Label by WHAT is being transferred (file/folder name) — the peer id is often
-  // unknown (not persisted for receives; lost across a restart). fmtCount adds the
-  // file count for context.
-  entry.title.textContent = `${arrow} ${transferLabel(j)} · ${fmtCount(j.manifest)}`;
-
-  const fraction = sendFraction(j);
-  entry.barFill.style.width = `${Math.round(Math.min(1, Math.max(0, fraction)) * 100)}%`;
-  entry.meta.textContent = stateLabel(j);
-
-  const active = !TERMINAL_TRANSFER_STATES.includes(j.state);
-  if (entry.activeState !== active) {
-    entry.actionSlot.replaceChildren(buildActionButton(j.jobId, active));
-    entry.activeState = active;
-  }
-
-  if (expandedJobs.has(entry.jobId)) renderJobDetail(entry, j);
 }
 
 // Remove every finished/failed/canceled job in one go. Active transfers are left
@@ -1567,7 +1409,7 @@ async function clearFinishedTransfers() {
     try { await window.farsightIpc.transferRemove(j.jobId); } catch { /* best effort */ }
     transferJobs.delete(j.jobId);
     sendRateEstimators.delete(j.jobId);
-    expandedJobs.delete(j.jobId);
+    peakRates.delete(j.jobId);
   }
   renderTransfers();
 }
@@ -1648,7 +1490,7 @@ function renderDeck(job) {
   grid.append(
     cell('Transferred', m.transferredText || '—', m.transferredText.includes(' / ')),
     cell('Files', m.filesText || '—', m.filesText.includes(' / ')),
-    cell('Time left', m.etaText ? m.etaText.replace('~', '~') : '—'),
+    cell('Time left', m.etaText || '—'),
     cell('Elapsed', m.elapsedText || '—'),
   );
 
@@ -1672,32 +1514,84 @@ function renderDeck(job) {
   xferDeckEl.replaceChildren(frag);
 }
 
+const xferQueueEl = document.getElementById('xfer-queue');
+
+function qGroupHeader(text, right) {
+  const h = document.createElement('div'); h.className = 'xfer-qgroup-h';
+  const l = document.createElement('span'); l.textContent = text; h.append(l);
+  if (right) { const r = document.createElement('span'); r.textContent = right; h.append(r); }
+  return h;
+}
+
+function qRow(j, opts = {}) {
+  const row = document.createElement('div');
+  row.className = `xfer-qrow${opts.cls ? ` ${opts.cls}` : ''}`;
+  const m = document.createElement('div'); m.className = 'm';
+  const nm = document.createElement('div'); nm.className = 'nm';
+  const dir = document.createElement('span'); dir.className = 'dir';
+  dir.textContent = j.direction === 'recv' ? '↓' : '↑';
+  nm.append(dir, document.createTextNode(`${transferLabel(j)}`));
+  const mt = document.createElement('div'); mt.className = 'mt'; mt.textContent = opts.meta || fmtCount(j.manifest);
+  m.append(nm, mt);
+  row.append(m);
+
+  if (opts.mini) {
+    const wrap = document.createElement('div'); wrap.className = 'xfer-miniwrap';
+    const mini = document.createElement('div'); mini.className = 'xfer-mini';
+    const fill = document.createElement('div'); fill.className = 'xfer-mini-fill';
+    fill.style.width = `${Math.round(Math.min(1, Math.max(0, sendFraction(j))) * 100)}%`;
+    mini.append(fill);
+    const pct = document.createElement('span'); pct.className = 'xfer-mini-pct';
+    pct.textContent = `${Math.round(Math.min(1, Math.max(0, sendFraction(j))) * 100)}%`;
+    wrap.append(mini, pct);
+    row.append(wrap);
+  }
+  if (opts.tag) { const t = document.createElement('span'); t.className = 'xfer-tag'; t.textContent = opts.tag; row.append(t); }
+  if (opts.action) row.append(buildActionButton(j.jobId, opts.action === 'cancel'));
+  return row;
+}
+
+// Interrupted-copy fix (spec §8): name the device when known.
+function interruptedMeta(j) {
+  const who = (j.peer && j.peer.id) ? ` when ${j.peer.id} is online` : ' when the device is online';
+  return `Interrupted · will resume${who}`;
+}
+
+function renderQueue() {
+  xferQueueEl.replaceChildren();
+  const all = [...transferJobs.values()];
+  const active = activeDeckJob();
+  const waitingSends = all
+    .filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && (!active || j.jobId !== active.jobId) && j.state !== 'interrupted')
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  const receives = all.filter((j) => j.direction === 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state));
+  const history = all
+    .filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state) || j.state === 'interrupted')
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  if (waitingSends.length) {
+    xferQueueEl.append(qGroupHeader(`Up next · ${waitingSends.length} waiting`));
+    waitingSends.forEach((j) => xferQueueEl.append(qRow(j, { meta: fmtCount(j.manifest), action: 'cancel' })));
+  }
+  if (receives.length) {
+    xferQueueEl.append(qGroupHeader('Receiving'));
+    receives.forEach((j) => xferQueueEl.append(qRow(j, { meta: stateLabel(j), mini: true })));
+  }
+  if (history.length) {
+    xferQueueEl.append(qGroupHeader('History'));
+    history.forEach((j) => {
+      if (j.state === 'interrupted') xferQueueEl.append(qRow(j, { cls: 'warnrow', meta: interruptedMeta(j), tag: 'Resuming' }));
+      else if (j.state === 'done') xferQueueEl.append(qRow(j, { cls: 'done', meta: stateLabel(j), tag: 'Done', action: 'remove' }));
+      else xferQueueEl.append(qRow(j, { cls: 'fail', meta: stateLabel(j), tag: 'Failed', action: 'remove' }));
+    });
+  }
+}
+
 function renderTransfers() {
-  renderDeck(activeDeckJob());
-  const jobs = [...transferJobs.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const jobs = [...transferJobs.values()];
   transfersEmptyEl.hidden = jobs.length > 0;
-
-  const ids = jobs.map((j) => j.jobId);
-  const structureChanged = ids.length !== transferRowIds.length || ids.some((id, i) => id !== transferRowIds[i]);
-
-  if (!structureChanged) {
-    for (const j of jobs) {
-      const entry = transferRowEls.get(j.jobId);
-      if (entry) updateJobRow(entry, j);
-    }
-    return;
-  }
-
-  transferRowEls.clear();
-  transfersListEl.replaceChildren();
-  transferRowIds = ids;
-  for (const j of jobs) {
-    const entry = jobRow(j);
-    updateJobRow(entry, j);
-    applyExpanded(entry, j); // restore this job's prior open/closed state
-    transfersListEl.appendChild(entry.row);
-    transferRowEls.set(j.jobId, entry);
-  }
+  renderDeck(activeDeckJob());
+  renderQueue();
 }
 
 async function refreshTransfersList() {

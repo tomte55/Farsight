@@ -23,7 +23,11 @@ describe('transfer removal wiring', () => {
     expect(h).toMatch(/removeJob\(/);
   });
   test('a terminal job row shows a Remove button that calls transferRemove', () => {
-    const fn = renderer.slice(renderer.indexOf('function jobRow('), renderer.indexOf('function renderTransfers('));
+    // Task 7: the per-row action button (Cancel for active, Remove for
+    // terminal) is built by buildActionButton and reused by both the deck's
+    // queue rows (qRow) and clearFinishedTransfers — not a per-row jobRow
+    // anymore (that flat-list machinery was retired in Task 7).
+    const fn = renderer.slice(renderer.indexOf('function buildActionButton('), renderer.indexOf('function buildActionButton(') + 1500);
     expect(fn).toContain('transferRemove(');
     // Remove is the terminal-state branch (the else of the active/Cancel branch).
     expect(fn).toMatch(/else\s*\{[\s\S]*Remove[\s\S]*transferRemove\(/);
