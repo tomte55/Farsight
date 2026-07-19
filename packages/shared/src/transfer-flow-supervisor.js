@@ -322,12 +322,29 @@ export function createFlowSupervisor({
       // Total outage: re-dial on the tail backoff. Do NOT advance `attempt` (it's
       // already at/above the array length, so backoffFor stays at the longest
       // value) — this keeps the probe cycling until connect or outage giveup.
-      slot.timer = setTimer(() => dial(slotIndex), backoffFor(slot.attempt));
+      armSlotTimer(slot, () => dial(slotIndex), backoffFor(slot.attempt));
       return;
     }
     const delay = backoffFor(slot.attempt);
     slot.attempt += 1;
-    slot.timer = setTimer(() => dial(slotIndex), delay);
+    armSlotTimer(slot, () => dial(slotIndex), delay);
+  }
+
+  // At most ONE pending timer per slot, ever. Without this, a slot that goes
+  // terminal TWICE for the same still-current worker (e.g. 'failed' then
+  // 'closed' fire before the re-dial timer runs — the staleness guard in
+  // handleState doesn't help here since slot.worker hasn't been replaced yet)
+  // would call scheduleRedial twice and stack TWO timers. Both would then
+  // fire, calling dial(slotIndex) twice: two fresh workers created, the first
+  // immediately orphaned when the second overwrites slot.worker — orphaned
+  // because its terminal events are staleness-guarded away and stop() only
+  // ever sees the CURRENT slot.worker, so it's never close()d (a leaked
+  // worker + TURN allocation) and its inFlightDials increment is never
+  // released (a permanently-consumed dial-slot). Clearing any prior timer
+  // before arming a new one keeps the invariant "≤ 1 pending timer per slot".
+  function armSlotTimer(slot, fn, delay) {
+    if (slot.timer != null) { clearTimer(slot.timer); slot.timer = null; }
+    slot.timer = setTimer(fn, delay);
   }
 
   function fireStarved() {
@@ -345,7 +362,7 @@ export function createFlowSupervisor({
       // slot 0 immediately (t=0); the rest at staggerMs increments.
       dial(0);
       for (let i = 1; i < flowCount; i += 1) {
-        slots[i].timer = setTimer(((idx) => () => dial(idx))(i), staggerMs * i);
+        armSlotTimer(slots[i], ((idx) => () => dial(idx))(i), staggerMs * i);
       }
       // Nothing is connected yet — start the total-outage clock immediately, so
       // a start that NEVER brings a flow up also gives up after outageGiveupMs.

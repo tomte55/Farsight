@@ -642,13 +642,30 @@ describe('transfer-flow-supervisor', () => {
   });
 
   it('exactly-once close guard: multiple terminal-ish emits from the same dead worker close it only once', () => {
-    const { createWorker, args } = baseArgs({ flowCount: 1, backoff: [500] });
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500] });
     const sup = createFlowSupervisor(args);
     sup.start();
     const w0 = createWorker.latestFor(0);
     w0.emit('failed');
     w0.emit('closed'); // same stale worker, a second terminal-ish state before re-dial fires
     expect(w0.close).toHaveBeenCalledTimes(1);
+
+    // Review follow-up: a double-terminal on the SAME still-current worker
+    // must NOT stack two re-dial timers for the slot — scheduleRedial ran
+    // twice (failed, then closed), and without clearing the prior timer
+    // that would arm TWO timers that both fire, calling dial(slotIndex)
+    // twice: two fresh workers, the first immediately orphaned when the
+    // second overwrites slot.worker (never closed — its terminal events are
+    // staleness-guarded away and stop() only sees the CURRENT slot.worker —
+    // and its inFlightDials increment never released). Advance past the
+    // single backoff and confirm EXACTLY ONE fresh worker exists for this
+    // slot, with nothing orphaned/un-closed left behind.
+    clock.advance(500);
+    const slot0Workers = createWorker.all.filter((w) => w.slotIndex === 0);
+    expect(slot0Workers.length).toBe(2); // initial w0 + exactly one re-dial
+    const w0b = slot0Workers[1];
+    expect(w0b).not.toBe(w0);
+    expect(w0b.close).not.toHaveBeenCalled(); // the fresh worker is untouched
   });
 
   it('stop(): cancels pending re-dial timers and closes live workers; no re-dials afterward', () => {
