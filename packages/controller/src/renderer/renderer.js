@@ -1455,10 +1455,16 @@ const xferDeckEl = document.getElementById('xfer-deck');
 // interrupted send from rendering in BOTH the deck (with a wrong "Transferring"
 // pill) and History at the same time.
 function activeDeckJob() {
-  const sends = [...transferJobs.values()].filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && j.state !== 'paused');
-  if (sends.length === 0) return null;
-  // The engine runs the oldest queued send first (FIFO); the deck follows suit.
-  return sends.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
+  const all = [...transferJobs.values()];
+  const live = (j) => !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && j.state !== 'paused';
+  // The deck shows the active SEND (the engine runs the oldest queued send first
+  // -- FIFO -- and the deck follows suit). If nothing is sending, fall back to the
+  // active RECEIVE so the RECEIVER gets the same rich deck (rate/waveform/progress),
+  // not just the compact Receiving row. Send wins over receive when both run.
+  const sends = all.filter((j) => j.direction !== 'recv' && live(j)).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  if (sends.length) return sends[0];
+  const recvs = all.filter((j) => j.direction === 'recv' && live(j)).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  return recvs[0] || null;
 }
 
 // One grid cell: a <span> (main value) + <small> (the " / total" suffix, if
@@ -1682,8 +1688,10 @@ function patchDeck(job, m) {
     // else: animateLanes owns the live-lane heights.
   });
 
-  // Can only pause an actively-transferring send (not awaiting-approval /
-  // reconnecting / finishing / verifying).
+  // Pause is send-only (the engine can't pause a receive) -- hide it on a receive
+  // deck. For a send, enable it only while actively transferring (not awaiting-
+  // approval / reconnecting / finishing / verifying).
+  d.pauseBtn.style.display = job.direction === 'recv' ? 'none' : '';
   d.pauseBtn.disabled = job.state !== 'active';
 }
 
@@ -1874,7 +1882,9 @@ function computeQueueRows() {
   // Interrupted receives belong in History (as "Resuming"), same as interrupted
   // sends — exclude them here so an interrupted receive renders ONCE, not once
   // under Receiving (mini bar) and again under History.
-  const receives = all.filter((j) => j.direction === 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted');
+  // Exclude the receive that's showing in the deck (activeDeckJob can now be a
+  // receive when nothing is sending) so it doesn't double-render here + in the deck.
+  const receives = all.filter((j) => j.direction === 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && (!active || j.jobId !== active.jobId));
   const history = all
     .filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state) || j.state === 'interrupted')
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
