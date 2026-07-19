@@ -674,7 +674,11 @@ export function createReceiver({
   async function maybeComplete() {
     if (settled) return;
     if (jobDoneSeen && pending.size === 0) {
-      await saveRecord('done');
+      // F-A4: a receive that finished with a failed file must not read as clean
+      // 'done'. Inlined here (not via transfer-service's jobStateForCompletion —
+      // the orchestrator can't import transfer-service without a cycle); this is
+      // the same rule for the always-accepted single-flow completion path.
+      await saveRecord(ok ? 'done' : 'completed_with_errors');
       // abort() can race this in-flight save (it runs outside the run() serializer
       // — see the module-level abort() below): if it settled us WHILE the save
       // above was in flight, don't ack a delivery that was already canceled, and

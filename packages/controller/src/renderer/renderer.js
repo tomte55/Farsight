@@ -1356,7 +1356,10 @@ function stateLabel(j) {
 function sendFraction(j) {
   const p = j.progress;
   if (p && Number.isFinite(p.total) && p.total > 0) return bytesDone(p) / p.total;
-  return j.state === 'done' ? 1 : 0;
+  // 'completed_with_errors' is still a COMPLETE transfer (F-A4 just means one
+  // file failed verification) — a job in this state lacking progress.total
+  // must show a full bar like 'done', not an empty one.
+  return (j.state === 'done' || j.state === 'completed_with_errors') ? 1 : 0;
 }
 
 // "1.2 GB of 100 GB · 24.0 MB/s · ~1h 8m left · 3 / 2974 files"
@@ -1415,11 +1418,10 @@ function buildActionButton(jobId, active) {
 
 // Remove every finished/failed/canceled job in one go. Active transfers are left
 // untouched (they show Cancel, not Remove). 'completed_with_errors' (F-A4) is
-// terminal too — grouped alongside TERMINAL_TRANSFER_STATES ad hoc, the same
-// way 'interrupted'/'paused' are handled elsewhere in this file, rather than
-// widening the shared list.
+// terminal too and is already IN the shared TERMINAL_TRANSFER_STATES constant
+// (shell-nav.js) — no separate clause needed here.
 async function clearFinishedTransfers() {
-  const finished = [...transferJobs.values()].filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state) || j.state === 'completed_with_errors');
+  const finished = [...transferJobs.values()].filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state));
   for (const j of finished) {
     try { await window.farsightIpc.transferRemove(j.jobId); } catch { /* best effort */ }
     transferJobs.delete(j.jobId);
@@ -1457,10 +1459,12 @@ const xferDeckEl = document.getElementById('xfer-deck');
 // only a terminal state or a receive is excluded. 'interrupted' is non-terminal
 // but is routed to History as "Resuming" (Task 7) — excluding it here keeps an
 // interrupted send from rendering in BOTH the deck (with a wrong "Transferring"
-// pill) and History at the same time.
+// pill) and History at the same time. 'completed_with_errors' is terminal and is
+// already covered by TERMINAL_TRANSFER_STATES (shell-nav.js), so it needs no
+// clause of its own here — only 'interrupted'/'paused' (both non-terminal) do.
 function activeDeckJob() {
   const all = [...transferJobs.values()];
-  const live = (j) => !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && j.state !== 'paused' && j.state !== 'completed_with_errors';
+  const live = (j) => !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && j.state !== 'paused';
   // The deck shows the active SEND (the engine runs the oldest queued send first
   // -- FIFO -- and the deck follows suit). If nothing is sending, fall back to the
   // active RECEIVE so the RECEIVER gets the same rich deck (rate/waveform/progress),
@@ -1876,7 +1880,7 @@ function computeQueueRows() {
     .filter((j) => j.direction !== 'recv' && j.state === 'paused')
     .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const waitingSends = all
-    .filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && (!active || j.jobId !== active.jobId) && j.state !== 'interrupted' && j.state !== 'paused' && j.state !== 'completed_with_errors')
+    .filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && (!active || j.jobId !== active.jobId) && j.state !== 'interrupted' && j.state !== 'paused')
     .sort((a, b) => {
       const ai = orderIndex.has(a.jobId) ? orderIndex.get(a.jobId) : Infinity;
       const bi = orderIndex.has(b.jobId) ? orderIndex.get(b.jobId) : Infinity;
@@ -1888,13 +1892,13 @@ function computeQueueRows() {
   // under Receiving (mini bar) and again under History.
   // Exclude the receive that's showing in the deck (activeDeckJob can now be a
   // receive when nothing is sending) so it doesn't double-render here + in the deck.
-  const receives = all.filter((j) => j.direction === 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && j.state !== 'completed_with_errors' && (!active || j.jobId !== active.jobId));
+  const receives = all.filter((j) => j.direction === 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && (!active || j.jobId !== active.jobId));
   const history = all
     // 'completed_with_errors' (F-A4) is terminal and belongs in History like
-    // 'error'/'done' — it's excluded from the base TERMINAL_TRANSFER_STATES
-    // constant so it doesn't get treated as a clean 'done' anywhere the base
-    // list is used for that purpose, but it must still land here.
-    .filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state) || j.state === 'interrupted' || j.state === 'completed_with_errors')
+    // 'error'/'done' — it's already IN the shared TERMINAL_TRANSFER_STATES
+    // constant (shell-nav.js), so it's covered by that clause below; only
+    // 'interrupted' (non-terminal, routed here as "Resuming") needs its own.
+    .filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state) || j.state === 'interrupted')
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   const rows = [];
@@ -2036,7 +2040,7 @@ window.farsightIpc.onTransferEvent((ev) => {
   if (!ev || typeof ev.jobId !== 'string') return;
   const existing = transferJobs.get(ev.jobId) || { jobId: ev.jobId, direction: ev.direction, state: 'awaiting-approval', createdAt: Date.now() };
   existing.direction = ev.direction || existing.direction;
-  if (TERMINAL_TRANSFER_STATES.includes(existing.state) || existing.state === 'completed_with_errors') { transferJobs.set(ev.jobId, existing); return; } // don't resurrect a finished job (F-A4: completed_with_errors is terminal too)
+  if (TERMINAL_TRANSFER_STATES.includes(existing.state)) { transferJobs.set(ev.jobId, existing); return; } // don't resurrect a finished job (F-A4: completed_with_errors is terminal too and is in TERMINAL_TRANSFER_STATES)
   if (ev.type === 'accepted') {
     // The host approved — ONLY now is the transfer genuinely active.
     existing.state = 'active';

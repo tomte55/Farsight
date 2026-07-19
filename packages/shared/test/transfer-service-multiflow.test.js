@@ -7,7 +7,7 @@
 // partial state only transfers the gap, not the whole file again.
 import { describe, it, expect, beforeEach, afterEach, test } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTransferService } from '../src/transfer-service.js';
@@ -633,6 +633,80 @@ describe('transfer-service multi-flow: rolling-joined handle teardown', () => {
     expect(closeCalls).toBe(1); // swept once on teardown — leak closed, no double-close
     expect(receiverSvc.getReceiveFlowSink(SESSION)).toBeNull(); // deregistered
   });
+});
+
+// Final-review Important #2: transfer-service.js:891 computes
+// jobStateForCompletion({ accepted, ok: result.ok }) at the multi-flow RECEIVE
+// completion site, but until now nothing drove a real multi-flow receive to
+// ok:false -- only the SEND side (above) was pinned. Forces a genuine terminal
+// I/O failure with NO injection seam: createSparsePartFile's openPart does
+// `mkdir(dirname(finalPath), { recursive: true })`, so pre-creating a plain
+// FILE at the directory path makes that mkdir throw ENOTDIR every time. The
+// receive-router (transfer-receive-router.js) retries the open+write with its
+// default retryDelays ([150, 400]ms) and then gives up on that ONE file
+// permanently (`terminal: true`) -- the other file in the manifest still
+// finalizes normally, and the receive as a whole still resolves (not rejects)
+// with ok:false once every file has reached a resolved state.
+describe('Final-review Important #2: multi-flow RECEIVE completed_with_errors wiring (F-A4)', () => {
+  it('one file terminally I/O-failed (blocked directory) -> receive resolves ok:false, the other file lands, and the recv record is completed_with_errors', async () => {
+    const srcDir = await tmp();
+    const dstDir = await tmp();
+    const sendStore = createJobsStore({ dir: await tmp() });
+    const recvStore = createJobsStore({ dir: await tmp() });
+
+    const okContent = new Uint8Array(200).map((_, i) => (i * 11 + 1) & 0xff);
+    const blockedContent = new Uint8Array(80).map((_, i) => (i * 5 + 2) & 0xff);
+    await writeFile(join(srcDir, 'okfile.bin'), okContent);
+    await mkdir(join(srcDir, 'blocked'), { recursive: true });
+    await writeFile(join(srcDir, 'blocked', 'f.bin'), blockedContent);
+
+    // The crux of the fixture: a plain FILE (not a directory) already sits at
+    // dstDir/blocked, so the receiver's mkdir(dstDir/blocked, {recursive:true})
+    // for 'blocked/f.bin' throws every time it's attempted.
+    await writeFile(join(dstDir, 'blocked'), 'not a directory');
+
+    const entries = [
+      { fileId: 0, path: 'okfile.bin', size: okContent.length, mtime: 1 },
+      { fileId: 1, path: 'blocked/f.bin', size: blockedContent.length, mtime: 1 },
+    ];
+    const manifest = { entries, totalBytes: okContent.length + blockedContent.length, totalFiles: 2 };
+    const sources = new Map([
+      [0, join(srcDir, 'okfile.bin')],
+      [1, join(srcDir, 'blocked', 'f.bin')],
+    ]);
+
+    const { senderCtrl, receiverCtrl, senderFlows, receiverFlows } = link({ flowCount: 2 });
+
+    const receiverSvc = createTransferService({
+      store: recvStore, transferDir: dstDir, consent: async () => true,
+      openChannel: async () => ({ ctrl: receiverCtrl, flows: receiverFlows, close: async () => {} }),
+      receiveCloseGraceMs: 0,
+    });
+    const senderSvc = createTransferService({
+      store: sendStore, transferDir: srcDir, consent: async () => true,
+      openChannel: async () => ({ ctrl: senderCtrl, flows: senderFlows, close: async () => {} }),
+    });
+
+    const jobId = 'd'.repeat(32);
+    const recvPromise = receiverSvc.startReceive({ rendezvous: 'r-mf-blocked' });
+    await tick(10);
+    const sendResult = await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'device-mf-blocked', flowCount: 2 } });
+    const recvResult = await recvPromise;
+
+    // The receive still resolves (terminal completion, never a hang/reject) --
+    // just truthfully, with ok:false because one file never made it.
+    expect(recvResult.ok).toBe(false);
+    expect(sendResult.ok).toBe(false);
+
+    // The unaffected file landed byte-identical...
+    expect(Buffer.from(await readFile(join(dstDir, 'okfile.bin'))).equals(Buffer.from(okContent))).toBe(true);
+    // ...and the blocked one never made it to disk (still blocked by the file at that path).
+    await expect(readFile(join(dstDir, 'blocked', 'f.bin'))).rejects.toThrow();
+
+    const recvRec = (await recvStore.list()).find((j) => j.jobId === jobId);
+    expect(recvRec).toBeTruthy();
+    expect(recvRec.jobState).toBe('completed_with_errors'); // F-A4: RECEIVE side, not just send
+  }, 10000);
 });
 
 // Final-review #3: a phantom late group (a re-dial's TRANSFER_REQUEST arriving
