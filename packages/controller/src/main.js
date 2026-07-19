@@ -613,6 +613,11 @@ ipcMain.handle('control-allowed:set', (_e, v) => writeControlAllowed(!!v));
 // `flowCount === 1` reproduces the pre-Task-3 single-flow path exactly — the
 // multi-flow branch in getTransferService()'s openChannel above only triggers
 // when flowCount > 1.
+// NOTE: each flow opens its own signaling CONNECT, drawing the server's per-IP
+// `connectBurst` budget (default 30, never refunded on success — see
+// @farsight/shared/config MAX_PARALLEL_CONNECTIONS). A configured value near the
+// 32 ceiling can therefore exceed the connect budget and self-rate-limit; auto
+// flow-scaling (Phase 2.4) caps to the budget.
 function parallelConnections() {
   return resolveParallelConnections(readStoredConfig().parallelConnections);
 }

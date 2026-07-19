@@ -45,6 +45,8 @@ export function createSignalingServer({ port, config } = {}) {
   // L-1: bounds CONNECT attempts (offline target, bad password, or success)
   // per source IP, so probing for live host IDs is capped regardless of
   // hit/miss outcome — separate from the per-(host,IP) password lockout above.
+  // Also caps parallel transfer flows per sender (each flow = one CONNECT here);
+  // see connectBurst in config.js and MAX_PARALLEL_CONNECTIONS in shared/config.
   const connectLimiter = createRateLimiter({ maxAttempts: cfg.connectBurst, windowMs: cfg.windowMs });
   const limits = createConnectionLimits();
   const log = createLogger();

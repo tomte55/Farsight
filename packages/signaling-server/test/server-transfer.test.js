@@ -130,6 +130,35 @@ test('a second ATTACH to an already-attached session is rejected', async () => {
   host.close(); sender.close(); worker.close(); intruder.close();
 });
 
+test('every transfer CONNECT draws down the per-IP connect budget (multi-flow competes with it; never reset on success)', async () => {
+  // Each parallel send flow opens its own transfer CONNECT, so a send's flowCount
+  // consumes flowCount of this per-IP budget — and the budget is NOT refunded on a
+  // SUCCESSFUL connect (anti-enumeration, SECURITY.md L-1). connectBurst therefore
+  // bounds how many flows one sender can open in a window: MAX_PARALLEL_CONNECTIONS
+  // (32, @farsight/shared/config) currently EXCEEDS the default connectBurst (30),
+  // so auto flow-scaling (2.4) must cap flows to the connect budget. Here
+  // connectBurst=2 makes the 3rd CONNECT lock out even though the first two SUCCEEDED.
+  srv = createSignalingServer({ port: 8289, config: cfg({ port: 8289, connectBurst: 2 }) });
+  const host = await open('ws://127.0.0.1:8289');
+  const hostRead = reader(host);
+  host.send(JSON.stringify({ type: MSG.REGISTER, password: 'pw' }));
+  const reg = await hostRead();
+
+  for (let i = 0; i < 2; i++) {
+    const sender = await open('ws://127.0.0.1:8289');
+    sender.send(JSON.stringify({ type: MSG.CONNECT, targetId: reg.id, password: 'pw', kind: 'transfer' }));
+    expect((await hostRead()).type).toBe(MSG.TRANSFER_REQUEST); // both succeed
+    sender.close();
+  }
+
+  const third = await open('ws://127.0.0.1:8289');
+  const thirdRead = reader(third);
+  third.send(JSON.stringify({ type: MSG.CONNECT, targetId: reg.id, password: 'pw', kind: 'transfer' }));
+  expect((await thirdRead()).reason).toBe('rate_limited'); // budget spent by the two successes
+
+  host.close(); third.close();
+});
+
 test('an unattached session times out and errors the initiator', async () => {
   srv = createSignalingServer({ port: 8286, config: cfg({ port: 8286, sessionTimeoutMs: 80 }) });
   const host = await open('ws://127.0.0.1:8286');

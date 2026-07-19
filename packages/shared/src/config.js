@@ -12,6 +12,15 @@ import { assertSecureSignalingUrl } from './signaling-url.js';
 // useful "absent" state to preserve once the key is present at all.
 export const DEFAULT_PARALLEL_CONNECTIONS = 8;
 const MIN_PARALLEL_CONNECTIONS = 1;
+// CEILING on parallel send flows. LINKED TO the signaling server's per-IP
+// `connectBurst` (packages/signaling-server/src/config.js, default 30): every
+// flow opens its own transfer CONNECT, and that budget is NOT refunded on success
+// (anti-enumeration, SECURITY.md L-1), so a single send of N flows spends N of the
+// per-window budget. This ceiling (32) currently EXCEEDS the default connectBurst
+// (30), so a max-flow send self-rate-limits its own tail flows and any retry in
+// the same window. Auto flow-scaling (Phase 2.4) MUST cap flows to the connect
+// budget rather than this raw ceiling; pinned by server-transfer.test.js's
+// connect-budget guard.
 const MAX_PARALLEL_CONNECTIONS = 32;
 
 // Effective parallel-connections count for ANY input: a real number or a

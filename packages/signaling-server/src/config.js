@@ -14,6 +14,12 @@ export function loadConfig(env = process.env) {
     msgBurst: Number(env.MSG_BURST ?? 60),
     msgPerSec: Number(env.MSG_PER_SEC ?? 30),
     // L-1: per-source-IP CONNECT budget, to blunt the host-enumeration oracle.
+    // Every CONNECT (offline/bad-password/SUCCESS alike) spends one and it is
+    // never refunded on success — so this ALSO bounds how many parallel transfer
+    // flows one sender can open per window. LINKED TO MAX_PARALLEL_CONNECTIONS
+    // (@farsight/shared/config, 32): this default (30) is BELOW that ceiling, so a
+    // high-flow send self-rate-limits. Raising this weakens enumeration protection;
+    // the preferred fix is capping flows client-side (Phase 2.4), not raising this.
     connectBurst: Number(env.CONNECT_BURST ?? 30),
     // SP3 (spec §4.1): sweep a transfer session whose target never attaches.
     sessionTimeoutMs: Number(env.SESSION_TIMEOUT_MS ?? 15000),
