@@ -111,6 +111,22 @@ export function createFlowSupervisor({
   // probed); they start via drainQueue as dial-slots free AND a flow is live.
   let inFlightDials = 0;
   const dialQueue = [];
+  // Task 4: workers already closed by us (terminal-close or stop()), so a
+  // worker is never close()d twice — a single dead worker can emit more than
+  // one terminal-ish state (e.g. 'failed' then 'closed') before its slot is
+  // re-dialed, and stop() must not re-close a worker the terminal handler
+  // already closed. Keyed on the worker object so it stays correct across
+  // re-dials (a fresh worker for the same slot is a distinct, unclosed key).
+  const closedWorkers = new WeakSet();
+
+  // Best-effort, exactly-once close: releases the worker's RTCPeerConnection
+  // (and thus its coturn relay allocation) PROMPTLY. Guarded so a throwing
+  // close() never breaks the supervisor.
+  function closeWorker(worker) {
+    if (!worker || closedWorkers.has(worker)) return;
+    closedWorkers.add(worker);
+    try { worker.close(); } catch { /* best-effort */ }
+  }
 
   const backoffFor = (attempt) => backoff[Math.min(attempt, backoff.length - 1)];
 
@@ -261,6 +277,13 @@ export function createFlowSupervisor({
       // This worker is no longer mid-dial — free its dial slot before scheduling
       // the next re-dial (and before draining), so the freed slot is available.
       releaseDialSlot(slot);
+      // Task 4: release this DEAD flow's TURN allocation PROMPTLY — close the
+      // old worker now, before/when scheduling the re-dial, instead of leaving
+      // it to linger until whole-transfer teardown (a churny outage let dead
+      // workers accumulate to 755 concurrent coturn allocations). Only the
+      // worker that just went terminal is closed here — never slot.worker's
+      // eventual replacement, and never twice (closeWorker guards).
+      closeWorker(worker);
       if (onFlowDown) onFlowDown(slotIndex);
       if (liveCount() === 0) { fireStarved(); armOutageTimer(); }
       scheduleRedial(slotIndex);
@@ -336,7 +359,9 @@ export function createFlowSupervisor({
       for (const slot of slots) {
         if (slot.timer != null) { clearTimer(slot.timer); slot.timer = null; }
         slot.dialing = false;
-        if (slot.worker) { try { slot.worker.close(); } catch { /* best-effort */ } }
+        // Guarded by closeWorker: a slot mid-backoff still points at the OLD
+        // worker the terminal handler already closed — don't double-close it.
+        if (slot.worker) closeWorker(slot.worker);
       }
     },
     liveCount,

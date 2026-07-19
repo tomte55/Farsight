@@ -605,6 +605,52 @@ describe('transfer-flow-supervisor', () => {
     }
   });
 
+  // Task 4: a slot going terminal must have its OLD (dead) worker close()d
+  // PROMPTLY — before/when the re-dial's backoff timer even fires — so its
+  // RTCPeerConnection tears down and coturn frees the relay allocation right
+  // away, instead of lingering until whole-transfer teardown (a live incident
+  // let dead workers accumulate to 755 concurrent TURN allocations).
+  it('closes the OLD worker promptly on terminal state, before the fresh re-dialed worker exists', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500] });
+    const sup = createFlowSupervisor(args);
+    sup.start();
+    const w0 = createWorker.latestFor(0);
+
+    w0.emit('failed');
+    // Closed PROMPTLY -- immediately on terminal, well before the backoff
+    // timer that re-dials this slot fires.
+    expect(w0.close).toHaveBeenCalledTimes(1);
+
+    clock.advance(500); // re-dial fires -> a fresh worker for the same slot
+    const w0b = createWorker.latestFor(0);
+    expect(w0b).not.toBe(w0);
+    expect(w0b.close).not.toHaveBeenCalled(); // only the OLD worker was closed
+
+    // stop() afterward must not double-close the already-closed old worker.
+    sup.stop();
+    expect(w0.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('disconnected (transient) never closes the worker — it may ICE-restart and recover', () => {
+    const { createWorker, args } = baseArgs({ flowCount: 1 });
+    const sup = createFlowSupervisor(args);
+    sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('connected');
+    w0.emit('disconnected');
+    expect(w0.close).not.toHaveBeenCalled();
+  });
+
+  it('exactly-once close guard: multiple terminal-ish emits from the same dead worker close it only once', () => {
+    const { createWorker, args } = baseArgs({ flowCount: 1, backoff: [500] });
+    const sup = createFlowSupervisor(args);
+    sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('failed');
+    w0.emit('closed'); // same stale worker, a second terminal-ish state before re-dial fires
+    expect(w0.close).toHaveBeenCalledTimes(1);
+  });
+
   it('stop(): cancels pending re-dial timers and closes live workers; no re-dials afterward', () => {
     const { clock, createWorker, args } = baseArgs({ flowCount: 2, backoff: [500] });
     const sup = createFlowSupervisor(args);
