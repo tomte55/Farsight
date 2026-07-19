@@ -396,6 +396,13 @@ body.in-session .cog, body.in-session .menu { display: none; }
 .xfer-qrow.fail .xfer-tag { color: var(--danger-ink); background: var(--danger-bg); }
 .xfer-qrow.warnrow .xfer-tag { color: var(--warn); background: rgba(240, 180, 41, .13); }
 
+/* Waiting-send reorder control — a small vertical stack of two tiny buttons
+   (up/down) so a queued send can be nudged ahead of/behind its neighbors. */
+.xfer-ord { display: flex; flex-direction: column; gap: 2px; flex: 0 0 auto; }
+.xfer-ord-btn { display: flex; align-items: center; justify-content: center; width: 18px; height: 13px; padding: 0; border: 1px solid var(--line); border-radius: 3px; background: var(--panel2); color: var(--sub); font-size: 8px; line-height: 1; cursor: pointer; }
+.xfer-ord-btn:hover { background: #1b1e27; color: var(--ink); }
+.xfer-ord-btn:disabled { opacity: .35; cursor: default; }
+
 @media (max-width: 900px) { .xfer-work { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .xfer-lane, .xfer-pill .pd { animation: none !important; transition: none !important; } }
 .xfer-wave-area { fill: rgba(74, 168, 255, .22); stroke: none; }

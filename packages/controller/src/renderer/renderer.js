@@ -1659,6 +1659,23 @@ function renderDeck(job) {
 
 const xferQueueEl = document.getElementById('xfer-queue');
 
+// Waiting-send order, as the engine's queue sees it — refreshed in
+// refreshTransfersList() and right after every reorder click (see qRow's
+// opts.reorder buttons below). Falls back to createdAt for a jobId this
+// hasn't caught up to yet.
+let lastQueueOrder = [];
+
+// Persistent queue-row elements, keyed by jobId — mirrors deckEls' cache-and-
+// patch pattern (see buildDeck/patchDeck above) so a row surviving between
+// renders is PATCHED, not recreated: recreating it every tick (~4/s while a
+// send is active) would drop a button's focus/in-flight click, and recreating
+// it on a reorder would do the same to the very buttons that just fired.
+const queueRowEls = new Map(); // jobId -> { row, mt, fill, pct, tagEl, actionBtn, ordUp, ordDown }
+// Structural signature of the last renderQueue() rebuild (ordered
+// "jobId:kind:action" list). Unchanged between two calls -> every row kept
+// its group/position, so this tick only needs to PATCH volatile fields.
+let lastQueueSig = null;
+
 function qGroupHeader(text, right) {
   const h = document.createElement('div'); h.className = 'xfer-qgroup-h';
   const l = document.createElement('span'); l.textContent = text; h.append(l);
@@ -1666,6 +1683,9 @@ function qGroupHeader(text, right) {
   return h;
 }
 
+// Builds a brand-new row + its cache-able refs. Only called for a jobId that
+// isn't already in queueRowEls — an existing row is reused (moved), not
+// rebuilt, by renderQueue below.
 function qRow(j, opts = {}) {
   const row = document.createElement('div');
   row.className = `xfer-qrow${opts.cls ? ` ${opts.cls}` : ''}`;
@@ -1678,20 +1698,69 @@ function qRow(j, opts = {}) {
   m.append(nm, mt);
   row.append(m);
 
+  let fill = null;
+  let pct = null;
   if (opts.mini) {
     const wrap = document.createElement('div'); wrap.className = 'xfer-miniwrap';
     const mini = document.createElement('div'); mini.className = 'xfer-mini';
-    const fill = document.createElement('div'); fill.className = 'xfer-mini-fill';
-    fill.style.width = `${Math.round(Math.min(1, Math.max(0, sendFraction(j))) * 100)}%`;
+    fill = document.createElement('div'); fill.className = 'xfer-mini-fill';
     mini.append(fill);
-    const pct = document.createElement('span'); pct.className = 'xfer-mini-pct';
-    pct.textContent = `${Math.round(Math.min(1, Math.max(0, sendFraction(j))) * 100)}%`;
+    pct = document.createElement('span'); pct.className = 'xfer-mini-pct';
     wrap.append(mini, pct);
     row.append(wrap);
   }
-  if (opts.tag) { const t = document.createElement('span'); t.className = 'xfer-tag'; t.textContent = opts.tag; row.append(t); }
-  if (opts.action) row.append(buildActionButton(j.jobId, opts.action === 'cancel'));
-  return row;
+
+  // Reorder control — waiting sends only. jobId is closed over from this
+  // build call and never changes for this row's lifetime (it's the
+  // queueRowEls cache key), so the click handlers stay correct across every
+  // later patch/reuse.
+  let ordUp = null;
+  let ordDown = null;
+  if (opts.reorder) {
+    const jobId = j.jobId;
+    const ord = document.createElement('div'); ord.className = 'xfer-ord';
+    ordUp = document.createElement('button');
+    ordUp.type = 'button'; ordUp.className = 'xfer-ord-btn'; ordUp.textContent = '▲';
+    ordUp.onclick = async () => {
+      await window.farsightIpc.transferReorder(jobId, 'up');
+      lastQueueOrder = await window.farsightIpc.transferQueueOrder();
+      renderQueue();
+    };
+    ordDown = document.createElement('button');
+    ordDown.type = 'button'; ordDown.className = 'xfer-ord-btn'; ordDown.textContent = '▼';
+    ordDown.onclick = async () => {
+      await window.farsightIpc.transferReorder(jobId, 'down');
+      lastQueueOrder = await window.farsightIpc.transferQueueOrder();
+      renderQueue();
+    };
+    ord.append(ordUp, ordDown);
+    row.append(ord);
+  }
+
+  let tagEl = null;
+  if (opts.tag) { tagEl = document.createElement('span'); tagEl.className = 'xfer-tag'; tagEl.textContent = opts.tag; row.append(tagEl); }
+  let actionBtn = null;
+  if (opts.action) { actionBtn = buildActionButton(j.jobId, opts.action === 'cancel'); row.append(actionBtn); }
+
+  return { row, mt, fill, pct, tagEl, actionBtn, ordUp, ordDown };
+}
+
+// Patches only the fields that can change tick-to-tick or reorder-to-reorder
+// on an already-built row: meta text, mini bar width/pct, tag text, and the
+// reorder buttons' first/last-position disabled state. Never touches
+// structure (no createElement, no className swaps beyond the row's own
+// group class, no onclick reassignment).
+function patchQRow(refs, j, opts) {
+  refs.row.className = `xfer-qrow${opts.cls ? ` ${opts.cls}` : ''}`;
+  refs.mt.textContent = opts.meta || fmtCount(j.manifest);
+  if (refs.fill && refs.pct) {
+    const pctVal = Math.round(Math.min(1, Math.max(0, sendFraction(j))) * 100);
+    refs.fill.style.width = `${pctVal}%`;
+    refs.pct.textContent = `${pctVal}%`;
+  }
+  if (refs.tagEl && opts.tag) refs.tagEl.textContent = opts.tag;
+  if (refs.ordUp) refs.ordUp.disabled = !!opts.firstWaiting;
+  if (refs.ordDown) refs.ordDown.disabled = !!opts.lastWaiting;
 }
 
 // Interrupted-copy fix (spec §8): name the device when known.
@@ -1700,13 +1769,22 @@ function interruptedMeta(j) {
   return `Interrupted · will resume${who}`;
 }
 
-function renderQueue() {
-  xferQueueEl.replaceChildren();
+// Computes the three queue groups as a single ordered row-descriptor list
+// (section for header placement, kind+action for the structural signature).
+// Waiting sends are ordered by the engine's queue order (lastQueueOrder),
+// falling back to createdAt for any jobId the cache hasn't caught up to.
+function computeQueueRows() {
   const all = [...transferJobs.values()];
   const active = activeDeckJob();
+  const orderIndex = new Map(lastQueueOrder.map((id, i) => [id, i]));
   const waitingSends = all
     .filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && (!active || j.jobId !== active.jobId) && j.state !== 'interrupted')
-    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    .sort((a, b) => {
+      const ai = orderIndex.has(a.jobId) ? orderIndex.get(a.jobId) : Infinity;
+      const bi = orderIndex.has(b.jobId) ? orderIndex.get(b.jobId) : Infinity;
+      if (ai !== bi) return ai - bi;
+      return (a.createdAt || 0) - (b.createdAt || 0);
+    });
   // Interrupted receives belong in History (as "Resuming"), same as interrupted
   // sends — exclude them here so an interrupted receive renders ONCE, not once
   // under Receiving (mini bar) and again under History.
@@ -1715,22 +1793,80 @@ function renderQueue() {
     .filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state) || j.state === 'interrupted')
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
-  if (waitingSends.length) {
-    xferQueueEl.append(qGroupHeader(`Up next · ${waitingSends.length} waiting`));
-    waitingSends.forEach((j) => xferQueueEl.append(qRow(j, { meta: fmtCount(j.manifest), action: 'cancel' })));
+  const rows = [];
+  waitingSends.forEach((j, i) => rows.push({
+    jobId: j.jobId, section: 'wait', kind: 'wait', action: 'cancel', job: j,
+    opts: { meta: fmtCount(j.manifest), action: 'cancel', reorder: true, firstWaiting: i === 0, lastWaiting: i === waitingSends.length - 1 },
+  }));
+  receives.forEach((j) => rows.push({
+    jobId: j.jobId, section: 'recv', kind: 'recv', action: 'none', job: j,
+    opts: { cls: 'recv', meta: stateLabel(j), mini: true },
+  }));
+  history.forEach((j) => {
+    if (j.state === 'interrupted') rows.push({ jobId: j.jobId, section: 'history', kind: 'warn', action: 'none', job: j, opts: { cls: 'warnrow', meta: interruptedMeta(j), tag: 'Resuming' } });
+    else if (j.state === 'done') rows.push({ jobId: j.jobId, section: 'history', kind: 'done', action: 'remove', job: j, opts: { cls: 'done', meta: stateLabel(j), tag: 'Done', action: 'remove' } });
+    else rows.push({ jobId: j.jobId, section: 'history', kind: 'fail', action: 'remove', job: j, opts: { cls: 'fail', meta: stateLabel(j), tag: 'Failed', action: 'remove' } });
+  });
+  return { rows, waitingCount: waitingSends.length };
+}
+
+function renderQueue() {
+  const { rows, waitingCount } = computeQueueRows();
+  const sig = rows.map((r) => `${r.jobId}:${r.kind}:${r.action}`).join('|');
+
+  if (sig === lastQueueSig) {
+    // Same jobs, same groups, same order as last render -> patch volatile
+    // fields on the cached refs only. No DOM structure is touched, so a
+    // reorder button mid-click (or any focused element) is untouched.
+    for (const r of rows) {
+      const refs = queueRowEls.get(r.jobId);
+      if (refs) patchQRow(refs, r.job, r.opts);
+    }
+    return;
   }
-  if (receives.length) {
-    xferQueueEl.append(qGroupHeader('Receiving'));
-    receives.forEach((j) => xferQueueEl.append(qRow(j, { cls: 'recv', meta: stateLabel(j), mini: true })));
+  lastQueueSig = sig;
+
+  // Structural/order change: build the final child list, reusing an existing
+  // row element for any jobId that persists (pulled from queueRowEls) rather
+  // than recreating it — this is what lets a row's ▲/▼ survive the very
+  // reorder click that just fired.
+  const finalNodes = [];
+  let lastSection = null;
+  for (const r of rows) {
+    if (r.section !== lastSection) {
+      lastSection = r.section;
+      if (r.section === 'wait') finalNodes.push(qGroupHeader(`Up next · ${waitingCount} waiting`));
+      else if (r.section === 'recv') finalNodes.push(qGroupHeader('Receiving'));
+      else finalNodes.push(qGroupHeader('History'));
+    }
+    let refs = queueRowEls.get(r.jobId);
+    if (refs) {
+      refs.row.className = `xfer-qrow${r.opts.cls ? ` ${r.opts.cls}` : ''}`;
+    } else {
+      refs = qRow(r.job, r.opts);
+      queueRowEls.set(r.jobId, refs);
+    }
+    patchQRow(refs, r.job, r.opts);
+    finalNodes.push(refs.row);
   }
-  if (history.length) {
-    xferQueueEl.append(qGroupHeader('History'));
-    history.forEach((j) => {
-      if (j.state === 'interrupted') xferQueueEl.append(qRow(j, { cls: 'warnrow', meta: interruptedMeta(j), tag: 'Resuming' }));
-      else if (j.state === 'done') xferQueueEl.append(qRow(j, { cls: 'done', meta: stateLabel(j), tag: 'Done', action: 'remove' }));
-      else xferQueueEl.append(qRow(j, { cls: 'fail', meta: stateLabel(j), tag: 'Failed', action: 'remove' }));
-    });
+
+  // Drop cache entries for jobIds no longer in the queue (finished+removed,
+  // etc.) so queueRowEls never grows unbounded.
+  const keptIds = new Set(rows.map((r) => r.jobId));
+  for (const id of [...queueRowEls.keys()]) if (!keptIds.has(id)) queueRowEls.delete(id);
+
+  // Remove only the DOM children that are NOT part of the new list (stale
+  // headers from the previous rebuild, and rows whose job just dropped out).
+  // Every reused row is in `keep`, so it is never detached from the document
+  // — that's the actual mechanism that preserves its button's focus.
+  const keep = new Set(finalNodes);
+  for (const child of Array.from(xferQueueEl.children)) {
+    if (!keep.has(child)) child.remove();
   }
+  // append() on an already-attached node just relocates it (still connected
+  // throughout) — walking the final order and appending each node in turn
+  // sorts the container into place without ever fully detaching a kept node.
+  for (const node of finalNodes) xferQueueEl.append(node);
 }
 
 function renderTransfers() {
@@ -1744,6 +1880,7 @@ function renderTransfers() {
 async function refreshTransfersList() {
   let records = [];
   try { records = await window.farsightIpc.transferList(); } catch { /* ignore — panel just stays empty */ }
+  try { lastQueueOrder = await window.farsightIpc.transferQueueOrder(); } catch { /* keep the previous order */ }
   for (const r of records) {
     const existing = transferJobs.get(r.jobId) || {};
     transferJobs.set(r.jobId, {
