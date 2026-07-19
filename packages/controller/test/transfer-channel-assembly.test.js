@@ -233,6 +233,30 @@ describe('assembleSendFlows (supervisor-backed)', () => {
     expect(errors).toEqual(['bad_password']);
   });
 
+  // Common-mode-resilience Task 5: a TRANSIENT slot-0 error (auth_timeout during
+  // a connection-auth handshake timeout, transfer_timeout) must NOT trip the
+  // whole-transfer resume — the supervisor re-dials slot 0 + swaps ctrl instead
+  // (Task 6). Only AUTHORITATIVE/permanent reasons fail fast via
+  // onRendezvousError. Gated on transfer-service.js's isTerminalReason so the
+  // authoritative/transient split lives in exactly one place.
+  test('slot-0 TRANSIENT errors (auth_timeout, transfer_timeout) are NOT forwarded to onRendezvousError', () => {
+    const { bundle, workers } = build({ flowCount: 2 });
+    const errors = [];
+    bundle.onRendezvousError((r) => errors.push(r));
+    workers[0].__emit('error:auth_timeout');
+    workers[0].__emit('error:transfer_timeout');
+    expect(errors).toEqual([]);
+  });
+
+  test('slot-0 AUTHORITATIVE errors (bad_password, host_offline) ARE forwarded to onRendezvousError', () => {
+    const { bundle, workers } = build({ flowCount: 2 });
+    const errors = [];
+    bundle.onRendezvousError((r) => errors.push(r));
+    workers[0].__emit('error:bad_password');
+    workers[0].__emit('error:host_offline');
+    expect(errors).toEqual(['bad_password', 'host_offline']);
+  });
+
   test('close() calls supervisor.stop() and fails+closes every worker channel (C2 cancel-path)', async () => {
     const { bundle, sup, workers } = build({ flowCount: 3 });
     await bundle.close();

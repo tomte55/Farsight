@@ -14,6 +14,7 @@
 // RECEIVE uses it directly (it already has onBulk).
 
 import { createFlowSupervisor } from '@farsight/shared/transfer-flow-supervisor';
+import { isTerminalReason } from '@farsight/shared/transfer-service';
 
 /**
  * SEND: build a flow SUPERVISOR that keeps `flowCount` slots filled — a
@@ -38,8 +39,17 @@ import { createFlowSupervisor } from '@farsight/shared/transfer-flow-supervisor'
  *       flow would then hang the pool's Promise.race(inflight) forever. So
  *       onFlowDown fails the slot's channel to reject it.
  *   Rendezvous error: only slot 0 (the ctrl flow) surfaces a signaling-level
- *       'error:*' (bad_password/host_offline/…) to onRendezvousError so a send
- *       fails FAST instead of silently re-dialing 8× to exhaustion. Since the
+ *       'error:*' to onRendezvousError so a send fails FAST instead of
+ *       silently re-dialing 8× to exhaustion — but ONLY for AUTHORITATIVE/
+ *       permanent reasons (bad_password/host_offline/declined/nospace/
+ *       bad_manifest/unknown_device/proto), gated via transfer-service.js's
+ *       isTerminalReason (imported, not duplicated, so the authoritative/
+ *       transient split lives in one place). A TRANSIENT reason
+ *       (auth_timeout/transfer_timeout/a plain connection failure) is NOT
+ *       forwarded — those are exactly what the supervisor's slot-0 re-dial +
+ *       ctrl-swap (Task 6, onCtrlReplaced above) is built to recover from;
+ *       forwarding them anyway was one trigger of the whole-transfer resume
+ *       loop on a flaky/DR link (common-mode-resilience Task 5). Since the
  *       supervisor claims onSessionState, we MULTIPLEX slot 0's worker: our
  *       wrapper fans every state out to BOTH our error-forwarder and the
  *       supervisor's handler.
@@ -81,7 +91,12 @@ export function assembleSendFlows({
       let supervisorCb = null;
       worker.onSessionState((state) => {
         if (typeof state === 'string' && state.startsWith('error:') && rendezvousErrorCb) {
-          rendezvousErrorCb(state.slice('error:'.length));
+          const reason = state.slice('error:'.length);
+          // Task 5: only AUTHORITATIVE/permanent reasons fail the whole
+          // transfer fast. TRANSIENT reasons (auth_timeout, transfer_timeout,
+          // …) are left unforwarded — the supervisor's own re-dial + ctrl-swap
+          // (below/Task 6) is the correct recovery for those.
+          if (isTerminalReason(reason)) rendezvousErrorCb(reason);
         }
         if (supervisorCb) supervisorCb(state);
       });

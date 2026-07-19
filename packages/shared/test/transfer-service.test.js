@@ -5,7 +5,7 @@ import { expect, test, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createTransferService, resolveFlowCount } from '../src/transfer-service.js';
+import { createTransferService, resolveFlowCount, isTerminalReason } from '../src/transfer-service.js';
 import { createReceiver, createSender } from '@farsight/shared/transfer-orchestrator';
 import { walkSource } from '@farsight/shared/transfer-io';
 import { buildManifest as buildManifestReal } from '@farsight/shared/transfer-manifest';
@@ -1053,6 +1053,27 @@ test('a rendezvous error from the channel (e.g. bad_password) fails the send wit
   expect(res.ok).toBe(false);
   expect(res.error).toMatch(/bad_password/);
   expect(events.some((e) => e.type === 'error' && e.reason === 'bad_password')).toBe(true);
+});
+
+// Common-mode-resilience Task 5: transfer-channel-assembly.js's slot-0 handler
+// reuses THIS predicate (not its own duplicated reason list) to decide which
+// `error:*` rendezvous states are authoritative enough to fail a multi-flow
+// send fast instead of letting the supervisor re-dial + swap ctrl. Pin the
+// exact classification both directions so a future edit to either list can't
+// silently drift them apart.
+test('isTerminalReason: auth_timeout and transfer_timeout are TRANSIENT (not terminal)', () => {
+  expect(isTerminalReason('auth_timeout')).toBe(false);
+  expect(isTerminalReason('transfer_timeout')).toBe(false);
+});
+
+test('isTerminalReason: bad_password, host_offline, unknown_device, declined, nospace, bad_manifest, proto are AUTHORITATIVE (terminal)', () => {
+  expect(isTerminalReason('bad_password')).toBe(true);
+  expect(isTerminalReason('host_offline')).toBe(true);
+  expect(isTerminalReason('unknown_device')).toBe(true);
+  expect(isTerminalReason('declined')).toBe(true);
+  expect(isTerminalReason('nospace')).toBe(true);
+  expect(isTerminalReason('bad_manifest')).toBe(true);
+  expect(isTerminalReason('proto')).toBe(true);
 });
 
 test('a prompting frame cancels the approval timeout — a slow human decision is not "no_response"', async () => {

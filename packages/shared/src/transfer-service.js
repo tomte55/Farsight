@@ -50,11 +50,26 @@ function errMessage(err) {
   return (err && err.message) ? err.message : String(err);
 }
 
-// A send failure is TERMINAL (won't fix itself on retry) or recoverable (a
-// transport/availability problem). Recoverable own-fleet failures become a
-// resumable `interrupted`; everything else is `error`.
-function isTerminalReason(reason) {
-  return /rejected:|receiver_incomplete|canceled|aborted|bad_manifest|nospace|proto|declined/.test(String(reason || ''));
+// A send failure is TERMINAL/AUTHORITATIVE (won't fix itself on retry) or
+// TRANSIENT/recoverable (a transport/availability problem that a re-dial or a
+// later retry can fix). Recoverable own-fleet failures become a resumable
+// `interrupted`; everything else is `error`.
+//
+// Exported so packages/controller/src/transfer-channel-assembly.js's slot-0
+// handler can reuse this SAME predicate (common-mode-resilience Task 5) to
+// decide which `error:*` rendezvous states are authoritative enough to fail
+// the whole transfer fast via onRendezvousError. TRANSIENT reasons — notably
+// `auth_timeout` (a connection-auth handshake timeout during a connection
+// storm — see connection-auth.js) and `transfer_timeout` — must NOT match
+// here: they are exactly the recoverable case the supervisor's slot-0 re-dial
+// + ctrl-swap (Task 6) is built to handle, and did not appear anywhere in the
+// pre-Task-5 regex (relying on that is fragile — asserted directly by
+// transfer-service.test.js). `bad_password`/`host_offline`/`unknown_device`
+// are signaling-level rendezvous rejections (see server.js / connection-
+// auth.js) that retrying will never fix, so they're included alongside the
+// pre-existing local-exception terms below.
+export function isTerminalReason(reason) {
+  return /rejected:|receiver_incomplete|canceled|aborted|bad_manifest|nospace|proto|declined|bad_password|host_offline|unknown_device/.test(String(reason || ''));
 }
 
 // Multi-flow selection (Plan 3 Task 3): flowCount > 1 drives the Plan-2
