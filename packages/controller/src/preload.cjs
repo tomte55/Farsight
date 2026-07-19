@@ -26,7 +26,7 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   getControlAllowed: () => ipcRenderer.invoke('control-allowed:get'),
   setControlAllowed: (v) => ipcRenderer.invoke('control-allowed:set', v),
   // Parallel connections (Settings): configurable flowCount for a send
-  // (default 16, clamped 1-32 — see resolveParallelConnections in @farsight/shared/config).
+  // (default 8, clamped 1-32 — see resolveParallelConnections in @farsight/shared/config).
   getParallelConnections: () => ipcRenderer.invoke('parallel-connections:get'),
   setParallelConnections: (n) => ipcRenderer.invoke('parallel-connections:set', n),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),

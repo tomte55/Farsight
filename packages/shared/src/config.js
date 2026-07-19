@@ -10,7 +10,7 @@ import { assertSecureSignalingUrl } from './signaling-url.js';
 // default), a bad parallelConnections value is instead CLAMPED/DEFAULTED right
 // here — a send always needs a concrete flowCount to proceed, so there's no
 // useful "absent" state to preserve once the key is present at all.
-export const DEFAULT_PARALLEL_CONNECTIONS = 16;
+export const DEFAULT_PARALLEL_CONNECTIONS = 8;
 const MIN_PARALLEL_CONNECTIONS = 1;
 const MAX_PARALLEL_CONNECTIONS = 32;
 
