@@ -115,6 +115,59 @@ describe('transfer-service multi-flow branch (real disk + jobs-store)', () => {
     expect(sendRec.peer).toEqual({ id: 'device-mf' });
   });
 
+  // Plan 3 Task 6: createTransferService threads its ONE rate limiter into the
+  // multi-flow createMultiFlowSender it constructs (via createSendPool's choke
+  // point) -- proved end to end here through the real multi-flow loopback: an
+  // injected fake limiter's take() is asked to pace chunks dispatched across
+  // MULTIPLE flows, confirming it's the SAME shared instance seeing all of
+  // them (not a fresh one per flow).
+  it('threads a shared injected rateLimiter into the multi-flow send path -- take() paces chunks across every flow', async () => {
+    const srcDir = await tmp();
+    const dstDir = await tmp();
+    const sendStore = createJobsStore({ dir: await tmp() });
+    const recvStore = createJobsStore({ dir: await tmp() });
+
+    const CHUNK = 131072;
+    const big = new Uint8Array(CHUNK * 3 + 111).map((_, i) => (i * 31) & 0xff);
+    await writeFile(join(srcDir, 'big.bin'), big);
+    const entries = [{ fileId: 0, path: 'big.bin', size: big.length, mtime: 1 }];
+    const manifest = { entries, totalBytes: big.length, totalFiles: 1 };
+    const sources = new Map([[0, join(srcDir, 'big.bin')]]);
+
+    const { senderCtrl, receiverCtrl, senderFlows, receiverFlows } = link({ flowCount: 4 });
+
+    const takenCalls = [];
+    const rateLimiter = {
+      take: (n) => { takenCalls.push(n); return Promise.resolve(); },
+      setRate: () => {}, rate: () => 0,
+    };
+
+    const receiverSvc = createTransferService({
+      store: recvStore, transferDir: dstDir, consent: async () => true,
+      openChannel: async () => ({ ctrl: receiverCtrl, flows: receiverFlows, close: async () => {} }),
+      receiveCloseGraceMs: 0,
+    });
+    const senderSvc = createTransferService({
+      store: sendStore, transferDir: srcDir, consent: async () => true,
+      openChannel: async () => ({ ctrl: senderCtrl, flows: senderFlows, close: async () => {} }),
+      rateLimiter,
+    });
+
+    const jobId = 'c'.repeat(32);
+    const recvPromise = receiverSvc.startReceive({ rendezvous: 'r-mf-rl' });
+    await tick(10);
+    const sendResult = await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'device-mf-rl', flowCount: 4 } });
+    const recvResult = await recvPromise;
+
+    expect(sendResult.ok).toBe(true);
+    expect(recvResult.ok).toBe(true);
+    expect(Buffer.from(await readFile(join(dstDir, 'big.bin'))).equals(Buffer.from(big))).toBe(true);
+
+    // Every chunk striped across all 4 flows went through the ONE injected limiter.
+    expect(takenCalls.length).toBeGreaterThan(1);
+    expect(takenCalls.reduce((a, b) => a + b, 0)).toBe(16 * takenCalls.length + big.length);
+  });
+
   it('resumes from a pre-populated partial .part + a persisted receive record: only the gap transfers', async () => {
     const srcDir = await tmp();
     const dstDir = await tmp();

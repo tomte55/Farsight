@@ -17,6 +17,7 @@ import { parseCtrlFrame } from './transfer-protocol.js';
 import { walkSource, openSourceReader, createSparsePartFile, finalizeReceivedPath } from './transfer-io.js';
 import { buildManifest } from './transfer-manifest.js';
 import { createResumeWatcher } from './transfer-resume-watcher.js';
+import { createRateLimiter } from './rate-limiter.js';
 
 // A stable fingerprint of a manifest's file list, so a resumed contact job can
 // be recognized by content, not just by the sender-chosen jobId (SECURITY —
@@ -199,7 +200,16 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // Plan 3 Task 3: default flowCount for a send when `target.flowCount` isn't
   // set (per-send override always wins -- see resolveFlowCount). 1 keeps the
   // existing single-flow path exactly as it was.
-  flowCount: serviceFlowCount = 1 }) {
+  flowCount: serviceFlowCount = 1,
+  // Plan 3 Task 6: ONE shared global rate limiter for ALL sender byte output
+  // (single-flow AND multi-flow -- see createSender/createMultiFlowSender's
+  // `limiter` param). rateLimitMbps<=0 (the default) constructs an unlimited
+  // no-op limiter (createRateLimiter's own <=0-is-unlimited contract), so a
+  // caller that never touches this is byte-for-byte unchanged. `rateLimiter`
+  // lets a caller/test inject its own instance (e.g. a fake that records
+  // `take()` calls) instead of the real token-bucket one.
+  rateLimitMbps = 0, rateLimiter }) {
+  const limiter = rateLimiter || createRateLimiter(rateLimitMbps > 0 ? rateLimitMbps * 125000 : 0);
   const queue = createQueue();
   let resumeWatcher = null; // set below when getFleet is provided (own-fleet auto-resume)
   const pendingSends = new Map(); // jobId -> { manifest, sources, target, createdAt, resolve, reject }
@@ -402,8 +412,9 @@ export function createTransferService({ store, transferDir, consent, openChannel
               // back to createMultiFlowSender's own `() => true` (always fire).
               watchdogGate: opened.watchdogGate,
               onEvent: onSendEvent,
+              limiter,
             })
-          : createSender({ channel: opened.channel, jobId, manifest, sources, onEvent: onSendEvent });
+          : createSender({ channel: opened.channel, jobId, manifest, sources, onEvent: onSendEvent, limiter });
         abortFn = (reason) => sender.abort(reason);
         activeAbort = abortFn;
         // Resilient multi-flow: when the supervisor re-dials a dead slot 0, hand
@@ -895,6 +906,12 @@ export function createTransferService({ store, transferDir, consent, openChannel
 
   const api = {
     recoverStaleSends,
+
+    // Plan 3 Task 6: retune the ONE shared limiter live -- affects the ACTIVE
+    // send (single- or multi-flow) immediately, mid-transfer, since both
+    // sender constructions above hold the SAME limiter instance, not a copy.
+    // mbps<=0 clears the limit (createRateLimiter's own contract).
+    setRateLimit(mbps) { limiter.setRate(mbps > 0 ? mbps * 125000 : 0); },
 
     startSend({ jobId, manifest, sources, target, sourceRoots = [] }) {
       return new Promise((resolve, reject) => {

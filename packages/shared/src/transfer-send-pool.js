@@ -11,7 +11,11 @@
 // awaitFlow itself rejects. No fs/DOM/WebRTC.
 import { encodeBulkFrame } from './transfer-chunk.js';
 
-export function createSendPool({ flows, encodeFrame = encodeBulkFrame, awaitFlow }) {
+// `limiter` (optional, Plan 3 Task 6): a shared { take(n) } rate limiter, paced
+// at the ONE choke point below (all N flows share it, so the aggregate byte
+// rate is what's bounded, not each flow individually). Absent -> byte-for-byte
+// unchanged dispatch (guarded, never called).
+export function createSendPool({ flows, encodeFrame = encodeBulkFrame, awaitFlow, limiter }) {
   const failed = new Set(); // flows whose sendBulk rejected — retired as unusable
   function usableFlows() { return flows.filter((f) => f.isAlive() && !failed.has(f)); }
 
@@ -27,10 +31,21 @@ export function createSendPool({ flows, encodeFrame = encodeBulkFrame, awaitFlow
       function tryDispatch(chunk) {
         const flow = usableFlows().find((f) => !inflight.has(f));
         if (!flow) return false;
-        // Promise.resolve().then(...) so a SYNCHRONOUS throw from sendBulk becomes a
-        // rejection (handled), never an escaped throw.
+        // Promise.resolve().then(...) so a SYNCHRONOUS throw from sendBulk (or from
+        // encodeFrame) becomes a rejection (handled), never an escaped throw. The
+        // optional global limiter (Plan 3 Task 6) is paced HERE, on the encoded
+        // frame's byte length, right before the actual sendBulk -- the one choke
+        // point every flow's dispatch passes through, so a single shared limiter
+        // instance paces the whole pool's aggregate output.
         const p = Promise.resolve()
-          .then(() => flow.sendBulk(encodeFrame(chunk)))
+          .then(() => encodeFrame(chunk))
+          .then(async (frame) => {
+            // encodeFrame's default (encodeBulkFrame) returns an ArrayBuffer
+            // (byteLength, not length); fall back to `.length` for a fake/
+            // alternate encodeFrame that returns a Buffer/typed array instead.
+            if (limiter) await limiter.take(frame.byteLength ?? frame.length);
+            return flow.sendBulk(frame);
+          })
           .then(
             () => { inflight.delete(flow); },
             () => { inflight.delete(flow); failed.add(flow); requeue.push(chunk); },

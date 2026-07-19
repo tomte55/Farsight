@@ -146,4 +146,32 @@ describe('transfer-send-pool', () => {
     await expect(createSendPool({ flows: [dead] }).run(chunks(1)))
       .rejects.toThrow('no_live_flows');
   });
+
+  // Plan 3 Task 6: an injected fake limiter's take(n) is awaited, on the ENCODED
+  // frame's byte length (16-byte header + 4-byte payload = 20), BEFORE each
+  // flow's sendBulk -- the one choke point every flow's dispatch passes
+  // through, so ONE shared limiter instance paces the whole pool's aggregate
+  // output regardless of which flow a chunk lands on.
+  it('paces every flow through one injected limiter, take() called with the encoded frame length before sendBulk', async () => {
+    const takenCalls = [];
+    const limiter = { take: (n) => { takenCalls.push(n); return Promise.resolve(); } };
+    const flows = [fakeFlow(), fakeFlow(), fakeFlow()];
+    await createSendPool({ flows, limiter }).run(chunks(9));
+    expect(takenCalls).toEqual(Array(9).fill(20)); // 16-byte header + 4-byte payload
+    // Distributed across all 3 flows (not just flow 0) -- proves it's ONE shared
+    // limiter pacing every flow's dispatch, not a per-flow gate.
+    const perFlowCounts = flows.map((f) => f.sent.length);
+    expect(perFlowCounts.every((c) => c > 0)).toBe(true);
+    expect(perFlowCounts.reduce((a, b) => a + b, 0)).toBe(9);
+  });
+
+  // Byte-identical-when-unset: no limiter -> take() is never invoked and dispatch
+  // is unaffected (same assertions as the very first test above, restated here to
+  // pin the "absent limiter" contract explicitly against a limiter-aware pool).
+  it('no limiter -> no pacing calls, delivery unaffected', async () => {
+    const flows = [fakeFlow(), fakeFlow(), fakeFlow()];
+    await createSendPool({ flows }).run(chunks(12));
+    const all = flows.flatMap((f) => f.sent).map((c) => c.offset).sort((a, b) => a - b);
+    expect(all).toEqual([...Array(12)].map((_, i) => i * 4));
+  });
 });

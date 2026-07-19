@@ -57,6 +57,9 @@ export function createSender({
   // Per-chunk progress would be far too chatty over IPC (a 100 GB send is ~800k
   // chunks); throttle to a human-legible cadence. Clock injected for tests.
   progressIntervalMs = 250, now = () => Date.now(),
+  // Plan 3 Task 6: optional shared { take(n) } rate limiter, paced immediately
+  // before each bulk send below. Absent -> byte-for-byte unchanged (guarded).
+  limiter,
 }) {
   let job = null;
   let canceled = false;
@@ -88,6 +91,7 @@ export function createSender({
         sourcePath: sources.get(nf.fileId), offset: nf.offset, chunkSize,
         onChunk: async (buf) => {
           if (canceled) throw new Error('canceled');
+          if (limiter) await limiter.take(buf.length);
           await channel.sendBulk(buf);
           job.onBytes(nf.fileId, buf.length);
           emitProgress();
@@ -216,6 +220,11 @@ export function createMultiFlowSender({
   // redialCount), 0 if the caller doesn't wire one (single-flow/legacy, or a
   // static flow set with no supervisor behind it).
   redialCount = () => 0,
+  // Plan 3 Task 6: optional shared { take(n) } rate limiter, threaded straight
+  // into the send pool (the ONE choke point where every flow's bulk send goes
+  // out — see transfer-send-pool.js) so ONE instance paces the aggregate byte
+  // rate across all N flows. Absent -> byte-for-byte unchanged (guarded there).
+  limiter,
 }) {
   if (typeof readerFor !== 'function') throw new Error('readerFor is required');
 
@@ -233,7 +242,7 @@ export function createMultiFlowSender({
   // its own throwaway createSendPool; reusing one changes nothing observable
   // about dispatch (usableFlows() already re-filters the live `flows` array
   // fresh on every call) but gives emitProgress somewhere to read from.
-  const pool = createSendPool({ flows, awaitFlow });
+  const pool = createSendPool({ flows, awaitFlow, limiter });
 
   const tracker = createCoverageTracker({ manifest });
   // The test manifests (and any minimal caller) may omit totalBytes/totalFiles —

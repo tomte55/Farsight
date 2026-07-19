@@ -73,6 +73,34 @@ const readerFor = (sources) => (fileId) => ({ readAt: (o, l) => Promise.resolve(
 const fakeHash = () => ({ update() {}, digest: () => 'H' });
 
 describe('createMultiFlowSender', () => {
+  // Plan 3 Task 6: a `limiter` passed to createMultiFlowSender is threaded into
+  // the (single, per-transfer) send pool -- transfer-send-pool.js's ONE choke
+  // point where every flow's sendBulk() is dispatched -- so take() is called
+  // for every chunk regardless of which of the N flows it lands on, proving
+  // ONE shared limiter instance paces the whole multi-flow transfer's
+  // aggregate output (not a per-flow gate).
+  it('threads a shared limiter into the send pool: take() called for chunks dispatched across every flow', async () => {
+    const A = new Uint8Array(4096 * 3 + 7).map((_, i) => (i * 7) & 0xff);
+    const B = new Uint8Array(500).map((_, i) => (i * 13) & 0xff);
+    const sources = new Map([[0, A], [1, B]]);
+    const manifest = { entries: [{ fileId: 0, size: A.length }, { fileId: 1, size: B.length }] };
+    const rig = wire({ manifest, sources });
+    const takenCalls = [];
+    const limiter = { take: (n) => { takenCalls.push(n); return Promise.resolve(); } };
+    const sender = createMultiFlowSender({
+      ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 3,
+      groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash, limiter,
+    });
+    const r = await sender.start();
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    expect(Buffer.from(rig.dest.get(0)).equals(Buffer.from(A))).toBe(true);
+    expect(Buffer.from(rig.dest.get(1)).equals(Buffer.from(B))).toBe(true);
+    // Every chunk that went out over any flow was paced through the ONE limiter,
+    // on its encoded frame's byte length (16-byte header + payload).
+    expect(takenCalls.length).toBeGreaterThan(0);
+    expect(takenCalls.reduce((a, b) => a + b, 0)).toBe(16 * takenCalls.length + A.length + B.length);
+  });
+
   it('stripes a multi-file payload across flows; receiver ends byte-identical', async () => {
     const A = new Uint8Array(4096 * 3 + 7).map((_, i) => (i * 7) & 0xff);
     const B = new Uint8Array(500).map((_, i) => (i * 13) & 0xff);

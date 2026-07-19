@@ -646,6 +646,58 @@ test('single-flow sender progress carries no flowsLive/flowsTotal/redials — sh
   }
 });
 
+// Plan 3 Task 6: an injected fake limiter's take(n) is awaited, with the
+// CHUNK's byte length, immediately before every channel.sendBulk() call in the
+// single-flow pump loop -- proves the global rate limiter is threaded into
+// this send path, not just the multi-flow one.
+test('createSender: injected limiter.take() is called with each chunk\'s byte length before sendBulk', async () => {
+  const root = tmp();
+  const f = join(root, 'a.bin');
+  const data = Buffer.alloc(294, 9); // 4 chunks of 64 + 1 of 38, at chunkSize 64
+  writeFileSync(f, data);
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: data.length, mtime: 5 }], totalBytes: data.length, totalFiles: 1 };
+  const takenCalls = [];
+  const limiter = { take: (n) => { takenCalls.push(n); return Promise.resolve(); } };
+  const ch = fakeChannel();
+  const sentLensAtTakeTime = [];
+  const origSendBulk = ch.sendBulk.bind(ch);
+  ch.sendBulk = async (b) => { sentLensAtTakeTime.push(takenCalls.length); return origSendBulk(b); };
+  const sender = createSender({
+    channel: ch, jobId: 'c1af63b378a338da93dd0d44332d3bfc', manifest, sources: new Map([[0, f]]), chunkSize: 64, limiter,
+  });
+  const finished = sender.start();
+  await ch.feedCtrl(acceptFrame({ jobId: 'c1af63b378a338da93dd0d44332d3bfc', resume: [] }));
+  await until(() => ch.ctrlOut.some((fr) => fr.t === 'job_done'));
+  await ch.feedCtrl(completeFrame({ jobId: 'c1af63b378a338da93dd0d44332d3bfc', ok: true }));
+  await finished;
+
+  expect(takenCalls).toEqual([64, 64, 64, 64, 38]);
+  // take() ran BEFORE its matching sendBulk -- by the time sendBulk #i is called,
+  // exactly i+1 take() calls have already landed.
+  expect(sentLensAtTakeTime).toEqual([1, 2, 3, 4, 5]);
+  expect(Buffer.concat(ch.bulkOut)).toEqual(data); // bytes on the wire are unaffected
+});
+
+// Byte-identical-when-unset: no `limiter` option -> the pump loop is exactly
+// what it was before this task (same bytes, same frames) -- the existing
+// no-limiter tests above already cover this; this restates it as an explicit
+// pin against a limiter-aware pump loop regressing the default path.
+test('createSender: no limiter option -> sends are unaffected (byte-identical default path)', async () => {
+  const root = tmp();
+  const f = join(root, 'a.bin');
+  const data = Buffer.alloc(150, 5);
+  writeFileSync(f, data);
+  const manifest = { entries: [{ fileId: 0, path: 'a.bin', size: data.length, mtime: 5 }], totalBytes: data.length, totalFiles: 1 };
+  const ch = fakeChannel();
+  const sender = createSender({ channel: ch, jobId: 'd1af63b378a338da93dd0d44332d3bfd', manifest, sources: new Map([[0, f]]), chunkSize: 64 });
+  const finished = sender.start();
+  await ch.feedCtrl(acceptFrame({ jobId: 'd1af63b378a338da93dd0d44332d3bfd', resume: [] }));
+  await until(() => ch.ctrlOut.some((fr) => fr.t === 'job_done'));
+  await ch.feedCtrl(completeFrame({ jobId: 'd1af63b378a338da93dd0d44332d3bfd', ok: true }));
+  await finished;
+  expect(Buffer.concat(ch.bulkOut)).toEqual(data);
+});
+
 // SP3 P4: real receiver terminal events + tier-aware interrupted persistence.
 
 test('receiver emits a real completed event when it acks delivery', async () => {

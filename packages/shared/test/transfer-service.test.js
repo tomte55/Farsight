@@ -147,6 +147,55 @@ test('loopback send -> receive through the service layer lands files byte-identi
   expect(sendRec.peer).toEqual({ id: 'device-t1' });
 });
 
+// Plan 3 Task 6: createTransferService threads its ONE rate limiter (real or
+// injected) into the single-flow createSender it constructs -- proved here
+// end to end, through the real loopback send/receive path, with an injected
+// fake limiter whose take() records the byte counts it was asked to pace.
+test('Plan 3 Task 6: an injected rateLimiter is threaded into the single-flow send path -- take() paces every chunk sent', async () => {
+  const srcRoot = tmp();
+  const src = join(srcRoot, 'payload');
+  mkdirSync(src, { recursive: true });
+  const data = Buffer.from('rate-limited-payload-'.repeat(200)); // several chunks at default chunkSize
+  writeFileSync(join(src, 'a.txt'), data);
+
+  const { entries, sources } = await walkSource([{ path: src }]);
+  const manifest = buildManifestReal(entries);
+
+  const dest = tmp();
+  const recvStore = createJobsStore({ dir: tmp() });
+  const sendStore = createJobsStore({ dir: tmp() });
+  const { sideA, sideB } = loopback();
+
+  const takenCalls = [];
+  const rateLimiter = {
+    take: (n) => { takenCalls.push(n); return Promise.resolve(); },
+    setRate: () => {}, rate: () => 0,
+  };
+
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: dest, consent: async () => true,
+    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    receiveCloseGraceMs: 0,
+  });
+  const senderSvc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    rateLimiter,
+  });
+
+  const jobId = newJobId();
+  const recvPromise = receiverSvc.startReceive({ rendezvous: 'r-rl-1' });
+  const sendResult = await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'device-rl', password: 'pw' } });
+  const recvResult = await recvPromise;
+
+  expect(sendResult.ok).toBe(true);
+  expect(recvResult.ok).toBe(true);
+  expect(readFileSync(join(dest, ...manifest.entries[0].path.split('/')))).toEqual(data); // bytes on disk are unaffected
+
+  expect(takenCalls.length).toBeGreaterThan(0);
+  expect(takenCalls.reduce((a, b) => a + b, 0)).toBe(data.length); // take() paced every byte sent
+});
+
 test('transferDir may be a function, resolved per receive (not captured at construction)', async () => {
   // The controller passes a function so a Settings change to the received-files
   // folder takes effect on the NEXT transfer without recreating the service.
