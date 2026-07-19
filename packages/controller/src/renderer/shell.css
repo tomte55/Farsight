@@ -111,3 +111,12 @@
 .xfer-failed-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
 .xfer-failed-name { font-family: var(--mono); color: var(--ink); }
 .xfer-failed-reason { color: var(--sub); }
+
+/* Fleet + accepted-contacts: responsive card grid instead of a single stacked list. */
+#fleet-list, #contacts-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+/* Each row becomes a self-contained card (override the flat-list top-border separators). */
+#fleet-list .host-row, #contacts-list .host-row { border: 1px solid var(--line2); border-radius: 9px; align-content: flex-start; }
+#fleet-list .host-row:first-child, #contacts-list .host-row:first-child { border-top: 1px solid var(--line2); }
+/* Empty-state + any full-width child spans the whole grid. */
+#fleet-list .fleet-empty, #contacts-list .fleet-empty { grid-column: 1 / -1; }
+@media (max-width: 760px) { #fleet-list, #contacts-list { grid-template-columns: 1fr; } }
