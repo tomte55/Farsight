@@ -11,7 +11,7 @@ import { walkSource } from '@farsight/shared/transfer-io';
 import { buildManifest as buildManifestReal } from '@farsight/shared/transfer-manifest';
 import { createJobsStore } from '@farsight/shared/jobs-store';
 import { newJobId } from '@farsight/shared/transfer-queue';
-import { offerFrame, parseCtrlFrame } from '@farsight/shared/transfer-protocol';
+import { offerFrame, parseCtrlFrame, cancelFrame } from '@farsight/shared/transfer-protocol';
 
 const dirs = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), 'ftsvc-')); dirs.push(d); return d; }
@@ -1393,6 +1393,345 @@ test('cancel() on an unknown jobId with no persisted record returns ok:false', a
   });
   const c = await svc.cancel('no-such-job');
   expect(c.ok).toBe(false);
+});
+
+// Plan 3 Task 5: pause/resume the active send. The careful part is that
+// tearing down the active send's channel to pause it makes the awaited
+// sender.start() inside runSend REJECT — runSend's catch must never
+// reclassify that as 'interrupted'/'error' (which would auto-resume a job
+// the user just asked to pause). See CLAUDE.md's "critical hazard" note and
+// the `pausing` guard in transfer-service.js.
+
+test('pause() tears down the active send, persists paused, advances the queue to the next job, and emits {type:"paused"}', async () => {
+  const mk = async () => {
+    const src = tmp();
+    writeFileSync(join(src, 'f.bin'), Buffer.alloc(10, 1));
+    return walkSource([{ path: join(src, 'f.bin') }]);
+  };
+  const [w1, w2] = await Promise.all([mk(), mk()]);
+  const m1 = buildManifestReal(w1.entries);
+  const m2 = buildManifestReal(w2.entries);
+  const sendStore = createJobsStore({ dir: tmp() });
+  const events = [];
+  const opens = [];
+  let closedA = false;
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true,
+    onEvent: (ev) => events.push(ev),
+    openChannel: async ({ target }) => {
+      opens.push(target.id);
+      // Neither job's channel is ever driven further (no receiver) — jobA
+      // just sits "active" until we pause it, exactly like the cancel()
+      // tests' pattern above.
+      return {
+        channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} },
+        close: async () => { if (target.id === 'A') closedA = true; },
+      };
+    },
+  });
+
+  const jobA = newJobId(), jobB = newJobId();
+  const pA = svc.startSend({ jobId: jobA, manifest: m1, sources: w1.sources, target: { id: 'A' } });
+  const pB = svc.startSend({ jobId: jobB, manifest: m2, sources: w2.sources, target: { id: 'B' } });
+  await until(() => opens.length === 1); // jobA is now the active head
+
+  const result = await svc.pause(jobA);
+  expect(result.ok).toBe(true);
+
+  const resA = await pA;
+  expect(resA).toEqual({ jobId: jobA, ok: false, paused: true });
+  expect(closedA).toBe(true); // channel was really torn down, not just the record flipped
+  expect(events.some((e) => e.type === 'paused' && e.jobId === jobA && e.direction === 'send')).toBe(true);
+
+  await until(() => opens.length === 2); // queue advanced to jobB
+  expect(opens).toEqual(['A', 'B']);
+
+  const recA = (await sendStore.list()).find((j) => j.jobId === jobA);
+  expect(recA.jobState).toBe('paused');
+
+  // cleanup so no dangling promise leaks into other tests
+  await svc.cancel(jobB);
+  await pB;
+});
+
+test('pause() on a job that is not the current active send is a no-op returning {ok:false}', async () => {
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => { throw new Error('not used in this test'); },
+  });
+  expect(await svc.pause('no-such-job')).toEqual({ ok: false });
+});
+
+test('after pause(), the resume watcher does not auto-resume the paused job (listInterrupted excludes "paused")', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const sendStore = createJobsStore({ dir: tmp() });
+  let openCount = 0;
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true,
+    // getFleet wires up the resume watcher (own-fleet/contact auto-resume).
+    getFleet: async () => [{ deviceId: 'dev-1', signalingId: 'sig-CURRENT', online: true }],
+    openChannel: async () => {
+      openCount += 1;
+      return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} };
+    },
+  });
+  svc.startResumeWatcher();
+
+  const jobId = newJobId();
+  const p = svc.startSend({ jobId, manifest, sources, target: { id: 'sig-1', deviceId: 'dev-1', linked: true }, sourceRoots: ['/r'] });
+  await until(() => openCount === 1);
+
+  const pauseResult = await svc.pause(jobId);
+  expect(pauseResult.ok).toBe(true);
+  await p;
+
+  const before = openCount;
+  await svc.resumeSweepNow(); // a real sweep: only 'interrupted' jobs are picked up
+  expect(openCount).toBe(before); // no re-dial attempted for the paused job
+
+  const rec = (await sendStore.list()).find((j) => j.jobId === jobId);
+  expect(rec.jobState).toBe('paused'); // stayed paused — not swept into interrupted or re-attempted
+
+  svc.stopResumeWatcher();
+});
+
+test('CRITICAL: runSend catch does not reclassify a pause-induced rejection — the persisted record stays "paused"', async () => {
+  // The exact hazard this test pins: pause() tears the active send's channel
+  // down, which makes the awaited sender.start() inside runSend reject (here
+  // simulated by feeding the sender a real 'cancel' ctrl frame — the same
+  // frame shape a receiver-initiated cancel produces, per transfer-service.js's
+  // own comment on that path). Without the `pausing` guard, runSend's catch
+  // would classify that rejection and overwrite the 'paused' record.
+  const saves = []; // every save() call issued for this job, in order, so we can
+                     // prove the catch's classification save is never ISSUED at
+                     // all (not just "overwritten later" — a stronger, timing-
+                     // independent assertion).
+  const backing = createJobsStore({ dir: tmp() });
+  const trackedStore = {
+    async save(j) { saves.push({ jobId: j.jobId, jobState: j.jobState }); return backing.save(j); },
+    async load(id) { return backing.load(id); },
+    async list() { return backing.list(); },
+    async remove(id) { return backing.remove(id); },
+  };
+
+  let ctrlCb = null;
+  const channel = {
+    sendCtrl() {}, // the OFFER goes out; nobody answers it
+    async sendBulk() {},
+    onCtrl(cb) { ctrlCb = cb; },
+    onBulk() {},
+  };
+  const svc = createTransferService({
+    store: trackedStore, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel, close: async () => {} }),
+  });
+
+  const jobId = newJobId();
+  const { manifest, sources } = await oneFileSource();
+  const p = svc.startSend({ jobId, manifest, sources, target: { id: 'X' }, sourceRoots: ['/r'] });
+  await until(() => ctrlCb !== null); // sender registered its ctrl handler and sent the OFFER — now "active"
+
+  // Fire pause() and the simulated teardown-induced rejection essentially
+  // together (mirrors how a real close() tearing down the channel races the
+  // sender's own pending I/O) — the `pausing` guard must hold regardless.
+  const pausePromise = svc.pause(jobId);
+  ctrlCb(cancelFrame(jobId)); // simulate the channel teardown reaching the sender
+
+  const pauseResult = await pausePromise;
+  expect(pauseResult.ok).toBe(true);
+  const result = await p;
+  expect(result).toEqual({ jobId, ok: false, paused: true });
+
+  // Give any still-pending runSend catch/finally microtasks a chance to run.
+  await new Promise((r) => setTimeout(r, 50));
+
+  const badSaves = saves.filter((s) => s.jobId === jobId && ['interrupted', 'error', 'canceled'].includes(s.jobState));
+  expect(badSaves).toEqual([]); // the catch's classification save was never issued at all
+
+  const rec = await trackedStore.load(jobId);
+  expect(rec.jobState).toBe('paused');
+});
+
+test('resume() re-establishes a same-session paused send: re-walks sources, emits resumed, and re-runs to completion', async () => {
+  const srcDir = tmp();
+  const srcFile = join(srcDir, 'resume-me.txt');
+  writeFileSync(srcFile, Buffer.from('pause-resume payload '.repeat(50)));
+  const dest = tmp();
+  const sendStore = createJobsStore({ dir: tmp() });
+  const recvStore = createJobsStore({ dir: tmp() });
+  const events = [];
+
+  const { entries, sources } = await walkSource([{ path: srcFile }]);
+  const manifest = buildManifestReal(entries);
+
+  let attempt = 0;
+  let liveReceiver = null;
+  const svc = createTransferService({
+    store: sendStore, transferDir: tmp(), consent: async () => true,
+    onEvent: (ev) => events.push(ev),
+    openChannel: async () => {
+      attempt += 1;
+      if (attempt === 1) {
+        // Never-progressing channel — the send just sits "active" until paused.
+        return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} };
+      }
+      // resume()'s re-established send: a real loopback + receiver.
+      const { sideA, sideB } = loopback();
+      const rxSvc = createTransferService({
+        store: recvStore, transferDir: dest, consent: async () => true,
+        openChannel: async () => ({ channel: sideB, close: async () => {} }),
+        receiveCloseGraceMs: 0,
+      });
+      liveReceiver = rxSvc.startReceive({ rendezvous: { sessionId: 's', linked: true } });
+      return { channel: sideA, close: async () => {} };
+    },
+  });
+
+  const jobId = newJobId();
+  const p = svc.startSend({ jobId, manifest, sources, target: { id: 'sig-1' }, sourceRoots: [srcFile] });
+  await until(() => attempt === 1);
+
+  const pauseResult = await svc.pause(jobId);
+  expect(pauseResult.ok).toBe(true);
+  await p;
+  expect((await sendStore.list()).find((j) => j.jobId === jobId).jobState).toBe('paused');
+
+  const resumeResult = await svc.resume(jobId);
+  expect(resumeResult.ok).toBe(true);
+  expect(events.some((e) => e.type === 'resumed' && e.jobId === jobId && e.direction === 'send')).toBe(true);
+
+  await liveReceiver;
+  // Proof of actual completion deliberately does NOT poll sendStore.list()
+  // here: this jobId gets FOUR real writes in rapid succession (active ->
+  // paused -> active -> done, all within a few ms since the test file is
+  // tiny) -- reading the same store file that aggressively while jobs-store's
+  // own atomic write-then-rename is still landing intermittently throws EPERM
+  // on Windows (a target file with a concurrent open read handle can reject a
+  // rename onto it). That race is a real, reproducible artifact of THIS
+  // TEST'S tight-polling + tiny-file setup, unrelated to pause/resume's own
+  // correctness -- a real transfer takes long enough that a UI's occasional
+  // list() refresh never lands mid-rename this way. The 'completed' event
+  // (the sender's own delivery ack, fired only once the receiver has hash-
+  // verified every file) plus the byte-identical file on disk are sufficient,
+  // deterministic proof that resume() re-established the send and it ran to
+  // completion; see the neighboring 'paused'-persistence tests above for
+  // store-record coverage, which don't hit this same write-burst pattern.
+  await until(() => events.some((e) => e.type === 'completed' && e.jobId === jobId));
+  expect(readFileSync(join(dest, 'resume-me.txt'))).toEqual(readFileSync(srcFile));
+});
+
+test('resume() on a non-paused or unknown job returns {ok:false}', async () => {
+  const store1 = createJobsStore({ dir: tmp() });
+  const svc1 = createTransferService({
+    store: store1, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => { throw new Error('not used in this test'); },
+  });
+  expect(await svc1.resume('no-such-job')).toEqual({ ok: false });
+
+  // A job that exists but was never paused (e.g. 'done') must also refuse.
+  const store2 = createJobsStore({ dir: tmp() });
+  await store2.save({
+    jobId: 'j1', dir: 'send', tier: 'adhoc', peer: {}, sourceRoots: [], destRoot: null,
+    manifest: { entries: [] }, perFile: [], jobState: 'done', createdAt: Date.now(),
+  });
+  const svc2 = createTransferService({
+    store: store2, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => { throw new Error('not used in this test'); },
+  });
+  expect(await svc2.resume('j1')).toEqual({ ok: false });
+});
+
+test('resume() on a paused job with no in-memory pausedTargets entry (e.g. after a restart) refuses as stale', async () => {
+  // pausedTargets is in-memory only (ad-hoc targets carry a password we never
+  // persist) — a 'paused' record from a PRIOR process (or a service instance
+  // that never actually paused this job itself) has no target to resume with.
+  const store = createJobsStore({ dir: tmp() });
+  await store.save({
+    jobId: 'restart-paused', dir: 'send', tier: 'adhoc', peer: {}, sourceRoots: ['/r'], destRoot: null,
+    manifest: { entries: [] }, perFile: [], jobState: 'paused', createdAt: Date.now(),
+  });
+  const svc = createTransferService({
+    store, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => { throw new Error('not used in this test'); },
+  });
+  expect(await svc.resume('restart-paused')).toEqual({ ok: false, reason: 'stale' });
+});
+
+test('REGRESSION: pause() disarms the orphaned send\'s approval timer so a same-jobId resume() cannot be corrupted by it firing later', async () => {
+  // Discovered via TDD on this task, NOT prescribed by the brief: merely
+  // closing the channel does not make an unaccepted send's sender.start()
+  // settle -- it stays pending until its OWN approvalTimer eventually fires.
+  // If pause() only closed the channel (not also aborting the sender), that
+  // orphaned runSend stays alive; once its timer eventually fires, `pausing`
+  // has long since been cleared (pause() already returned), so runSend's
+  // catch classifies it UNGUARDED -- and because resume() reuses the SAME
+  // jobId, pendingSends has it again too, so the stale settle's completion
+  // bookkeeping (pendingSends.delete/queue.complete/entry.resolve/
+  // advanceSendQueue) runs over the RESUMED job's live state and can
+  // overwrite its freshly-'done' record with a spurious 'error'. transfer-
+  // service.js's activeAbort (set alongside activeClose, called by pause()
+  // before it closes the channel) fixes this by making the orphaned sender
+  // settle immediately, while `pausing` still guards it, disarming the timer
+  // for good via runSend's own `finally`.
+  //
+  // This raced ~15-20% of the time in manual repro (a real loopback resolves
+  // in microtasks, well under any realistic timeout) but not reliably within
+  // a single run, so a SHORT rendezvousTimeoutMs + several iterations makes
+  // it deterministic rather than relying on scheduling luck. The timer firing
+  // at all -- fixed or not -- always emits an 'error' event BEFORE its
+  // sender.abort() call (see runSend's approvalTimer callback), so watching
+  // for that event is a clean, non-flaky signal that sidesteps the fs-timing
+  // sensitivity of reading the store record directly (see the neighboring
+  // resume()-to-completion test's note on that).
+  for (let i = 0; i < 20; i++) {
+    const srcDir = tmp();
+    const srcFile = join(srcDir, 'f.bin');
+    writeFileSync(srcFile, Buffer.alloc(64, 1));
+    const { entries, sources } = await walkSource([{ path: srcFile }]);
+    const manifest = buildManifestReal(entries);
+    const dest = tmp();
+    const sendStore = createJobsStore({ dir: tmp() });
+    const recvStore = createJobsStore({ dir: tmp() });
+    const events = [];
+
+    let attempt = 0;
+    let liveReceiver = null;
+    const svc = createTransferService({
+      store: sendStore, transferDir: tmp(), consent: async () => true, rendezvousTimeoutMs: 30,
+      onEvent: (ev) => events.push(ev),
+      openChannel: async () => {
+        attempt += 1;
+        if (attempt === 1) {
+          // Never-accepted — attempt-1's own approvalTimer stays armed unless
+          // pause() disarms it.
+          return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} };
+        }
+        const { sideA, sideB } = loopback();
+        const rxSvc = createTransferService({
+          store: recvStore, transferDir: dest, consent: async () => true,
+          openChannel: async () => ({ channel: sideB, close: async () => {} }),
+          receiveCloseGraceMs: 0,
+        });
+        liveReceiver = rxSvc.startReceive({ rendezvous: { sessionId: 's', linked: true } });
+        return { channel: sideA, close: async () => {} };
+      },
+    });
+
+    const jobId = newJobId();
+    const p = svc.startSend({ jobId, manifest, sources, target: { id: 'sig-1' }, sourceRoots: [srcFile] });
+    await until(() => attempt === 1);
+    await svc.pause(jobId);
+    await p;
+    await svc.resume(jobId);
+    await liveReceiver;
+    await until(() => events.some((e) => e.type === 'completed'));
+
+    // Give a still-live orphaned timer (the bug) plenty of time to fire —
+    // well past rendezvousTimeoutMs.
+    await new Promise((r) => setTimeout(r, 80));
+
+    expect(events.some((e) => e.type === 'error')).toBe(false); // no stray timeout ever fired
+  }
 });
 
 test('receiver declining consent resolves ok:false with no file written, and settles the sender without hanging', async () => {

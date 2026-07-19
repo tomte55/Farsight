@@ -204,10 +204,42 @@ export function createTransferService({ store, transferDir, consent, openChannel
   let resumeWatcher = null; // set below when getFleet is provided (own-fleet auto-resume)
   const pendingSends = new Map(); // jobId -> { manifest, sources, target, createdAt, resolve, reject }
   let sendRunning = false;
+  // Plan 3 Task 5: same-session pause/resume of the ACTIVE send. pausedTargets
+  // stashes the target a paused job was sending to (not persisted -- ad-hoc
+  // targets carry a password we never write to disk -- so resume() only works
+  // within the SAME process lifetime; after a restart the record is still
+  // 'paused' but resume() correctly refuses with reason:'stale'). pausing is
+  // the CRITICAL guard: pause() tears down the active send's channel, which
+  // rejects the awaited sender.start() inside runSend -- pausing marks the
+  // jobId for the whole duration of that teardown so runSend's catch (below)
+  // never reclassifies a deliberate pause as an 'interrupted'/'error' job and
+  // hands it to the resume watcher (which would auto-resume a job the user
+  // just asked to pause -- defeating pause entirely).
+  const pausedTargets = new Map(); // jobId -> target
+  const pausing = new Set(); // jobId currently being torn down by pause()
   // Handle to the ACTIVE send's openChannel-returned close(), so cancel(jobId)
   // can actually tear the channel down (SP3 coherence contract #3) instead of
   // only flipping the persisted record while the transfer keeps running.
   let activeClose = null;
+  // Handle to the ACTIVE send's sender.abort(), so pause(jobId) can force its
+  // runSend invocation to settle PROMPTLY instead of leaving it orphaned.
+  // Found via TDD on this task: merely closing the channel does NOT make an
+  // unaccepted send's sender.start() settle -- it stays pending until its own
+  // approvalTimer eventually fires (up to rendezvousTimeoutMs later, e.g.
+  // 30s). If pause() only closed the channel, that orphaned runSend would
+  // still be alive when the timer fires -- by then `pausing` has long been
+  // cleared (pause() already returned), so runSend's catch classifies it
+  // UNGUARDED. Worse: if resume() has since reused the SAME jobId (the whole
+  // point of same-session resume), pendingSends has it again too, so the
+  // stale runSend's tail-guard (`!pendingSends.has(jobId)`) no longer short-
+  // circuits either -- it runs its OWN completion bookkeeping
+  // (pendingSends.delete/queue.complete/entry.resolve/advanceSendQueue) over
+  // the resumed job's LIVE state and overwrites its freshly-'done' record
+  // with 'error'. Calling activeAbort() as part of pause()'s teardown (while
+  // `pausing` is still active) makes the orphaned sender settle immediately
+  // -- disarming its approvalTimer via runSend's own `finally` -- so it can
+  // never resurface later. Set alongside activeClose, cleared the same way.
+  let activeAbort = null;
   // Live receives, keyed by jobId, so cancel() can actually reach one. Sends are
   // serialized (one activeClose suffices); receives are explicitly NOT queue-gated,
   // so several can be in flight — this must be a map, not a single slot.
@@ -308,6 +340,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     try { await saveSendRecord({ jobId, manifest, createdAt, jobState: 'active', peer, tier, sourceRoots, flowCount: target && target.flowCount }); } catch { /* best effort */ }
     let close = null;
     let onRendezvousError = null;
+    let abortFn = null; // this invocation's own activeAbort value -- see the "don't clobber a NEWER job's handle" finally check below
     let result;
     // Guards so a send never sits "waiting for approval" forever: a rendezvous
     // failure (openChannel surfaces the signaling reason) aborts immediately with
@@ -371,6 +404,8 @@ export function createTransferService({ store, transferDir, consent, openChannel
               onEvent: onSendEvent,
             })
           : createSender({ channel: opened.channel, jobId, manifest, sources, onEvent: onSendEvent });
+        abortFn = (reason) => sender.abort(reason);
+        activeAbort = abortFn;
         // Resilient multi-flow: when the supervisor re-dials a dead slot 0, hand
         // the sender the fresh ctrl channel so the control plane (OFFER/
         // range_report/complete) survives a slot-0 death. Registered AFTER the
@@ -414,6 +449,13 @@ export function createTransferService({ store, transferDir, consent, openChannel
         result = { jobId, ok: false, canceled: true };
       }
     } catch (err) {
+      // pause() is deliberately tearing this send's channel down right now --
+      // the resulting sender.start() rejection is EXPECTED, not a real failure.
+      // pause() persists 'paused'/emits/resolves/advances the queue itself;
+      // classifying it here would overwrite 'paused' with 'interrupted' (and
+      // wake the resume watcher) or 'error'/'canceled', defeating pause. See
+      // the `pausing` doc above.
+      if (pausing.has(jobId)) { return; }
       const reason = errMessage(err);
       result = { jobId, ok: false, error: reason };
       // Own-fleet + a recoverable (transport) failure → resumable `interrupted`,
@@ -432,6 +474,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     } finally {
       disarmApprovalTimer();
       if (activeClose === close) activeClose = null; // don't clobber a NEWER job's handle
+      if (activeAbort === abortFn) activeAbort = null; // ditto
       if (close) { try { await close(); } catch { /* ignore close errors */ } }
     }
 
@@ -504,6 +547,73 @@ export function createTransferService({ store, transferDir, consent, openChannel
     emit(jobId, 'send', { type: 'canceled' });
     entry.resolve({ jobId, ok: false, canceled: true });
     if (isActive) advanceSendQueue();
+    return { ok: true };
+  }
+
+  // pause(jobId): only meaningful for the ACTIVE send (a waiting/queued job
+  // isn't running anything to tear down -- it just sits in the queue, and
+  // cancel() already covers dropping a waiting job). Tears the channel down
+  // exactly like cancel()'s active path, but persists 'paused' (not
+  // 'canceled') and stashes the target so resume() can re-establish it in
+  // this SAME process. See the `pausing` doc above for why this must be
+  // added BEFORE teardown and removed only after this function is fully done.
+  async function pause(jobId) {
+    if (!(queue.active() === jobId && pendingSends.has(jobId))) return { ok: false };
+    pausing.add(jobId);
+    const entry = pendingSends.get(jobId);
+    pausedTargets.set(jobId, entry.target);
+
+    pendingSends.delete(jobId);
+    queue.remove(jobId);
+    sendRunning = false;
+    // Force the orphaned runSend's sender.start() to settle NOW, while
+    // `pausing` still guards its catch -- see activeAbort's doc above. Without
+    // this, an unaccepted send's sender just sits pending until its own
+    // approvalTimer eventually fires (possibly much later, e.g. 30s), long
+    // after `pausing` has been cleared -- and if resume() has by then reused
+    // this same jobId, that stale settle corrupts the resumed job's state.
+    if (activeAbort) { const a = activeAbort; activeAbort = null; try { a('paused'); } catch { /* ignore */ } }
+    if (activeClose) { const c = activeClose; activeClose = null; try { await c(); } catch { /* ignore */ } }
+
+    try {
+      await saveSendRecord({ jobId, manifest: entry.manifest, createdAt: entry.createdAt, jobState: 'paused', peer: peerFor(entry.target), tier: tierFor(entry.target), sourceRoots: entry.sourceRoots, flowCount: entry.target && entry.target.flowCount });
+    } catch { /* best effort */ }
+    emit(jobId, 'send', { type: 'paused' });
+    entry.resolve({ jobId, ok: false, paused: true });
+    advanceSendQueue();
+    // Only NOW is it safe to let runSend's catch classify a future rejection
+    // for this jobId normally again (a fresh startSend/resume reuses pausing
+    // implicitly via a brand-new runSend invocation, which starts unguarded).
+    pausing.delete(jobId);
+    return { ok: true };
+  }
+
+  // resume(jobId): re-establish a paused send in the SAME session (same
+  // process lifetime -- pausedTargets is in-memory only, see its doc above).
+  // Own-fleet/contact resume-after-restart could re-resolve the target via
+  // getFleet like the resume watcher's reestablish() does, but that's out of
+  // scope here; a restart leaves a genuinely 'paused' record that this
+  // refuses to touch (reason:'stale') until the app adds that path.
+  async function resume(jobId) {
+    let job = null;
+    try { job = await store.load(jobId); } catch { job = null; }
+    if (!job || job.jobState !== 'paused') return { ok: false };
+    const target = pausedTargets.get(jobId);
+    if (!target) return { ok: false, reason: 'stale' };
+
+    let walked = null;
+    try { walked = await walkSource((job.sourceRoots || []).map((p) => ({ path: p }))); } catch { walked = null; }
+    if (!walked || !walked.entries.length) return { ok: false, reason: 'stale' };
+
+    const manifest = buildManifest(walked.entries);
+    emit(jobId, 'send', { type: 'resumed' });
+    const p = api.startSend({ jobId, manifest, sources: walked.sources, sourceRoots: job.sourceRoots, target });
+    // Delete now (startSend's synchronous setup -- pendingSends.set/queue.add/
+    // advanceSendQueue -- has already run by the time the call above returns)
+    // rather than after the whole send settles, so a pause() during THIS new
+    // run can freely re-stash a fresh target without racing a stale delete.
+    pausedTargets.delete(jobId);
+    p.catch(() => {}); // resume() itself doesn't wait out the whole transfer
     return { ok: true };
   }
 
@@ -783,6 +893,8 @@ export function createTransferService({ store, transferDir, consent, openChannel
     },
 
     cancel,
+    pause,
+    resume,
 
     async startReceive({ rendezvous }) {
       // Canonical openChannel shape (SP3 coherence contract #1): always
