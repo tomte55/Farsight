@@ -104,6 +104,26 @@ function reportState(state) {
   try { window.farsightTransfer.reportSessionState(state); } catch { /* guarded */ }
 }
 
+// F-B3 (Plan 1b Task 7): the ONE seam that puts a ctrl frame on a data channel.
+// A frame over the ~256KB WebRTC send() limit THROWS and kills the channel; every
+// call site used to swallow that throw, so `ctrlOut` froze and main waited at 0%
+// forever (a silent stall). Instead SURFACE it: log the reason and report a
+// terminal channel error so main fails/re-dials the flow. Returns false on throw
+// so a flush loop stops pumping into a now-dead channel. (bufferedAmount overflow
+// or a transiently-not-open channel also land here — all better loud than silent.)
+function rawSendCtrl(ch, str) {
+  try {
+    ch.send(str);
+    ctrlOut += 1;
+    return true;
+  } catch (e) {
+    const reason = (e && e.message) ? e.message : 'ctrl_send_failed';
+    logStatus({ event: `dc-error:ctrl-send:${reason}` });
+    reportState('error:ctrl_send');
+    return false;
+  }
+}
+
 // ── Own-fleet device-keypair handshake (SP3 Phase 4) ──────────────────────────
 // Fresh base64 nonce (Web Crypto), same as the visible renderer's authNonce.
 function authNonce() {
@@ -125,7 +145,7 @@ function getFingerprints() {
 // ctrl up to main. Idempotent-safe (empties the queues).
 function releaseAfterAuth() {
   if (ctrlChannel && ctrlChannel.readyState === 'open') {
-    while (pendingCtrlOut.length) { try { ctrlChannel.send(pendingCtrlOut.shift()); ctrlOut += 1; } catch { /* guarded */ } }
+    while (pendingCtrlOut.length) { if (!rawSendCtrl(ctrlChannel, pendingCtrlOut.shift())) break; } // F-B3: stop pumping a dead channel
   }
   while (pendingCtrlIn.length) { try { window.farsightTransfer.emitCtrl(pendingCtrlIn.shift()); ctrlIn += 1; } catch { /* guarded */ } }
 }
@@ -174,7 +194,13 @@ async function maybeStartAuth() {
 function wireDataChannel(ch) {
   ch.addEventListener('open', () => logStatus({ event: `dc-open:${ch.label}` }));
   ch.addEventListener('close', () => logStatus({ event: `dc-close:${ch.label}` }));
-  ch.addEventListener('error', () => logStatus({ event: `dc-error:${ch.label}` }));
+  // F-B3 (Plan 1b Task 7): a data channel that ERRORS is a dead flow — surface it
+  // terminal so main fails/re-dials instead of stalling at 0% forever. Crucially
+  // this catches the OVERSIZE-ctrl case: in Chromium the over-limit send() does NOT
+  // throw synchronously (rawSendCtrl's try/catch can't see it) — the channel fires
+  // this 'error' a tick later and closes. Only 'error' (abnormal) surfaces terminal;
+  // a normal 'close' at teardown does not, so completion isn't mistaken for failure.
+  ch.addEventListener('error', () => { logStatus({ event: `dc-error:${ch.label}` }); reportState(`error:dc_${ch.label}`); });
   if (ch.label === 'ft-ctrl') {
     ctrlChannel = ch;
     // Flush anything queued before the channel opened (e.g. the OFFER frame) —
@@ -182,7 +208,7 @@ function wireDataChannel(ch) {
     // releaseAfterAuth() re-drives this once auth completes.
     const flush = () => {
       if (authGate.state !== 'open') return;
-      while (pendingCtrlOut.length) { try { ch.send(pendingCtrlOut.shift()); ctrlOut += 1; } catch { /* guarded */ } }
+      while (pendingCtrlOut.length) { if (!rawSendCtrl(ch, pendingCtrlOut.shift())) break; } // F-B3: surface a throw, stop pumping a dead channel
     };
     if (ch.readyState === 'open') flush(); else ch.addEventListener('open', flush);
     ch.addEventListener('message', (m) => {
@@ -344,10 +370,8 @@ window.farsightTransfer.onStartRendezvous(async (params) => {
 // frames deadlocked the transfer; sending the OFFER before auth would leak the
 // manifest to an unverified peer.
 function sendCtrlOut(str) {
-  try {
-    if (ctrlChannel && ctrlChannel.readyState === 'open' && authGate.state === 'open') { ctrlChannel.send(str); ctrlOut += 1; }
-    else pendingCtrlOut.push(str);
-  } catch { /* guarded */ }
+  if (ctrlChannel && ctrlChannel.readyState === 'open' && authGate.state === 'open') rawSendCtrl(ctrlChannel, str);
+  else pendingCtrlOut.push(str);
 }
 window.farsightTransfer.onSendCtrl((str) => sendCtrlOut(str));
 window.farsightTransfer.onSendBulk((buf) => {

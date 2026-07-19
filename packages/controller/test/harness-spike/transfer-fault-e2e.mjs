@@ -110,6 +110,8 @@ async function main() {
     fb1: () => runScenario({ label: 'F-B1', fault: { cmd: 'dropFlowSocket', side: 'send', flowIndex: 1 }, surfacedRegex: /conn:error:signaling_(error|dropped|closed|timeout)/ }),
     // F-B2: a worker RENDERER CRASH is detected (render-process-gone).
     fb2: () => runScenario({ label: 'F-B2', fault: { cmd: 'killWorker', side: 'send', flowIndex: 1 }, surfacedRegex: /worker-gone:|error:worker_/ }),
+    // F-B3: an oversize ctrl frame throws + kills the channel — surfaced, not swallowed.
+    fb3: () => runScenario({ label: 'F-B3', fault: { cmd: 'injectOversizeCtrl', side: 'send', flowIndex: 1, bytes: 300000 }, surfacedRegex: /error:dc_ft-ctrl|error:ctrl_send/ }),
   };
   const run = scenarios[SCENARIO];
   if (!run) { console.error('unknown SPIKE_SCENARIO: ' + SCENARIO); process.exit(2); }
