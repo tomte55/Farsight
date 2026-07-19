@@ -100,6 +100,62 @@ async function pollEval(ws, expression, { timeoutMs = STARTUP_TIMEOUT_MS, interv
   throw new Error(`pollEval timed out: ${expression}`);
 }
 
+// ---------- renderer console/error capture (diagnostic only) ----------
+// Electron's `console-message` webContents event does NOT fire on an
+// ES-module import-resolution failure (confirmed with a deliberate broken
+// import — zero events; see CLAUDE.md). Subscribing directly to CDP's
+// Runtime/Log domains is the best available signal: it catches whatever DID
+// run (console.log/error, uncaught exceptions) even though a resolution
+// failure itself still produces nothing on any channel. This exists purely so
+// a future failure is self-explaining in the CI log instead of a bare
+// "pollEval timed out". Attach right after cdpOpen, before any polling.
+function attachConsoleCapture(ws, label) {
+  const lines = [];
+  ws.on('message', (raw) => {
+    let m;
+    try { m = JSON.parse(raw); } catch { return; }
+    if (m.method === 'Runtime.consoleAPICalled') {
+      const args = (m.params.args || []).map((a) => (a.value !== undefined ? a.value : a.description || a.type)).join(' ');
+      lines.push(`[${label} console.${m.params.type}] ${args}`);
+    } else if (m.method === 'Runtime.exceptionThrown') {
+      const d = m.params.exceptionDetails || {};
+      const detail = d.exception ? (d.exception.description || d.exception.value) : '';
+      lines.push(`[${label} exception] ${d.text || ''} ${detail}`);
+    } else if (m.method === 'Log.entryAdded') {
+      const e = m.params.entry || {};
+      lines.push(`[${label} log.${e.level}] ${e.text}`);
+    }
+  });
+  // Fire-and-forget enables (ids negative to never collide with cdpEval's
+  // random positive ids sharing the same socket's message stream).
+  ws.send(JSON.stringify({ id: -1, method: 'Runtime.enable' }));
+  ws.send(JSON.stringify({ id: -2, method: 'Log.enable' }));
+  return { getLines: () => lines.slice() };
+}
+
+// Dump everything we can over CDP once a poll on this target has already
+// timed out / failed: captured console+log+exception lines, the shell-ready
+// marker (if it exists at all — its absence itself is diagnostic, see the
+// comment above attachConsoleCapture), and the app's resolved signaling URL /
+// controlAllowed via the SAME IPC calls the renderer itself uses, so this
+// dump can distinguish "renderer never ran" from "renderer ran, registration
+// just didn't happen".
+async function dumpDiagnostics(ws, label, capture) {
+  console.error(`\n--- [${label}] renderer diagnostics (captured over CDP) ---`);
+  const lines = capture ? capture.getLines() : [];
+  if (lines.length) lines.forEach((l) => console.error('  ' + l));
+  else console.error('  (no console/log/exception events captured at all — consistent with a silent ES-module import-resolution failure, which fires zero events on any channel; see CLAUDE.md)');
+  for (const [desc, expr] of [
+    ['window.__farsightShellReady', 'JSON.stringify(window.__farsightShellReady || null)'],
+    ['resolved signaling URL (via IPC)', 'window.farsightIpc && window.farsightIpc.getSignalingUrl ? window.farsightIpc.getSignalingUrl() : "(farsightIpc unavailable)"'],
+    ['controlAllowed (via IPC)', 'window.farsightIpc && window.farsightIpc.getControlAllowed ? window.farsightIpc.getControlAllowed() : "(farsightIpc unavailable)"'],
+  ]) {
+    try { console.error(`  ${desc} = ${JSON.stringify(await cdpEval(ws, expr))}`); }
+    catch (e) { console.error(`  ${desc}: failed to read (${e.message})`); }
+  }
+  console.error(`--- end [${label}] diagnostics ---\n`);
+}
+
 // ---------- dynamic CDP port: read Electron's own DevToolsActivePort file ----------
 // With --remote-debugging-port=0, Electron (like Chromium) picks an ephemeral
 // free port and writes it as the FIRST LINE of <userDataDir>/DevToolsActivePort
@@ -224,8 +280,14 @@ async function runAttempt(attemptNum) {
     // ---- 6. Drive receiver: wait for registration, read host id/pw, arm auto-accept ----
     const recvTarget = await cdpTargetFor(recvPort, 'renderer/index.html');
     const recvWs = await cdpOpen(recvTarget);
+    const recvCapture = attachConsoleCapture(recvWs, 'recv');
     log('receiver renderer attached; waiting for host registration...');
-    await pollEval(recvWs, 'window.__farsightShellReady && window.__farsightShellReady.hostRegistering === true');
+    try {
+      await pollEval(recvWs, 'window.__farsightShellReady && window.__farsightShellReady.hostRegistering === true');
+    } catch (e) {
+      await dumpDiagnostics(recvWs, 'recv', recvCapture);
+      throw e;
+    }
     const hostId = await pollEval(recvWs, "(document.getElementById('cred-id')||{}).dataset ? document.getElementById('cred-id').dataset.copyValue : null");
     const hostPw = await pollEval(recvWs, "(document.getElementById('cred-pw')||{}).dataset ? document.getElementById('cred-pw').dataset.copyValue : null");
     log('receiver registered: hostId=', hostId, 'pw=', hostPw);
@@ -246,7 +308,13 @@ async function runAttempt(attemptNum) {
     // ---- 7. Drive sender: wait for shell ready, trigger the transfer ----
     const sendTarget = await cdpTargetFor(sendPort, 'renderer/index.html');
     const sendWs = await cdpOpen(sendTarget);
-    await pollEval(sendWs, 'window.__farsightShellReady ? true : null');
+    const sendCapture = attachConsoleCapture(sendWs, 'send');
+    try {
+      await pollEval(sendWs, 'window.__farsightShellReady ? true : null');
+    } catch (e) {
+      await dumpDiagnostics(sendWs, 'send', sendCapture);
+      throw e;
+    }
     log('sender renderer ready; issuing transfer:send with flowCount=' + FLOW_COUNT);
     const sendRes = await cdpEval(sendWs, `window.farsightIpc.transferSend(${JSON.stringify({
       target: { id: hostId, password: hostPw, flowCount: FLOW_COUNT },
