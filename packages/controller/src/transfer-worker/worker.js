@@ -308,9 +308,24 @@ window.farsightTransfer.onStartRendezvous(async (params) => {
     [MSG.CANDIDATE]: async (m) => { if (pc) { try { await pc.addIceCandidate(m.candidate); } catch { /* guarded */ } } },
     [MSG.ERROR]: (m) => reportState(`error:${(m && m.reason) || 'unknown'}`),
     [MSG.PEER_DISCONNECTED]: () => reportState('peer_disconnected'),
+  }, {
+    // F-B1: a signaling drop AFTER open surfaces as terminal so the supervisor
+    // re-dials this slot (the worker needs signaling for ICE restart — a lost
+    // socket means the flow can't recover on its own). Not fired on teardown.
+    onClose: () => reportState('error:signaling_dropped'),
   });
 
-  await signal.ready;
+  // F-B1: `ready` now REJECTS on error / close-before-open / connect-timeout
+  // instead of hanging forever. Surface it as a terminal rendezvous error (the
+  // supervisor re-dials the slot; a lone flow fails the transfer loudly) and
+  // abort — never send CONNECT/ATTACH on a dead socket.
+  try {
+    await signal.ready;
+  } catch (e) {
+    reportState(`error:${(e && e.message) || 'signaling_failed'}`);
+    try { signal.close(); } catch { /* guarded */ }
+    return;
+  }
   if (isInitiator) {
     // Design §4.2/§4.3: kind:'transfer' does not consume the target's control
     // pairing — a host can serve a transfer while being controlled.
@@ -364,8 +379,10 @@ window.farsightTransfer.onSendBulk((buf) => {
 function applyTestFault(cmd, args = {}) {
   logStatus({ event: `test-fault:${cmd}` });
   if (cmd === 'dropFlowSocket') {
-    // F-B1: yank the signaling WebSocket out from under the worker.
-    try { signal && signal.close && signal.close(); } catch { /* guarded */ }
+    // F-B1: yank the signaling WebSocket out from under the worker as an
+    // UNEXPECTED drop (dropForTest, NOT close() — close() marks it intentional and
+    // would suppress the very failure this fault is meant to trigger).
+    try { signal && signal.dropForTest && signal.dropForTest(); } catch { /* guarded */ }
   } else if (cmd === 'injectOversizeCtrl') {
     // F-B3: a single ctrl frame over the ~256KB WebRTC data-channel send() limit —
     // throws and KILLS the ctrl channel. Routed through the SAME sendCtrlOut seam

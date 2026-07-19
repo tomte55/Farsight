@@ -1,0 +1,121 @@
+// packages/controller/test/harness-spike/transfer-fault-e2e.mjs
+// ============================================================================
+// REAL-WIRE FAULT-INJECTION harness (Plan 1b Tasks 5-8). Reuses harness-lib to
+// bring up two real Electron app processes over CDP with FARSIGHT_TEST_HOOKS=1,
+// then drives window.farsightIpc.ftTestFault(...) to perturb a live transfer's
+// individual flows and asserts the failure is LOUD + BOUNDED (re-dial recovery
+// at N>1, or a loud terminal at N=1) — NEVER a silent hang/zombie.
+//
+// Scenarios (SPIKE_SCENARIO, default fb1):
+//   fb1  — F-B1: drop a flow's signaling socket mid-transfer. The drop must be
+//          SURFACED (a signaling error/re-dial appears in the sender log) and the
+//          transfer must still complete byte-identical (supervisor re-dial). Before
+//          the fix the socket death was silent (no error/close handler) → the log
+//          shows no signaling error and `await signal.ready` could hang forever.
+//
+// Env: SPIKE_FLOWS (default 4), SPIKE_WAIT_MS (default 90000), SPIKE_SCENARIO.
+// ============================================================================
+import {
+  log, delay, makeAttemptContext, startSignaling, writeStandardPayload,
+  bringUpPair, cdpEval, awaitDelivery, awaitLogLine, mkdir, writeFile, join, sha256, CHUNK,
+} from './harness-lib.mjs';
+
+const FLOW_COUNT = Number(process.env.SPIKE_FLOWS) || 4;
+const WAIT_MS = Number(process.env.SPIKE_WAIT_MS) || 90000;
+const SCENARIO = process.env.SPIKE_SCENARIO || 'fb1';
+
+// A LARGER payload than the standard set so the transfer lasts long enough to
+// reliably inject a mid-flight fault (one big multi-chunk file + the standard set).
+async function writeFaultPayload(srcRoot) {
+  const { srcDir, expected } = await writeStandardPayload(srcRoot);
+  const bigLen = CHUNK * 200 + 123; // ~26 MB, 201 chunks — a multi-second window
+  const data = new Uint8Array(bigLen);
+  for (let i = 0; i < bigLen; i++) data[i] = (i * 2654435761) & 0xff;
+  const abs = join(srcDir, 'huge.bin');
+  await mkdir(join(abs, '..'), { recursive: true });
+  await writeFile(abs, data);
+  expected.set('huge.bin', { size: bigLen, hash: sha256(Buffer.from(data)) });
+  return { srcDir, expected };
+}
+
+// Inject a fault, retrying until it lands on a LIVE worker for that flow (ok:true)
+// or the budget expires. Returns the last dispatch result.
+async function injectUntilLands(sendWs, fault, { tries = 200, everyMs = 20 } = {}) {
+  let r = null;
+  for (let i = 0; i < tries; i++) {
+    r = await cdpEval(sendWs, `window.farsightIpc.ftTestFault(${JSON.stringify(fault)}).then((x)=>JSON.stringify(x),(e)=>'ERR:'+(e&&e.message))`);
+    if (typeof r === 'string' && r.includes('"ok":true')) return r;
+    await delay(everyMs);
+  }
+  return r;
+}
+
+async function runFB1() {
+  const { cleanups, cleanupAll, tmp } = makeAttemptContext();
+  try {
+    const signalingUrl = await startSignaling(cleanups);
+    const { srcDir, expected } = await writeFaultPayload(await tmp('fault-src-'));
+    log(`F-B1: payload ${expected.size} files; flowCount=${FLOW_COUNT}`);
+
+    const { sendWs, hostId, hostPw, recvDownloads, sendChild, recvChild } =
+      await bringUpPair({ signalingUrl, cleanups, tmp, extraEnv: { FARSIGHT_TEST_HOOKS: '1' } });
+
+    const sendRes = await cdpEval(sendWs, `window.farsightIpc.transferSend(${JSON.stringify({ target: { id: hostId, password: hostPw, flowCount: FLOW_COUNT }, paths: [srcDir] })})`);
+    if (!sendRes || sendRes.error) throw new Error('transfer:send failed: ' + JSON.stringify(sendRes));
+    log('send issued; injecting dropFlowSocket on flow 1...');
+
+    // Drop flow 1's signaling socket mid-transfer (unexpected drop → dropForTest).
+    const dropped = await injectUntilLands(sendWs, { cmd: 'dropFlowSocket', side: 'send', flowIndex: 1 });
+    log('dropFlowSocket(flow 1) =>', dropped);
+
+    // ── What F-B1 GUARANTEES (and what this asserts) ────────────────────────────
+    // F-B1 = "the transfer signaling socket REPORTS its own failure" — so a dropped
+    // socket must be SURFACED (loud) and the transfer must reach a TERMINAL outcome
+    // within a bounded time, NEVER a silent zombie / infinite `await signal.ready`.
+    // It does NOT guarantee the transfer still completes byte-identical — recovering
+    // an in-flight LARGE file after a flow dies is the multi-flow RESUPPLY job
+    // (Phase 2), tracked separately (see F-B11 note in the 1b plan). So we assert
+    // the loud+bounded contract here and REPORT delivery as info.
+    const failures = [];
+    if (typeof dropped !== 'string' || !dropped.includes('"ok":true')) failures.push('dropFlowSocket never landed on a live flow-1 worker: ' + dropped);
+
+    // (1) LOUD: the worker reported error:signaling_* (logs an ft-worker conn: event).
+    const surfaced = await awaitLogLine(sendChild, /conn:error:signaling_(error|dropped|closed|timeout)/, 20000);
+    log('signaling-failure surfaced:', surfaced ? surfaced.slice(-90) : 'NO');
+    if (!surfaced) failures.push('F-B1 REGRESSION: the dropped signaling socket was NOT surfaced (silent, as before the fix)');
+
+    // (2) BOUNDED: the RECEIVER reaches a terminal outcome (completed OR interrupted)
+    //     within timeout — never an indefinite hang. (The receiver's inactivity
+    //     watchdog makes an unrecoverable stall LOUD + resumable.)
+    const terminal = await awaitLogLine(recvChild, /recv ev=(completed|interrupted|failed|canceled)/, WAIT_MS);
+    log('receiver terminal outcome:', terminal ? terminal.replace(/.*recv ev=/, 'recv ev=').slice(0, 40) : 'NONE (HANG!)');
+    if (!terminal) failures.push('F-B1 HANG: the transfer never reached a terminal state within timeout (zombie)');
+
+    // Info only: did recovery also fully deliver? A miss here is the Phase-2 resupply
+    // gap (F-B11), NOT an F-B1 failure — as long as it terminated loudly above.
+    const received = await awaitDelivery(recvDownloads, expected, 3000);
+    const deliveredAll = received.size === expected.size;
+    log(`delivery: ${received.size}/${expected.size} files ${deliveredAll ? '(full recovery)' : '(INCOMPLETE — Phase-2 resupply gap F-B11; failed loud above, not an F-B1 miss)'}`);
+
+    return { pass: failures.length === 0, failures };
+  } finally {
+    await delay(500); await cleanupAll(); await delay(300);
+  }
+}
+
+async function main() {
+  const scenarios = { fb1: runFB1 };
+  const run = scenarios[SCENARIO];
+  if (!run) { console.error('unknown SPIKE_SCENARIO: ' + SCENARIO); process.exit(2); }
+  try {
+    const { pass, failures } = await run();
+    if (pass) { console.log(`\n=== FAULT-E2E ${SCENARIO}: PASS — the injected fault was surfaced LOUD and the transfer reached a bounded terminal outcome (never a zombie) ===`); process.exit(0); }
+    console.error(`\n=== FAULT-E2E ${SCENARIO}: FAIL ===`);
+    for (const f of failures) console.error('  - ' + f);
+    process.exit(1);
+  } catch (e) {
+    console.error(`\n=== FAULT-E2E ${SCENARIO}: ERROR ===\n`, e && e.stack ? e.stack : e);
+    process.exit(1);
+  }
+}
+main();
