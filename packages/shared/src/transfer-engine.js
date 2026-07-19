@@ -52,6 +52,11 @@ export function createSendJob({ manifest, resume = [] }) {
     // receiver's `received` and a resumed job doesn't restart the bar at 0.
     return { fileId: e.fileId, size: e.size, offset: start, sent: start >= e.size, sentBytes: start };
   });
+  // O(1) fileId -> plan-entry lookup (the receive job's `files` map is the model).
+  // onBytes fires once per 128 KB chunk, so a plan.find() here is O(files) per
+  // chunk == quadratic on a large multi-file send (a 10k-file folder resolves the
+  // last file's every chunk against all 10k entries).
+  const byId = new Map(plan.map((p) => [p.fileId, p]));
   let idx = 0;
   function advance() { while (idx < plan.length && plan[idx].sent) idx += 1; }
   advance();
@@ -66,13 +71,13 @@ export function createSendJob({ manifest, resume = [] }) {
     // the sender's progress only moves at file boundaries, so a single huge file
     // shows a frozen bar and no speed/ETA for hours.
     onBytes(fileId, n) {
-      const p = plan.find((x) => x.fileId === fileId);
+      const p = byId.get(fileId);
       if (!p || !Number.isInteger(n) || n < 0) return 0;
       p.sentBytes = Math.min(p.sentBytes + n, p.size);
       return p.size > 0 ? p.sentBytes / p.size : 1;
     },
     onFileSent(fileId) {
-      const p = plan.find((x) => x.fileId === fileId);
+      const p = byId.get(fileId);
       if (p) { p.sent = true; p.sentBytes = p.size; }
       advance();
     },
