@@ -9,8 +9,9 @@ jobs:
   test:
     runs-on: windows-latest
     env:
-      # The account-server package's @prisma/client postinstall downloads a query
-      # engine we don't need for unit tests (mirrors release.yml); skip it.
+      # Skip @prisma/client's auto-generate during `npm ci` (a query-engine
+      # download that can flake); we generate it explicitly below instead, so the
+      # step is visible and fails loudly if it can't.
       PRISMA_SKIP_POSTINSTALL_GENERATE: '1'
     steps:
       - uses: actions/checkout@v7
@@ -19,5 +20,11 @@ jobs:
           node-version: 22
       - name: Install dependencies
         run: npm ci
+      # The account-server tests import a Prisma client that must be generated
+      # from its schema; without this they fail with "Cannot find module
+      # '.prisma/client/default'". (release.yml skips this because it only builds
+      # the Electron installers, which never touch Prisma — a test run does.)
+      - name: Generate Prisma client (account-server tests need it)
+        run: npm run prisma:generate -w @farsight/account-server
       - name: Run unit tests
         run: npx vitest run
