@@ -1792,6 +1792,59 @@ async function sendToFleetDevice(d, btn, mode = 'files') {
 document.getElementById('transfers-refresh').addEventListener('click', refreshTransfersList);
 document.getElementById('transfers-clear').addEventListener('click', clearFinishedTransfers);
 
+// ─── Send-zone recipient tiles (Task 5) ─────────────────────────────────────
+// Drop-first send zone: instead of typing a Host ID, the Transfers page shows
+// a tile per online fleet device / accepted contact (Task 6 wires drag/drop +
+// click-to-send onto these). The ad-hoc Host ID form stays as a fallback
+// behind a toggle for hosts that aren't in the fleet or contacts.
+const xferRecipientsEl = document.getElementById('xfer-recipients');
+const xferAdhocEl = document.getElementById('xfer-adhoc');
+
+// Build the tier-shaped send target for a fleet device / contact (mirrors
+// sendToFleetDevice / sendToContact).
+function fleetTarget(d) { return { id: d.signalingId, deviceId: d.id, linked: true }; }
+function contactTarget(c) { return { id: c.signalingId, deviceId: c.deviceId, linked: true, contact: true }; }
+
+function recipTile(desc) {
+  const t = document.createElement('div');
+  t.className = `xfer-recip ${desc.online ? 'on' : 'off'}`;
+  const av = document.createElement('div'); av.className = desc.kind === 'contact' ? 'av c' : 'av';
+  av.textContent = (desc.name || '?').slice(0, 1).toUpperCase();
+  const info = document.createElement('div');
+  const rn = document.createElement('div'); rn.className = 'rn'; rn.textContent = desc.name;
+  const rs = document.createElement('div'); rs.className = 'rs';
+  const dot = document.createElement('span'); dot.className = 'rdot';
+  rs.append(dot, document.createTextNode(`${desc.kind === 'contact' ? 'Contact' : 'Device'} · ${desc.online ? 'online' : 'offline'}`));
+  info.append(rn, rs);
+  t.append(av, info);
+  t.__farsightRecipient = desc;
+  return t;
+}
+
+async function renderSendRecipients() {
+  if (!xferRecipientsEl) return;
+  let descs = [];
+  try {
+    const [fleetRes, myId, contactsRes] = await Promise.all([
+      window.farsightIpc.accountFleet(), window.farsightIpc.connAuthDeviceId(), window.farsightIpc.accountContacts(),
+    ]);
+    const devices = (fleetRes && fleetRes.ok && fleetRes.data.devices || []).filter((d) => !myId || d.id !== myId);
+    for (const d of devices) descs.push({ kind: 'fleet', name: d.name || d.signalingId, online: !!(d.online && d.signalingId && d.publicKey), target: fleetTarget(d) });
+    const accepted = (contactsRes && contactsRes.ok && contactsRes.data.accepted) || [];
+    for (const c of accepted) descs.push({ kind: 'contact', name: c.email, online: !!(c.online && c.signalingId), target: contactTarget(c) });
+  } catch { /* not signed in / offline -- just show ad-hoc */ }
+  xferRecipientsEl.replaceChildren();
+  for (const d of descs) xferRecipientsEl.append(recipTile(d));
+  // ad-hoc tile
+  const adhoc = document.createElement('div'); adhoc.className = 'xfer-recip adhoc';
+  adhoc.textContent = '+ Host ID…';
+  adhoc.onclick = () => { if (xferAdhocEl) xferAdhocEl.hidden = !xferAdhocEl.hidden; };
+  xferRecipientsEl.append(adhoc);
+}
+
+const xferAdhocToggleEl = document.getElementById('xfer-adhoc-toggle');
+if (xferAdhocToggleEl) xferAdhocToggleEl.addEventListener('click', () => { if (xferAdhocEl) xferAdhocEl.hidden = !xferAdhocEl.hidden; });
+
 // ─── Shell router ────────────────────────────────────────────────────────────
 // ONE source of truth for which page is visible. The old shell wrote the
 // "hide every sibling" list out four times (openFleet/openContacts/
@@ -1810,7 +1863,7 @@ let activePage = 'home';
 const PAGE_ENTER = {
   fleet: () => refreshAccountView(),
   people: () => loadContacts(),
-  transfers: () => { sendStatusEl.textContent = ''; refreshTransfersList(); },
+  transfers: () => { sendStatusEl.textContent = ''; refreshTransfersList(); renderSendRecipients(); },
   settings: () => refreshSettingsView(),
 };
 
