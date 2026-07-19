@@ -685,6 +685,12 @@ document.getElementById('menu-save-parallel-connections').addEventListener('clic
   await window.farsightIpc.setParallelConnections(n);
   refreshSettingsView();
 });
+const rateLimitInput = document.getElementById('settings-rate-limit');
+document.getElementById('menu-save-rate-limit').addEventListener('click', async () => {
+  const n = Math.min(1000, Math.max(0, Math.round(Number(rateLimitInput.value)) || 0));
+  await window.farsightIpc.setRateLimit(n);
+  refreshSettingsView();
+});
 
 // Cache our own version for the SP1 version-aware handshake (sent on CONNECT and
 // compared against the host's relayed version), and feed it to the status bar
@@ -2312,6 +2318,7 @@ function refreshSettingsView() {
   window.farsightIpc.getParallelConnections().then((n) => {
     parallelConnectionsInput.value = n;
   });
+  window.farsightIpc.getRateLimit().then((n) => { rateLimitInput.value = n; });
 }
 
 // Eager init — MUST be the last thing in the file. refreshSignalingUrl() reaches
