@@ -1766,9 +1766,13 @@ function qRow(j, opts = {}) {
     resumeBtn.textContent = 'Resume';
     resumeBtn.onclick = async () => {
       resumeBtn.disabled = true;
-      const r = await window.farsightIpc.transferResume(jobId);
-      if (r && r.ok === false && r.reason === 'stale' && sendStatusEl) {
-        sendStatusEl.textContent = "Can't resume after a restart — send again.";
+      let r;
+      try { r = await window.farsightIpc.transferResume(jobId); } catch { r = { ok: false }; }
+      if (r && r.ok === false) {
+        if (sendStatusEl) sendStatusEl.textContent = r.reason === 'stale'
+          ? "Can't resume after a restart — send the files again."
+          : "Couldn't resume the transfer. Try again.";
+        resumeBtn.disabled = false; // re-enable so the user can retry (a resumed job leaves the Paused group, so no double-fire)
       }
       renderTransfers();
     };
@@ -2016,6 +2020,8 @@ window.farsightIpc.onTransferEvent((ev) => {
     if (ev.reason) existing.failedFiles = upsertFailedFile(existing.failedFiles, { fileId: ev.fileId, reason: ev.reason });
   } else if (ev.type === 'paused') {
     existing.state = 'paused';
+    existing.rate = null;
+    sendEstimatorFor(ev.jobId).reset();
   } else if (ev.type === 'resumed') {
     existing.state = 'active';
   } else if (ev.progress) {
