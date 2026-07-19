@@ -2,6 +2,21 @@
 // frame is self-addressing so a chunk can arrive on any flow, in any order, and
 // still be written to the right place: [u32 fileId][u64 offset][u32 length][payload].
 // NO fs/WebRTC/DOM. decode returns null on any malformed/hostile input.
+//
+// DELIVERY IS AT-LEAST-ONCE, NOT exactly-once — duplicates are EXPECTED. The send
+// pool transmits a chunk over a flow BEFORE awaiting that flow's credit
+// (transfer-channel.js sendBulk() sends, then returns the credit promise); if the
+// flow then dies, the pool requeues the chunk onto a surviving flow
+// (transfer-send-pool.js) even though the original copy may already have reached
+// the receiver. Because every frame carries its own fileId+offset, a re-delivered
+// chunk just overwrites the same bytes at the same offset — a harmless no-op.
+// This idempotency is LOAD-BEARING and must be preserved by anything downstream:
+// the positional sparse writer (transfer-io.js writeAt) and the received-range set
+// (transfer-ranges.js add(), which coalesces so covered-bytes can't double-count).
+// Any future per-chunk accounting or incremental/streaming hash MUST NOT assume a
+// chunk arrives exactly once — e.g. never `received += length` per bulk frame
+// without range dedup, and never fold bytes into a running hash as they arrive on
+// an unordered, possibly-duplicating flow.
 export const BULK_HEADER_BYTES = 16;
 
 export function encodeBulkFrame({ fileId, offset, length, payload }) {

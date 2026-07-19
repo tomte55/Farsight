@@ -60,6 +60,12 @@ export function createReceiveRouter({
 
   return {
     // Memoized openPart makes concurrent first-frames for the same not-yet-opened file safe.
+    // At-least-once delivery: the SAME (fileId,offset) chunk can arrive more than
+    // once (a dead flow's requeued chunk — see transfer-chunk.js). That's safe here
+    // BY DESIGN — writeAt overwrites identical bytes at the same offset, and
+    // f.ranges.add() coalesces so coveredBytes() can't double-count. Keep it that
+    // way: don't add per-frame counters or streaming-hash folds that assume
+    // exactly-once.
     async onBulkFrame(buf) {
       const d = decodeBulkFrame(buf);
       if (!d) return;

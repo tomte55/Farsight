@@ -1,6 +1,9 @@
 // Pure coalesced interval set of received byte ranges for the multi-flow transfer.
 // Half-open [start, end). Replaces size-based resume: a file is complete when its
-// ranges cover [0, size). NO fs/DOM. Idempotent add() makes dead-flow requeue safe.
+// ranges cover [0, size). NO fs/DOM. add() coalesces overlaps, so re-adding an
+// already-covered range is a no-op — this is what makes at-least-once delivery
+// safe: a dead flow's requeued chunk (see transfer-chunk.js) can re-add the same
+// range without inflating coveredBytes(). Keep add()/coveredBytes() idempotent.
 export function createRangeSet(intervals = []) {
   // Normalize input into sorted, coalesced [start,end) pairs.
   let ivals = normalize(intervals.map(([s, e]) => [s, e]));
