@@ -28,3 +28,25 @@ jobs:
         run: npm run prisma:generate -w @farsight/account-server
       - name: Run unit tests
         run: npx vitest run
+
+  # Real-wire, headless, two-process transfer harness (Plan 1b). This runs the
+  # ACTUAL packaged transfer stack (two real Electron processes, real WebRTC
+  # data channels, real loopback signaling) rather than vitest's faked-wire
+  # unit tests, so it's a separate job, not folded into `test` above.
+  # See packages/controller/test/harness-spike/two-process-harness.mjs.
+  real-wire:
+    runs-on: windows-latest
+    env:
+      # The harness never touches account-server/Prisma — skip that install
+      # cost entirely for this job.
+      PRISMA_SKIP_POSTINSTALL_GENERATE: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci
+      - name: Real-wire transfer harness (4-flow, multi-chunk, multi-file)
+        run: node packages/controller/test/harness-spike/two-process-harness.mjs
+        timeout-minutes: 10
