@@ -382,6 +382,7 @@ body.in-session .cog, body.in-session .menu { display: none; }
 .xfer-qrow .nm .dir { color: var(--acc2); margin-right: 5px; }
 .xfer-qrow .mt { font-size: 10px; color: var(--sub2); text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
 .xfer-qrow.recv { border-color: rgba(74, 168, 255, .28); }
+.xfer-qrow.paused { border-color: rgba(44, 138, 114, .4); }
 .xfer-qrow.done .nm .dir { color: var(--ok); }
 .xfer-qrow.warnrow { border-color: rgba(240, 180, 41, .3); }
 .xfer-qrow.fail { border-color: var(--danger-line); }

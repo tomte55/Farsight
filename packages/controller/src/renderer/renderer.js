@@ -1330,6 +1330,7 @@ function stateLabel(j) {
   switch (j.state) {
     case 'awaiting-approval': return 'Waiting for approval…';
     case 'interrupted': return `Interrupted — will resume${sendDetailText(j) ? ` · ${sendDetailText(j)}` : ''}`;
+    case 'paused': return 'Paused';
     case 'reconnecting': return 'Reconnecting…';
     case 'active': return sendDetailText(j) ? `Transferring · ${sendDetailText(j)}` : 'Transferring…';
     case 'finishing': return 'Finishing — verifying on host…';
@@ -1448,7 +1449,7 @@ const xferDeckEl = document.getElementById('xfer-deck');
 // interrupted send from rendering in BOTH the deck (with a wrong "Transferring"
 // pill) and History at the same time.
 function activeDeckJob() {
-  const sends = [...transferJobs.values()].filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted');
+  const sends = [...transferJobs.values()].filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && j.state !== 'paused');
   if (sends.length === 0) return null;
   // The engine runs the oldest queued send first (FIFO); the deck follows suit.
   return sends.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
@@ -1691,7 +1692,7 @@ function qGroupHeader(text, right) {
 // patchQRow only mutates already-existing sub-elements and never creates a
 // missing tag/action-button or removes a stale mini-bar/reorder-control.
 function qShapeKey(opts) {
-  return `${opts.cls || ''}:${!!opts.mini}:${!!opts.tag}:${opts.action || ''}:${!!opts.reorder}`;
+  return `${opts.cls || ''}:${!!opts.mini}:${!!opts.tag}:${opts.action || ''}:${!!opts.reorder}:${!!opts.resumeAction}`;
 }
 
 // Builds a brand-new row + its cache-able refs. Called for a jobId that
@@ -1754,7 +1755,27 @@ function qRow(j, opts = {}) {
   let actionBtn = null;
   if (opts.action) { actionBtn = buildActionButton(j.jobId, opts.action === 'cancel'); row.append(actionBtn); }
 
-  return { row, mt, fill, pct, tagEl, actionBtn, ordUp, ordDown, shapeKey: qShapeKey(opts) };
+  // Resume — paused sends only. jobId is closed over from this build call
+  // (same pattern as ordUp/ordDown above), so the handler stays correct even
+  // if the cached row is later reused for a patch on a fresh job object.
+  let resumeBtn = null;
+  if (opts.resumeAction) {
+    const jobId = j.jobId;
+    resumeBtn = document.createElement('button');
+    resumeBtn.className = 'btn btn-primary';
+    resumeBtn.textContent = 'Resume';
+    resumeBtn.onclick = async () => {
+      resumeBtn.disabled = true;
+      const r = await window.farsightIpc.transferResume(jobId);
+      if (r && r.ok === false && r.reason === 'stale' && sendStatusEl) {
+        sendStatusEl.textContent = "Can't resume after a restart — send again.";
+      }
+      renderTransfers();
+    };
+    row.append(resumeBtn);
+  }
+
+  return { row, mt, fill, pct, tagEl, actionBtn, resumeBtn, ordUp, ordDown, shapeKey: qShapeKey(opts) };
 }
 
 // Patches only the fields that can change tick-to-tick or reorder-to-reorder
@@ -1789,8 +1810,14 @@ function computeQueueRows() {
   const all = [...transferJobs.values()];
   const active = activeDeckJob();
   const orderIndex = new Map(lastQueueOrder.map((id, i) => [id, i]));
+  // Paused sends get their own group (above "Up next") — excluded from
+  // waitingSends so a paused job never double-renders (deck excludes it via
+  // activeDeckJob, waitingSends excludes it here).
+  const pausedSends = all
+    .filter((j) => j.direction !== 'recv' && j.state === 'paused')
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const waitingSends = all
-    .filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && (!active || j.jobId !== active.jobId) && j.state !== 'interrupted')
+    .filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && (!active || j.jobId !== active.jobId) && j.state !== 'interrupted' && j.state !== 'paused')
     .sort((a, b) => {
       const ai = orderIndex.has(a.jobId) ? orderIndex.get(a.jobId) : Infinity;
       const bi = orderIndex.has(b.jobId) ? orderIndex.get(b.jobId) : Infinity;
@@ -1806,6 +1833,10 @@ function computeQueueRows() {
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   const rows = [];
+  pausedSends.forEach((j) => rows.push({
+    jobId: j.jobId, section: 'paused', kind: 'paused', action: 'resume', job: j,
+    opts: { cls: 'paused', meta: 'Paused', tag: 'Paused', resumeAction: true },
+  }));
   waitingSends.forEach((j, i) => rows.push({
     jobId: j.jobId, section: 'wait', kind: 'wait', action: 'cancel', job: j,
     opts: { meta: fmtCount(j.manifest), action: 'cancel', reorder: true, firstWaiting: i === 0, lastWaiting: i === waitingSends.length - 1 },
@@ -1849,7 +1880,8 @@ function renderQueue() {
   for (const r of rows) {
     if (r.section !== lastSection) {
       lastSection = r.section;
-      if (r.section === 'wait') finalNodes.push(qGroupHeader(`Up next · ${waitingCount} waiting`));
+      if (r.section === 'paused') finalNodes.push(qGroupHeader('Paused'));
+      else if (r.section === 'wait') finalNodes.push(qGroupHeader(`Up next · ${waitingCount} waiting`));
       else if (r.section === 'recv') finalNodes.push(qGroupHeader('Receiving'));
       else finalNodes.push(qGroupHeader('History'));
     }
@@ -1982,6 +2014,10 @@ window.farsightIpc.onTransferEvent((ev) => {
     // retryable (transfer-service.js only treats a reason-carrying one as
     // terminal) — not a real failure yet, so it must not show up here.
     if (ev.reason) existing.failedFiles = upsertFailedFile(existing.failedFiles, { fileId: ev.fileId, reason: ev.reason });
+  } else if (ev.type === 'paused') {
+    existing.state = 'paused';
+  } else if (ev.type === 'resumed') {
+    existing.state = 'active';
   } else if (ev.progress) {
     // Progress implies the peer accepted (bytes are flowing). Completion is
     // signaled by 'completed', NOT by fraction hitting 1 (that's "all sent", not
