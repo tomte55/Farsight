@@ -47,6 +47,32 @@ describe('createSparsePartFile', () => {
     expect(p.liveDigest()).toBe(null);
   });
 
+  it('preallocates the .part to the final size so out-of-order writes do not keep extending it', async () => {
+    const p = await createSparsePartFile({ destRoot: dir, relPath: 'pre.bin', size: 1000 });
+    expect((await stat(p.partPath)).size).toBe(1000); // full size reserved before a byte is written
+    await p.close();
+  });
+
+  it('grows a resumed .part up to the final size, preserving already-received bytes', async () => {
+    const p1 = await createSparsePartFile({ destRoot: dir, relPath: 'resume.bin' });
+    await p1.writeAt(0, new Uint8Array([1, 2, 3, 4]));
+    await p1.close();
+    const p2 = await createSparsePartFile({ destRoot: dir, relPath: 'resume.bin', size: 16 });
+    expect((await stat(p2.partPath)).size).toBe(16);
+    await p2.close();
+    const bytes = new Uint8Array(await readFile(p2.partPath));
+    expect([...bytes.slice(0, 4)]).toEqual([1, 2, 3, 4]); // resumed bytes intact
+  });
+
+  it('never shrinks a resumed .part that already holds more bytes than a (stale) size hint', async () => {
+    const p1 = await createSparsePartFile({ destRoot: dir, relPath: 'grow.bin' });
+    await p1.writeAt(0, new Uint8Array(20)); // 20 bytes on disk
+    await p1.close();
+    const p2 = await createSparsePartFile({ destRoot: dir, relPath: 'grow.bin', size: 8 });
+    expect((await stat(p2.partPath)).size).toBe(20); // NOT truncated to 8 — that would destroy received bytes
+    await p2.close();
+  });
+
   it('is compatible with finalizeReceivedFile (completion-read verify + rename)', async () => {
     const content = new Uint8Array([10, 20, 30, 40, 50]);
     const p = await createSparsePartFile({ destRoot: dir, relPath: 'f.bin' });

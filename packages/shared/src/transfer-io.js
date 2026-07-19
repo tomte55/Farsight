@@ -207,7 +207,7 @@ export function sendFile({ sourcePath, offset, chunkSize, onChunk }) {
 // sparse and its size is NOT the resume offset (received-ranges are; see the
 // orchestrator). liveDigest() is always null — an out-of-order file can only be
 // verified by a completion read at finalize. Shape matches finalizeReceivedFile.
-export async function createSparsePartFile({ destRoot, relPath }) {
+export async function createSparsePartFile({ destRoot, relPath, size }) {
   const finalPath = confineDestPath(destRoot, relPath);
   const partPath = `${finalPath}.part`;
   await mkdir(dirname(finalPath), { recursive: true });
@@ -216,6 +216,15 @@ export async function createSparsePartFile({ destRoot, relPath }) {
   let exists = false;
   try { await stat(partPath); exists = true; } catch { /* doesn't exist */ }
   const fh = await open(partPath, exists ? 'r+' : 'w+');
+  // Preallocate to the final size (best-effort): reserving the length up front
+  // lets the FS lay the file out contiguously instead of extending it on every
+  // out-of-order writeAt (fragmentation), and makes the finalize completion-read
+  // sequential. GROW ONLY — never truncate below the current on-disk size, which
+  // would destroy already-received bytes on a resume with a stale/smaller size
+  // hint. Skipped when size is unknown (back-compat with callers that omit it).
+  if (Number.isInteger(size) && size > 0) {
+    try { if ((await fh.stat()).size < size) await fh.truncate(size); } catch { /* optimization only */ }
+  }
   return {
     partPath,
     finalPath,

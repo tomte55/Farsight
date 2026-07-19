@@ -825,7 +825,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
 
     const receiver = createMultiFlowReceiver({
       ctrl: wrappedCtrl, flows, jobId, consent: receiveConsent,
-      openPart: (relPath) => createSparsePartFile({ destRoot, relPath }),
+      openPart: (relPath, size) => createSparsePartFile({ destRoot, relPath, size }),
       verifyAndFinalize: ({ path, expectedHash, mtime }) => finalizeReceivedPath({ destRoot, relPath: path, expectedHash, mtime }),
       initialRangesFor: () => persistedRanges,
       persistRanges: (files) => {

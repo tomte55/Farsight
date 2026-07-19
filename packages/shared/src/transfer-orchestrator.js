@@ -1283,7 +1283,9 @@ export function createMultiFlowReceiver({
       manifest: m,
       initialRanges: initialRangesFor(m),
       openPart: async (fileId) => {
-        const p = await openPart(pathOf(fileId));
+        // Pass the final size so the sparse writer can preallocate the .part
+        // (contiguous layout, sequential finalize read) — see createSparsePartFile.
+        const p = await openPart(pathOf(fileId), findEntry(fileId)?.size);
         partFiles.set(fileId, p);
         return p;
       },
