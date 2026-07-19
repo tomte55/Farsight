@@ -124,7 +124,9 @@ describe('renderer: Send… entry point + Transfers panel', () => {
 
   test('index.html has a job list container on the Transfers page', () => {
     expect(html).toMatch(/<section id="page-transfers"/);
-    expect(html).toMatch(/<div id="transfers-list">/);
+    expect(html).toMatch(/<div id="xfer-work" class="xfer-work">/);
+    expect(html).toMatch(/<div id="xfer-queue" class="xfer-queue">/);
+    expect(html).toMatch(/id="transfers-clear"/);
   });
 
   test('renderer.js wires both send buttons (files/folder) through transferPickPaths(mode) + transferSend', () => {

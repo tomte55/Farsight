@@ -14,7 +14,7 @@
       so removing them was the only route.
   Runtime CSSOM writes (el.style.width = …) are unaffected by style-src.
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'sha256-GdCukeRFiGqt/x0/T7h5QubYEd29m0CuT0hf273o7Dk='; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self' 'sha256-0s4LARPlMpZYRfoK4fVW9rWLCQ8G9d/SJq+wBu3QaXs='; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'" />
 <title>Farsight Controller</title>
 <link rel="stylesheet" href="../shared/farsight.css" />
 <link rel="stylesheet" href="./shell.css" />
@@ -38,6 +38,7 @@
     "@farsight/shared/transfer-rate": "../shared/transfer-rate.js",
     "@farsight/shared/transfer-label": "../shared/transfer-label.js",
     "@farsight/shared/transfer-detail": "../shared/transfer-detail.js",
+    "@farsight/shared/transfer-deck": "../shared/transfer-deck.js",
     "@farsight/shared/shell-nav": "../shared/shell-nav.js",
     "@farsight/shared/status-bar": "../shared/status-bar.js",
     "@farsight/shared/idle-rotator": "../shared/idle-rotator.js"
@@ -168,16 +169,19 @@
             </div>
             <p id="send-status" class="statusline"></p>
           </div>
-          <div class="card">
-            <div class="page-head">
-              <div><div class="page-title">Transfers</div></div>
-              <div class="row-actions">
-                <button id="transfers-clear" class="btn btn-ghost">Clear finished</button>
-                <button id="transfers-refresh" class="btn btn-ghost">Refresh</button>
+          <div class=”card”>
+            <div class=”page-head”>
+              <div><div class=”page-title”>Transfers</div></div>
+              <div class=”row-actions”>
+                <button id=”transfers-clear” class=”btn btn-ghost”>Clear finished</button>
+                <button id=”transfers-refresh” class=”btn btn-ghost”>Refresh</button>
               </div>
             </div>
-            <div id="transfers-list"></div>
-            <p id="transfers-empty" class="fleet-empty" hidden>No transfers yet. Use “Send files…” to start one.</p>
+            <div id=”xfer-work” class=”xfer-work”>
+              <div id=”xfer-deck” class=”xfer-deck” hidden></div>
+              <div id=”xfer-queue” class=”xfer-queue”></div>
+            </div>
+            <p id=”transfers-empty” class=”fleet-empty” hidden>No transfers yet. Use “Send files…” to start one.</p>
           </div>
         </div>
       </section>
