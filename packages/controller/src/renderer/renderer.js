@@ -1342,6 +1342,7 @@ function stateLabel(j) {
     case 'finishing': return 'Finishing — verifying on host…';
     case 'verifying': return 'Finishing — verifying received files…';
     case 'done': return hasCount ? `Completed · ${total} file${total === 1 ? '' : 's'}` : 'Completed';
+    case 'completed_with_errors': return hasCount ? `Completed with errors · ${total} file${total === 1 ? '' : 's'}` : 'Completed with errors';
     case 'declined': return 'Declined by host';
     case 'canceled': return 'Canceled';
     case 'error': return `Failed${j.error ? ` — ${XFER_ERROR_LABELS[j.error] || j.error}` : ''}`;
@@ -1413,9 +1414,12 @@ function buildActionButton(jobId, active) {
 }
 
 // Remove every finished/failed/canceled job in one go. Active transfers are left
-// untouched (they show Cancel, not Remove).
+// untouched (they show Cancel, not Remove). 'completed_with_errors' (F-A4) is
+// terminal too — grouped alongside TERMINAL_TRANSFER_STATES ad hoc, the same
+// way 'interrupted'/'paused' are handled elsewhere in this file, rather than
+// widening the shared list.
 async function clearFinishedTransfers() {
-  const finished = [...transferJobs.values()].filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state));
+  const finished = [...transferJobs.values()].filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state) || j.state === 'completed_with_errors');
   for (const j of finished) {
     try { await window.farsightIpc.transferRemove(j.jobId); } catch { /* best effort */ }
     transferJobs.delete(j.jobId);
@@ -1456,7 +1460,7 @@ const xferDeckEl = document.getElementById('xfer-deck');
 // pill) and History at the same time.
 function activeDeckJob() {
   const all = [...transferJobs.values()];
-  const live = (j) => !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && j.state !== 'paused';
+  const live = (j) => !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && j.state !== 'paused' && j.state !== 'completed_with_errors';
   // The deck shows the active SEND (the engine runs the oldest queued send first
   // -- FIFO -- and the deck follows suit). If nothing is sending, fall back to the
   // active RECEIVE so the RECEIVER gets the same rich deck (rate/waveform/progress),
@@ -1872,7 +1876,7 @@ function computeQueueRows() {
     .filter((j) => j.direction !== 'recv' && j.state === 'paused')
     .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   const waitingSends = all
-    .filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && (!active || j.jobId !== active.jobId) && j.state !== 'interrupted' && j.state !== 'paused')
+    .filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && (!active || j.jobId !== active.jobId) && j.state !== 'interrupted' && j.state !== 'paused' && j.state !== 'completed_with_errors')
     .sort((a, b) => {
       const ai = orderIndex.has(a.jobId) ? orderIndex.get(a.jobId) : Infinity;
       const bi = orderIndex.has(b.jobId) ? orderIndex.get(b.jobId) : Infinity;
@@ -1884,9 +1888,13 @@ function computeQueueRows() {
   // under Receiving (mini bar) and again under History.
   // Exclude the receive that's showing in the deck (activeDeckJob can now be a
   // receive when nothing is sending) so it doesn't double-render here + in the deck.
-  const receives = all.filter((j) => j.direction === 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && (!active || j.jobId !== active.jobId));
+  const receives = all.filter((j) => j.direction === 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted' && j.state !== 'completed_with_errors' && (!active || j.jobId !== active.jobId));
   const history = all
-    .filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state) || j.state === 'interrupted')
+    // 'completed_with_errors' (F-A4) is terminal and belongs in History like
+    // 'error'/'done' — it's excluded from the base TERMINAL_TRANSFER_STATES
+    // constant so it doesn't get treated as a clean 'done' anywhere the base
+    // list is used for that purpose, but it must still land here.
+    .filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state) || j.state === 'interrupted' || j.state === 'completed_with_errors')
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   const rows = [];
@@ -2024,7 +2032,7 @@ window.farsightIpc.onTransferEvent((ev) => {
   if (!ev || typeof ev.jobId !== 'string') return;
   const existing = transferJobs.get(ev.jobId) || { jobId: ev.jobId, direction: ev.direction, state: 'awaiting-approval', createdAt: Date.now() };
   existing.direction = ev.direction || existing.direction;
-  if (TERMINAL_TRANSFER_STATES.includes(existing.state)) { transferJobs.set(ev.jobId, existing); return; } // don't resurrect a finished job
+  if (TERMINAL_TRANSFER_STATES.includes(existing.state) || existing.state === 'completed_with_errors') { transferJobs.set(ev.jobId, existing); return; } // don't resurrect a finished job (F-A4: completed_with_errors is terminal too)
   if (ev.type === 'accepted') {
     // The host approved — ONLY now is the transfer genuinely active.
     existing.state = 'active';
@@ -2051,7 +2059,10 @@ window.farsightIpc.onTransferEvent((ev) => {
     if (ev.progress) existing.progress = ev.progress;
     existing.state = 'finishing';
   } else if (ev.type === 'completed') {
-    existing.state = 'done'; // both sides agree: all files received and hashes verified
+    // ev.ok is false when the receiver finished reconciling but a file
+    // terminally failed (per-file I/O isolation) — F-A4: that must not read
+    // as a clean 'done' live, same as the persisted jobState (jobStateForCompletion).
+    existing.state = ev.ok === false ? 'completed_with_errors' : 'done';
   } else if (ev.type === 'declined') {
     existing.state = 'declined';
   } else if (ev.type === 'canceled') {
@@ -2310,7 +2321,7 @@ function showPage(name) {
 const railButtons = new Map();
 
 function buildRail() {
-  for (const item of railItems({ active: activePage, transferCount: activeTransferCount([...transferJobs.values()]) })) {
+  for (const item of railItems({ active: activePage, transferCount: activeTransferCount([...transferJobs.values()].filter((j) => j.state !== 'completed_with_errors')) })) {
     const b = document.createElement('button');
     b.className = `rail-item${item.selected ? ' sel' : ''}`;
     b.dataset.page = item.page;
@@ -2336,7 +2347,7 @@ function buildRail() {
 
 function renderRail() {
   if (railButtons.size === 0) { buildRail(); return; }
-  for (const item of railItems({ active: activePage, transferCount: activeTransferCount([...transferJobs.values()]) })) {
+  for (const item of railItems({ active: activePage, transferCount: activeTransferCount([...transferJobs.values()].filter((j) => j.state !== 'completed_with_errors')) })) {
     const entry = railButtons.get(item.page);
     if (!entry) continue;
     entry.btn.classList.toggle('sel', item.selected);

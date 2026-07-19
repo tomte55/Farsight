@@ -475,7 +475,7 @@ describe('transfer-service multi-flow branch: close() teardown on every settle p
 // maybeComplete() sends on a completed-with-failures reconciliation (see its
 // doc in transfer-orchestrator.js) — regardless of how far the pump itself got.
 describe('transfer-service: runSend honors the resolved ok (not hardcoded true)', () => {
-  it('a multi-flow send whose sender.start() resolves {ok:false} records ok:false (jobState still done)', async () => {
+  it('a multi-flow send whose sender.start() resolves {ok:false} records completed_with_errors (F-A4)', async () => {
     const srcDir = await tmp();
     const sendStore = createJobsStore({ dir: await tmp() });
 
@@ -509,7 +509,7 @@ describe('transfer-service: runSend honors the resolved ok (not hardcoded true)'
 
     const rec = (await sendStore.list()).find((j) => j.jobId === jobId);
     expect(rec).toBeTruthy();
-    expect(rec.jobState).toBe('done'); // still done — not resumable; per-file failures are recorded elsewhere
+    expect(rec.jobState).toBe('completed_with_errors'); // F-A4: a dropped file must not read as clean 'done'
   });
 
   it('a normal multi-flow success (sender.start() resolves with no ok:false) still records ok:true', async () => {

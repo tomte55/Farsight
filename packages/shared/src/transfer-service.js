@@ -89,6 +89,17 @@ export function isAuthoritativeFlowError(reason) {
   return /bad_password|host_offline|declined|nospace|bad_manifest|unknown_device|proto/.test(String(reason || ''));
 }
 
+// One source of truth for a COMPLETED transfer's terminal jobState (F-A4).
+// `ok` = every file delivered+verified. `accepted` = the transfer actually
+// began (consent given / OFFER accepted) rather than being declined up front.
+// A finished-but-incomplete transfer is 'completed_with_errors' — NOT 'done'
+// (it would read as clean success) and NOT resumable (RESUMABLE_STATES is an
+// allowlist, so this never re-triggers a resend loop).
+export function jobStateForCompletion({ accepted, ok }) {
+  if (ok) return 'done';
+  return accepted ? 'completed_with_errors' : 'error';
+}
+
 // Multi-flow selection (Plan 3 Task 3): flowCount > 1 drives the Plan-2
 // createMultiFlowSender/createMultiFlowReceiver instead of the single-flow
 // createSender/createReceiver. Any non-positive-integer input (missing, 0,
@@ -449,13 +460,14 @@ export function createTransferService({ store, transferDir, consent, openChannel
         // createMultiFlowSender's start() can resolve { jobId, ok:false } on a
         // completed-with-failures receive (see its 'complete' ctrl handler
         // above) — honor that instead of hardcoding ok:true, so the persisted
-        // record's top-level ok matches the 'completed' event's ok. jobState
-        // stays 'done' either way — the send genuinely finished (not
-        // resumable); per-file failures are what the receiver's own perFile
-        // record captures.
+        // record's top-level ok matches the 'completed' event's ok. jobState is
+        // derived the same way (F-A4, jobStateForCompletion): this success path
+        // was reached, so the send is `accepted`, but a false `ok` still records
+        // 'completed_with_errors', not a clean 'done' — per-file failures are
+        // what the receiver's own perFile record captures.
         const r = await sender.start();
         result = { jobId, ok: r?.ok !== false };
-        await saveSendRecord({ jobId, manifest, createdAt, jobState: 'done', peer, tier, sourceRoots, flowCount: target && target.flowCount });
+        await saveSendRecord({ jobId, manifest, createdAt, jobState: jobStateForCompletion({ accepted: true, ok: result.ok }), peer, tier, sourceRoots, flowCount: target && target.flowCount });
       } else {
         result = { jobId, ok: false, canceled: true };
       }
@@ -871,11 +883,12 @@ export function createTransferService({ store, transferDir, consent, openChannel
         // `accepted` means this resolve came from maybeComplete (a genuine
         // completion, possibly WITH per-file failures — result.ok is false in
         // that case) rather than beginReceive's decline path. A completed-
-        // with-failures receive is still DONE, not an error: the receiver has
-        // already finished reconciling, so it isn't resumable/retryable. A
-        // non-accepted resolve (declined before any transfer activity) keeps
-        // the old ok-derived jobState.
-        const jobState = accepted ? 'done' : (result.ok ? 'done' : 'error');
+        // with-failures receive is terminal and non-resumable/retryable (the
+        // receiver has already finished reconciling) but must NOT read as a
+        // clean 'done' — jobStateForCompletion records 'completed_with_errors'
+        // instead (F-A4). A non-accepted resolve (declined before any transfer
+        // activity) keeps the old ok-derived jobState.
+        const jobState = jobStateForCompletion({ accepted, ok: result.ok });
         const files = currentManifest.entries.map((e) => ({
           fileId: e.fileId,
           ivals: failedFileIds.has(e.fileId) ? [] : ((accepted || result.ok) ? [[0, e.size]] : []),

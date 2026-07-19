@@ -1,11 +1,11 @@
 // SP3 transfer-service: the MAIN-only pipeline that assembles the sender/
 // receiver orchestrator, jobs-store, and serial send queue into an app-facing
 // service. Exercised via loopback channels — no Electron, no real WebRTC.
-import { expect, test, afterEach } from 'vitest';
+import { expect, test, afterEach, describe, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createTransferService, resolveFlowCount, isAuthoritativeFlowError } from '../src/transfer-service.js';
+import { createTransferService, resolveFlowCount, isAuthoritativeFlowError, jobStateForCompletion } from '../src/transfer-service.js';
 import { createReceiver, createSender } from '@farsight/shared/transfer-orchestrator';
 import { walkSource } from '@farsight/shared/transfer-io';
 import { buildManifest as buildManifestReal } from '@farsight/shared/transfer-manifest';
@@ -2188,4 +2188,14 @@ test('a send with target.flowCount=0 (or negative) falls back to single-flow, no
   // Single-flow openArgs never carries a flowCount key at all (see runSend's
   // `flowCount > 1 ? { ..., flowCount } : { role: 'initiate', target }`).
   expect(sendOpenArgs.flowCount).toBeUndefined();
+});
+
+describe('jobStateForCompletion (F-A4: done must not hide an undelivered file)', () => {
+  it('ok → done', () => { expect(jobStateForCompletion({ accepted: true, ok: true })).toBe('done'); });
+  it('accepted but not ok → completed_with_errors (never plain done)', () => {
+    expect(jobStateForCompletion({ accepted: true, ok: false })).toBe('completed_with_errors');
+  });
+  it('not accepted and not ok → error', () => {
+    expect(jobStateForCompletion({ accepted: false, ok: false })).toBe('error');
+  });
 });
