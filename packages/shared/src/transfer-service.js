@@ -880,6 +880,15 @@ export function createTransferService({ store, transferDir, consent, openChannel
     // Trigger one immediate resume sweep (used by tests; also handy to force a
     // retry). No-op if auto-resume isn't configured.
     resumeSweepNow() { return resumeWatcher ? resumeWatcher.sweep() : Promise.resolve(); },
+
+    // Plan 3 Task 4: let the UI reorder WAITING sends. Delegates straight to
+    // the queue (Task 1) -- the active head (order[0]) is deliberately
+    // unmovable there (moveUp/moveDown both refuse to touch it), so this can
+    // never race advanceSendQueue, which only ever reads queue.active().
+    reorder(jobId, dir) { return dir === 'down' ? queue.moveDown(jobId) : queue.moveUp(jobId); },
+    // Real queue order (active head first) so the renderer can render the
+    // waiting list without guessing at insertion order.
+    queueOrder() { return queue.list(); },
   };
 
   // Own-fleet auto-resume: re-walk an interrupted job's source roots and re-run the

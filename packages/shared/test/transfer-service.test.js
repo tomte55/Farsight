@@ -1194,6 +1194,75 @@ test('serial queue: two enqueued sends never have more than one active channel a
   expect(readFileSync(join(dests.t2, 'y.bin'))).toEqual(readFileSync(w2.sources.get(0)));
 });
 
+// Plan 3 Task 4: api.reorder(jobId, dir) delegates to queue.moveUp/moveDown
+// (Task 1, already unit-tested at the queue level in transfer-queue.test.js)
+// and api.queueOrder() surfaces queue.list() so the renderer can render
+// waiting sends in real queue order. Mirrors the "cancel() on a waiting send"
+// harness above: an openChannel whose channel never gets accepted (no
+// receiver ever calls back) means whichever job becomes active just hangs in
+// sender.start(), leaving the other queued jobs genuinely waiting behind it.
+test('api.reorder moves a waiting send and queueOrder reflects it; active head pinned', async () => {
+  const mk = async () => {
+    const src = tmp();
+    writeFileSync(join(src, 'f.bin'), Buffer.alloc(10, 1));
+    return walkSource([{ path: join(src, 'f.bin') }]);
+  };
+  const [w1, w2, w3] = await Promise.all([mk(), mk(), mk()]);
+  const m1 = buildManifestReal(w1.entries);
+  const m2 = buildManifestReal(w2.entries);
+  const m3 = buildManifestReal(w3.entries);
+
+  const jobA = newJobId(), jobB = newJobId(), jobC = newJobId();
+  const opens = [];
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async ({ target }) => {
+      opens.push(target);
+      // No receiver ever accepts, so whichever job is active just hangs in
+      // sender.start() — exactly like the "cancel() on a waiting send" test
+      // above — leaving the other two genuinely queued behind it.
+      return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} };
+    },
+  });
+
+  const pA = svc.startSend({ jobId: jobA, manifest: m1, sources: w1.sources, target: { id: 'A' } });
+  const pB = svc.startSend({ jobId: jobB, manifest: m2, sources: w2.sources, target: { id: 'B' } });
+  const pC = svc.startSend({ jobId: jobC, manifest: m3, sources: w3.sources, target: { id: 'C' } });
+  await until(() => opens.length > 0); // jobA's channel opened; it's now the active head
+
+  expect(svc.queueOrder()).toEqual([jobA, jobB, jobC]);
+
+  // Move C up past B.
+  expect(svc.reorder(jobC, 'up')).toBe(true);
+  expect(svc.queueOrder()).toEqual([jobA, jobC, jobB]);
+
+  // Move B (now at the tail) up past C — a normal waiting<->waiting swap.
+  expect(svc.reorder(jobB, 'up')).toBe(true);
+  expect(svc.queueOrder()).toEqual([jobA, jobB, jobC]);
+
+  // B is now immediately behind the active head: moving it up again would
+  // land it AT the head without going through advanceSendQueue — refused.
+  expect(svc.reorder(jobB, 'up')).toBe(false);
+  expect(svc.queueOrder()).toEqual([jobA, jobB, jobC]);
+
+  // The active head itself can never be reordered, either direction.
+  expect(svc.reorder(jobA, 'up')).toBe(false);
+  expect(svc.reorder(jobA, 'down')).toBe(false);
+
+  // moveDown direction, symmetric check.
+  expect(svc.reorder(jobB, 'down')).toBe(true);
+  expect(svc.queueOrder()).toEqual([jobA, jobC, jobB]);
+
+  // A job not in the queue at all (unknown / already finished) is a no-op.
+  expect(svc.reorder('no-such-job', 'up')).toBe(false);
+
+  // Cleanup so no dangling promises leak into other tests.
+  await svc.cancel(jobA);
+  await svc.cancel(jobC);
+  await svc.cancel(jobB);
+  await Promise.allSettled([pA, pB, pC]);
+});
+
 // SP3 coherence contract #3: cancel(jobId) on the ACTIVE job tears the channel
 // down (calls the openChannel-returned close()) and marks the persisted record
 // 'canceled' deterministically — not left to whatever the underlying sender
