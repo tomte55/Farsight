@@ -233,7 +233,7 @@ body.in-session .cog, body.in-session .menu { display: none; }
 /* Pane + pages. A page is a scrollable region inside the shell, NOT a 100vh
    takeover with a "back" link. */
 .pane { flex: 1; min-width: 0; overflow-y: auto; padding: 18px 20px; }
-.page { max-width: 560px; }
+.page { max-width: 1180px; }
 .page[hidden] { display: none; }
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .page-title { font-size: 15px; font-weight: 700; margin-bottom: 2px; }
