@@ -1626,6 +1626,7 @@ function renderTransfers() {
   const jobs = [...transferJobs.values()];
   transfersEmptyEl.hidden = jobs.length > 0;
   renderDeck(activeDeckJob());
+  document.getElementById('xfer-send')?.classList.toggle('compact', !!activeDeckJob());
   renderQueue();
 }
 

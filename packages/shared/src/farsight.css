@@ -407,3 +407,8 @@ body.in-session .cog, body.in-session .menu { display: none; }
 .xfer-recip.adhoc { border-style: dashed; justify-content: center; background: transparent; color: var(--sub); }
 .xfer-send-foot { display: flex; gap: 8px; flex-wrap: wrap; }
 .xfer-adhoc { margin-top: 12px; }
+
+/* Send zone compact state while a transfer is active (Task 7) */
+.xfer-send.compact .statusline, .xfer-send.compact .xfer-adhoc { display: none; }
+.xfer-send.compact .xfer-recips { margin-bottom: 8px; }
+.xfer-send.compact .page-title { font-size: 12px; color: var(--sub2); text-transform: uppercase; letter-spacing: .1em; }
