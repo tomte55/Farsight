@@ -1670,7 +1670,7 @@ let lastQueueOrder = [];
 // renders is PATCHED, not recreated: recreating it every tick (~4/s while a
 // send is active) would drop a button's focus/in-flight click, and recreating
 // it on a reorder would do the same to the very buttons that just fired.
-const queueRowEls = new Map(); // jobId -> { row, mt, fill, pct, tagEl, actionBtn, ordUp, ordDown }
+const queueRowEls = new Map(); // jobId -> { row, mt, fill, pct, tagEl, actionBtn, ordUp, ordDown, shapeKey }
 // Structural signature of the last renderQueue() rebuild (ordered
 // "jobId:kind:action" list). Unchanged between two calls -> every row kept
 // its group/position, so this tick only needs to PATCH volatile fields.
@@ -1683,9 +1683,21 @@ function qGroupHeader(text, right) {
   return h;
 }
 
-// Builds a brand-new row + its cache-able refs. Only called for a jobId that
-// isn't already in queueRowEls — an existing row is reused (moved), not
-// rebuilt, by renderQueue below.
+// Structural signature of a row's optional sub-elements (mini bar, tag,
+// action button, reorder arrows). renderQueue's rebuild loop only REUSES a
+// cached row for a persisting jobId when this key still matches — keying
+// reuse on jobId alone let a job's ORIGINAL shape (e.g. a receive's mini bar,
+// no tag/action) persist forever after its kind changed (recv -> done), since
+// patchQRow only mutates already-existing sub-elements and never creates a
+// missing tag/action-button or removes a stale mini-bar/reorder-control.
+function qShapeKey(opts) {
+  return `${opts.cls || ''}:${!!opts.mini}:${!!opts.tag}:${opts.action || ''}:${!!opts.reorder}`;
+}
+
+// Builds a brand-new row + its cache-able refs. Called for a jobId that
+// isn't already in queueRowEls, OR whose cached row's shape no longer
+// matches (its kind changed) — an existing row is reused (moved), not
+// rebuilt, only when both jobId AND shape match; see renderQueue below.
 function qRow(j, opts = {}) {
   const row = document.createElement('div');
   row.className = `xfer-qrow${opts.cls ? ` ${opts.cls}` : ''}`;
@@ -1742,7 +1754,7 @@ function qRow(j, opts = {}) {
   let actionBtn = null;
   if (opts.action) { actionBtn = buildActionButton(j.jobId, opts.action === 'cancel'); row.append(actionBtn); }
 
-  return { row, mt, fill, pct, tagEl, actionBtn, ordUp, ordDown };
+  return { row, mt, fill, pct, tagEl, actionBtn, ordUp, ordDown, shapeKey: qShapeKey(opts) };
 }
 
 // Patches only the fields that can change tick-to-tick or reorder-to-reorder
@@ -1827,9 +1839,11 @@ function renderQueue() {
   lastQueueSig = sig;
 
   // Structural/order change: build the final child list, reusing an existing
-  // row element for any jobId that persists (pulled from queueRowEls) rather
-  // than recreating it — this is what lets a row's ▲/▼ survive the very
-  // reorder click that just fired.
+  // row element for any jobId that persists (pulled from queueRowEls) AND
+  // whose shape (mini bar / tag / action / reorder controls) still matches
+  // — this is what lets a row's ▲/▼ survive the very reorder click that just
+  // fired, while still forcing a fresh build when a job's kind changes (e.g.
+  // recv -> done needs a Done tag + Remove button the old row never had).
   const finalNodes = [];
   let lastSection = null;
   for (const r of rows) {
@@ -1839,10 +1853,17 @@ function renderQueue() {
       else if (r.section === 'recv') finalNodes.push(qGroupHeader('Receiving'));
       else finalNodes.push(qGroupHeader('History'));
     }
+    const newShapeKey = qShapeKey(r.opts);
     let refs = queueRowEls.get(r.jobId);
-    if (refs) {
+    if (refs && refs.shapeKey === newShapeKey) {
+      // Safe reuse: same shape, just move the element and patch volatile
+      // fields (className still needs reapplying — group/state class can
+      // change without the shape changing, e.g. firstWaiting/lastWaiting).
       refs.row.className = `xfer-qrow${r.opts.cls ? ` ${r.opts.cls}` : ''}`;
     } else {
+      // New job, or a persisting jobId whose shape changed underneath it —
+      // discard the stale element (if any) and build fresh so the new
+      // shape's tag/action/mini/reorder are actually present.
       refs = qRow(r.job, r.opts);
       queueRowEls.set(r.jobId, refs);
     }
