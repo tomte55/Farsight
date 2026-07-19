@@ -91,6 +91,35 @@ export function createTransferWorker({ onLog } = {}) {
     preReadyQueue.length = 0;
   });
 
+  // Inbound (worker renderer -> main) buffering — F-B10.
+  //
+  // The channel's onCtrl/onBulk subscription is LAZY: the orchestrator only
+  // subscribes once it is ready to consume. If we register the ipcMain listener
+  // only at subscription time, any frame the worker ipcRenderer.send's BEFORE
+  // that is silently DROPPED by Electron (ipcMain has no handler yet). Single-
+  // flow never hit this — its lone TRANSFER_REQUEST makes the receive
+  // orchestrator subscribe at signaling time, before any data channel opens.
+  // Multi-flow receive, however, waits for all N flows to assemble the group
+  // before subscribing, while flow-0's data channel opens and delivers the
+  // manifest OFFER first on a fast wire — so the OFFER was dropped and the
+  // receiver hung at no_offer.
+  //
+  // Fix: register the ipcMain ctrl/bulk-in listeners EAGERLY at worker creation
+  // and buffer inbound frames until the orchestrator subscribes, then flush in
+  // arrival order and deliver live thereafter. This mirrors preReadyQueue above,
+  // which already buffers for the reverse (main -> worker) direction.
+  const inbound = {
+    'ft-ctrl-in': { buffer: [], deliver: null },
+    'ft-bulk-in': { buffer: [], deliver: null },
+  };
+  function receiveInbound(key, payload) {
+    const slot = inbound[key];
+    if (slot.deliver) slot.deliver(payload);
+    else slot.buffer.push(payload);
+  }
+  onIpc(topics.ctrlIn, (_e, payload) => receiveInbound('ft-ctrl-in', payload));
+  onIpc(topics.bulkIn, (_e, payload) => receiveInbound('ft-bulk-in', payload));
+
   // The orchestrator's generic 'ft-ctrl'/'ft-bulk' topic names, mapped onto
   // this worker's namespaced ones — this is what keeps two workers isolated.
   const channel = createTransferChannel({
@@ -99,9 +128,15 @@ export function createTransferWorker({ onLog } = {}) {
       else if (topic === 'ft-bulk') sendToWorker(topics.bulkOut, payload);
     },
     on: (topic, cb) => {
-      if (topic === 'ft-ctrl-in') onIpc(topics.ctrlIn, (_e, payload) => cb(payload));
-      else if (topic === 'ft-bulk-in') onIpc(topics.bulkIn, (_e, payload) => cb(payload));
-      else if (topic === 'ft-bulk-credit') onIpc(topics.credit, () => cb());
+      if (topic === 'ft-ctrl-in' || topic === 'ft-bulk-in') {
+        // Attach the live subscriber and flush anything buffered pre-subscription.
+        const slot = inbound[topic];
+        slot.deliver = cb;
+        const queued = slot.buffer.splice(0);
+        for (const payload of queued) cb(payload);
+      } else if (topic === 'ft-bulk-credit') {
+        onIpc(topics.credit, () => cb());
+      }
     },
   });
 
