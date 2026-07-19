@@ -39,7 +39,27 @@ function topicsFor(workerId) {
   };
 }
 
-export function createTransferWorker({ onLog } = {}) {
+// Fail-loud cap (Task 3) on the eager F-B10 inbound buffer below. The buffer is
+// otherwise unbounded, so an authed-but-misbehaving/flooding peer could pump
+// ctrl/bulk frames before the orchestrator subscribes and grow main-process
+// memory without limit. The only legitimate pre-subscription content is the
+// sender's chunked manifest OFFER (offer_begin/offer_entries/offer_end,
+// ≤~48KB ctrl frames) buffered while a multi-flow receive group finishes
+// assembling — a generous per-worker backstop covers even a very large folder's
+// OFFER, and a real overflow is a flood/bug we surface, never silently absorb.
+const INBOUND_BUFFER_MAX_BYTES = 64 * 1024 * 1024;
+
+// Upper-bound byte cost of holding one buffered inbound payload. Strings are ctrl
+// frames (JSON) — count UTF-16 storage; bulk chunks arrive as ArrayBuffer/typed
+// arrays/Buffer (all expose byteLength).
+function inboundFrameBytes(payload) {
+  if (payload == null) return 0;
+  if (typeof payload === 'string') return payload.length * 2;
+  if (typeof payload.byteLength === 'number') return payload.byteLength;
+  return 0;
+}
+
+export function createTransferWorker({ onLog, inboundBufferMaxBytes = INBOUND_BUFFER_MAX_BYTES } = {}) {
   workerCounter += 1;
   const workerId = `w${workerCounter}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const topics = topicsFor(workerId);
@@ -109,13 +129,33 @@ export function createTransferWorker({ onLog } = {}) {
   // arrival order and deliver live thereafter. This mirrors preReadyQueue above,
   // which already buffers for the reverse (main -> worker) direction.
   const inbound = {
-    'ft-ctrl-in': { buffer: [], deliver: null },
-    'ft-bulk-in': { buffer: [], deliver: null },
+    'ft-ctrl-in': { buffer: [], bytes: 0, deliver: null },
+    'ft-bulk-in': { buffer: [], bytes: 0, deliver: null },
   };
+  // Sticky once an overflow fails the flow: further inbound is dropped (bounded)
+  // rather than delivered to a torn-down consumer.
+  let inboundOverflowed = false;
   function receiveInbound(key, payload) {
+    if (inboundOverflowed) return;
     const slot = inbound[key];
-    if (slot.deliver) slot.deliver(payload);
-    else slot.buffer.push(payload);
+    if (slot.deliver) { slot.deliver(payload); return; }
+    slot.buffer.push(payload);
+    slot.bytes += inboundFrameBytes(payload);
+    // Cap the TOTAL buffered across both directions (Task 3). On overflow, fail
+    // LOUD — never drop-oldest (the oldest ctrl frame is the manifest OFFER;
+    // dropping it is exactly the F-B10 hang). Free what we buffered, surface a
+    // terminal error session-state (the send supervisor + receive path both treat
+    // error:* as terminal → re-dial or fail the transfer), and log.
+    const total = inbound['ft-ctrl-in'].bytes + inbound['ft-bulk-in'].bytes;
+    if (total > inboundBufferMaxBytes) {
+      inboundOverflowed = true;
+      inbound['ft-ctrl-in'].buffer.length = 0; inbound['ft-ctrl-in'].bytes = 0;
+      inbound['ft-bulk-in'].buffer.length = 0; inbound['ft-bulk-in'].bytes = 0;
+      if (typeof onLog === 'function') {
+        try { onLog({ workerId, event: 'inbound-buffer-overflow', maxBytes: inboundBufferMaxBytes }); } catch { /* ignore */ }
+      }
+      if (sessionStateCb) { try { sessionStateCb('error:inbound_buffer_overflow'); } catch { /* ignore */ } }
+    }
   }
   onIpc(topics.ctrlIn, (_e, payload) => receiveInbound('ft-ctrl-in', payload));
   onIpc(topics.bulkIn, (_e, payload) => receiveInbound('ft-bulk-in', payload));
@@ -133,6 +173,7 @@ export function createTransferWorker({ onLog } = {}) {
         const slot = inbound[topic];
         slot.deliver = cb;
         const queued = slot.buffer.splice(0);
+        slot.bytes = 0; // flushed frames no longer count against the cap
         for (const payload of queued) cb(payload);
       } else if (topic === 'ft-bulk-credit') {
         onIpc(topics.credit, () => cb());

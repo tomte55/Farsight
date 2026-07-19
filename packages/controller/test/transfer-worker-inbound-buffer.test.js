@@ -100,3 +100,82 @@ describe('createTransferWorker buffers inbound worker->main frames until the orc
     worker.close();
   });
 });
+
+describe('createTransferWorker caps the pre-subscription inbound buffer and fails loud on overflow (Task 3)', () => {
+  // The eager F-B10 buffer above is otherwise UNBOUNDED: an authed-but-
+  // misbehaving/flooding peer could pump ctrl/bulk frames before the orchestrator
+  // subscribes and grow main-process memory without limit. The legit content is
+  // only the sender's chunked manifest OFFER, so we cap total buffered bytes and,
+  // on overflow, FAIL LOUD — never silently. We do NOT drop-oldest: the oldest
+  // ctrl frame is the OFFER, and dropping it is exactly the F-B10 hang.
+  //
+  // Mutation check: delete the overflow branch in receiveInbound (transfer-worker.js)
+  // and the first test fails (no terminal state, no log, unbounded buffering);
+  // change `>` to `>=`/raise the cap and the boundary assertions drift.
+
+  test('a pre-subscription flood past the cap surfaces a terminal session-state + log, frees the buffer, and stays failed', () => {
+    const logs = [];
+    // Small injected cap so the test is fast + deterministic (prod default is a
+    // generous per-worker backstop, exercised in real use, not here).
+    const worker = createTransferWorker({ onLog: (o) => logs.push(o), inboundBufferMaxBytes: 100 });
+    const states = [];
+    worker.onSessionState((s) => states.push(s));
+
+    const ctrlInTopic = ipcMainMock._topics().find((t) => t.startsWith('ft-ctrl-in:'));
+
+    // The OFFER lands first — it must never be the thing sacrificed.
+    ipcMainMock.emit(ctrlInTopic, {}, 'OFFER');
+    // Then a flood pushes total buffered bytes past the cap.
+    ipcMainMock.emit(ctrlInTopic, {}, 'x'.repeat(80)); // 160 bytes (UTF-16) > 100
+
+    // Fail LOUD: an explicit terminal error state (the supervisor/receive path
+    // treats error:* as terminal → tear down + re-dial or fail the transfer) plus
+    // a log line — not silent growth and not a silent OFFER drop.
+    expect(states).toContain('error:inbound_buffer_overflow');
+    expect(logs.some((o) => o.event === 'inbound-buffer-overflow')).toBe(true);
+
+    // The buffered frames were freed and the flow is sticky-failed: a late
+    // subscribe delivers nothing, and further inbound frames are dropped (bounded).
+    const got = [];
+    worker.channel.onCtrl((f) => got.push(f));
+    expect(got).toEqual([]);
+    ipcMainMock.emit(ctrlInTopic, {}, 'LATE');
+    expect(got).toEqual([]);
+
+    worker.close();
+  });
+
+  test('a pre-subscription burst UNDER the cap still buffers and delivers every frame in order (F-B10 fix intact)', () => {
+    const worker = createTransferWorker({ inboundBufferMaxBytes: 10_000 });
+    const ctrlInTopic = ipcMainMock._topics().find((t) => t.startsWith('ft-ctrl-in:'));
+
+    ipcMainMock.emit(ctrlInTopic, {}, 'OFFER');
+    ipcMainMock.emit(ctrlInTopic, {}, 'A');
+    ipcMainMock.emit(ctrlInTopic, {}, 'B');
+
+    const got = [];
+    worker.channel.onCtrl((f) => got.push(f));
+    expect(got).toEqual(['OFFER', 'A', 'B']);
+
+    worker.close();
+  });
+
+  test('ctrl and bulk buffers share one byte budget — a flood split across both still trips the cap', () => {
+    const logs = [];
+    const worker = createTransferWorker({ onLog: (o) => logs.push(o), inboundBufferMaxBytes: 100 });
+    const states = [];
+    worker.onSessionState((s) => states.push(s));
+
+    const ctrlInTopic = ipcMainMock._topics().find((t) => t.startsWith('ft-ctrl-in:'));
+    const bulkInTopic = ipcMainMock._topics().find((t) => t.startsWith('ft-bulk-in:'));
+
+    ipcMainMock.emit(ctrlInTopic, {}, 'x'.repeat(30)); // 60 bytes
+    expect(states).not.toContain('error:inbound_buffer_overflow'); // under cap so far
+    ipcMainMock.emit(bulkInTopic, {}, 'y'.repeat(30)); // +60 = 120 > 100
+
+    expect(states).toContain('error:inbound_buffer_overflow');
+    expect(logs.some((o) => o.event === 'inbound-buffer-overflow')).toBe(true);
+
+    worker.close();
+  });
+});
