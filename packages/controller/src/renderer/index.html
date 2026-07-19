@@ -203,29 +203,39 @@
         <div class="card">
           <div class="page-title">Settings</div>
           <div class="statusline u-tight u-mb16">Preferences for this installation.</div>
-          <div class="lbl">Signaling server</div>
-          <div id="settings-signaling" class="host-meta"></div>
-          <div class="u-row settings-actions">
-            <button id="menu-change-server" class="btn btn-ghost">Change signaling server…</button>
-            <button id="menu-check-updates" class="btn btn-ghost">Check for updates</button>
-          </div>
-          <div class="lbl">Received files folder</div>
-          <div id="settings-received-dir" class="host-meta"></div>
-          <div class="u-row settings-actions">
-            <button id="menu-change-received-dir" class="btn btn-ghost">Change folder…</button>
-            <button id="menu-reset-received-dir" class="btn btn-ghost">Reset to default</button>
-          </div>
-          <div class="lbl">Parallel connections</div>
-          <div class="statusline u-tight">How many parallel connections a send uses (1–32). 1 uses the single-connection path.</div>
-          <div class="u-row settings-actions">
-            <input id="settings-parallel-connections" class="input u-num" type="number" min="1" max="32" step="1" />
-            <button id="menu-save-parallel-connections" class="btn btn-ghost">Save</button>
-          </div>
-          <div class="lbl">Limit transfer rate</div>
-          <div class="statusline u-tight">Cap total send speed in Mbps (0 = unlimited). Applies to new and in-progress sends.</div>
-          <div class="u-row settings-actions">
-            <input id="settings-rate-limit" class="input u-num" type="number" min="0" max="1000" step="1" />
-            <button id="menu-save-rate-limit" class="btn btn-ghost">Save</button>
+          <div class="settings-grid">
+            <div class="settings-field">
+              <div class="lbl">Signaling server</div>
+              <div id="settings-signaling" class="host-meta"></div>
+              <div class="u-row settings-actions">
+                <button id="menu-change-server" class="btn btn-ghost">Change signaling server…</button>
+                <button id="menu-check-updates" class="btn btn-ghost">Check for updates</button>
+              </div>
+            </div>
+            <div class="settings-field">
+              <div class="lbl">Received files folder</div>
+              <div id="settings-received-dir" class="host-meta"></div>
+              <div class="u-row settings-actions">
+                <button id="menu-change-received-dir" class="btn btn-ghost">Change folder…</button>
+                <button id="menu-reset-received-dir" class="btn btn-ghost">Reset to default</button>
+              </div>
+            </div>
+            <div class="settings-field">
+              <div class="lbl">Parallel connections</div>
+              <div class="statusline u-tight">How many parallel connections a send uses (1–32). 1 uses the single-connection path.</div>
+              <div class="u-row settings-actions">
+                <input id="settings-parallel-connections" class="input u-num" type="number" min="1" max="32" step="1" />
+                <button id="menu-save-parallel-connections" class="btn btn-ghost">Save</button>
+              </div>
+            </div>
+            <div class="settings-field">
+              <div class="lbl">Limit transfer rate</div>
+              <div class="statusline u-tight">Cap total send speed in Mbps (0 = unlimited). Applies to new and in-progress sends.</div>
+              <div class="u-row settings-actions">
+                <input id="settings-rate-limit" class="input u-num" type="number" min="0" max="1000" step="1" />
+                <button id="menu-save-rate-limit" class="btn btn-ghost">Save</button>
+              </div>
+            </div>
           </div>
           <div class="u-row settings-actions">
             <button id="menu-open-logs" class="btn btn-ghost">Open logs folder</button>
