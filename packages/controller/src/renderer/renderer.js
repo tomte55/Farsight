@@ -1178,6 +1178,8 @@ const sendHostId = document.getElementById('send-host-id');
 const sendHostPw = document.getElementById('send-host-pw');
 const sendFilesBtn = document.getElementById('send-files-btn');
 const sendFolderBtn = document.getElementById('send-folder-btn');
+const sendAdhocGoEl = document.getElementById('send-adhoc-go');
+const sendAdhocGoFolderEl = document.getElementById('send-adhoc-go-folder');
 const sendStatusEl = document.getElementById('send-status');
 const transfersEmptyEl = document.getElementById('transfers-empty');
 
@@ -1725,38 +1727,76 @@ window.farsightIpc.onTransferEvent((ev) => {
   renderStatusBar();
 });
 
+// Shared send launcher (Task 6): reused by drag/drop onto a recipient tile,
+// click-to-browse on a recipient tile, and the ad-hoc Host ID form. Inserts
+// the awaiting-approval job the same way the retired ad-hoc-only send helper
+// (and sendToFleetDevice) used to.
+async function startSendTo(target, paths, label) {
+  if (!paths || paths.length === 0) return;
+  if (sendStatusEl) sendStatusEl.textContent = 'Starting…';
+  try {
+    const res = await window.farsightIpc.transferSend({ target, paths });
+    if (res && res.jobId) {
+      transferJobs.set(res.jobId, { jobId: res.jobId, direction: 'send', target: { id: label || target.id }, manifest: res.manifest, state: 'awaiting-approval', createdAt: Date.now() });
+      if (activePage !== 'transfers') showPage('transfers');
+      renderTransfers();
+      if (sendStatusEl) sendStatusEl.textContent = `Waiting for ${label || target.id} to accept…`;
+    } else if (sendStatusEl) sendStatusEl.textContent = (res && res.error) || 'Could not start the transfer.';
+  } catch { if (sendStatusEl) sendStatusEl.textContent = 'Could not start the transfer.'; }
+}
+
+// Turn a DataTransfer into absolute path strings via the preload bridge.
+function droppedPaths(dt) {
+  const files = dt && dt.files ? [...dt.files] : [];
+  return files.map((f) => { try { return window.farsightIpc.pathForFile(f); } catch { return ''; } }).filter(Boolean);
+}
+
+// Wires dragover/dragleave/drop onto `el`. `resolveTarget()` returns
+// `{ target, label }` for a specific recipient, or null/undefined for a
+// generic drop zone with no resolvable recipient (ignored — matches the
+// ad-hoc-tile / unresolved case). stopPropagation keeps a drop landing on a
+// nested recipient tile from also re-triggering the outer send-zone's
+// generic (no-op) handler.
+function wireDrop(el, resolveTarget) {
+  el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('xfer-drop-over'); });
+  el.addEventListener('dragleave', () => el.classList.remove('xfer-drop-over'));
+  el.addEventListener('drop', (e) => {
+    e.preventDefault(); e.stopPropagation(); el.classList.remove('xfer-drop-over');
+    const paths = droppedPaths(e.dataTransfer);
+    const t = resolveTarget();
+    if (!t) return; // ad-hoc tile or unresolved: ignore drop
+    startSendTo(t.target, paths, t.label);
+  });
+}
+
 // mode: 'files' (multi-select files) or 'folder' (one directory). Windows/Linux
-// can't offer both in one dialog, so the panel has a button per mode.
-async function doSend(mode) {
+// can't offer both in one dialog, so the panel has a button per mode. Shared by
+// the ad-hoc form's Send buttons AND the top-level Browse buttons — per Plan 2,
+// Browse is intentionally minimal: it sends via the ad-hoc Host ID fields
+// (reveals that panel if the fields are missing/invalid) rather than opening a
+// richer "browse then pick a recipient" flow, which is a follow-up.
+async function adhocSend(mode) {
   const targetId = normalizeHostId(sendHostId.value);
   const candidates = passwordCandidates(sendHostPw.value);
-  if (!isValidHostId(targetId)) { sendStatusEl.textContent = 'Invalid ID.'; return; }
-  if (candidates.length === 0) { sendStatusEl.textContent = 'Enter the host password.'; return; }
+  if (!isValidHostId(targetId) || candidates.length === 0) {
+    if (xferAdhocEl) xferAdhocEl.hidden = false;
+    if (sendStatusEl) sendStatusEl.textContent = !isValidHostId(targetId) ? 'Invalid ID.' : 'Enter the host password.';
+    return;
+  }
   const paths = await window.farsightIpc.transferPickPaths(mode);
   if (!paths || paths.length === 0) return; // dialog cancelled — leave the form as-is
-  sendFilesBtn.disabled = true;
-  sendFolderBtn.disabled = true;
-  sendStatusEl.textContent = 'Starting…';
+  const btns = [sendFilesBtn, sendFolderBtn, sendAdhocGoEl, sendAdhocGoFolderEl].filter(Boolean);
+  for (const b of btns) b.disabled = true;
   try {
-    const res = await window.farsightIpc.transferSend({ target: { id: targetId, password: candidates[0] }, paths });
-    if (res && res.jobId) {
-      transferJobs.set(res.jobId, {
-        jobId: res.jobId, direction: 'send', target: { id: targetId },
-        manifest: res.manifest, state: 'awaiting-approval', createdAt: Date.now(),
-      });
-      sendStatusEl.textContent = `Waiting for ${targetId} to accept… (see Transfers)`;
-    } else {
-      sendStatusEl.textContent = (res && res.error) || 'Could not start the transfer.';
-    }
-  } catch {
-    sendStatusEl.textContent = 'Could not start the transfer.';
+    await startSendTo({ id: targetId, password: candidates[0] }, paths, targetId);
   } finally {
-    sendFilesBtn.disabled = false;
-    sendFolderBtn.disabled = false;
+    for (const b of btns) b.disabled = false;
   }
 }
-sendFilesBtn.addEventListener('click', () => doSend('files'));
-sendFolderBtn.addEventListener('click', () => doSend('folder'));
+if (sendFilesBtn) sendFilesBtn.addEventListener('click', () => adhocSend('files'));
+if (sendFolderBtn) sendFolderBtn.addEventListener('click', () => adhocSend('folder'));
+if (sendAdhocGoEl) sendAdhocGoEl.addEventListener('click', () => adhocSend('files'));
+if (sendAdhocGoFolderEl) sendAdhocGoFolderEl.addEventListener('click', () => adhocSend('folder'));
 
 // SP3 Phase 4: initiate a password-free own-fleet ("linked") transfer to a
 // console device. Picks files (multi-select), starts a linked send (the worker
@@ -1818,6 +1858,15 @@ function recipTile(desc) {
   info.append(rn, rs);
   t.append(av, info);
   t.__farsightRecipient = desc;
+  // Task 6: drop a file/folder directly onto an online tile to send, or click
+  // it to browse for paths instead — no Host ID typing either way. Offline
+  // tiles resolve to null (wireDrop no-ops the drop) and the click is a no-op.
+  wireDrop(t, () => (desc.online ? { target: desc.target, label: desc.name } : null));
+  t.onclick = async () => {
+    if (!desc.online) return;
+    const paths = await window.farsightIpc.transferPickPaths('files');
+    startSendTo(desc.target, paths, desc.name);
+  };
   return t;
 }
 
@@ -1844,6 +1893,15 @@ async function renderSendRecipients() {
 
 const xferAdhocToggleEl = document.getElementById('xfer-adhoc-toggle');
 if (xferAdhocToggleEl) xferAdhocToggleEl.addEventListener('click', () => { if (xferAdhocEl) xferAdhocEl.hidden = !xferAdhocEl.hidden; });
+
+// Whole send-zone card as a generic drop target: a drop that lands on a
+// specific recipient tile is handled (and stops there — see wireDrop's
+// stopPropagation) before it ever bubbles here. A drop on the card background
+// or the ad-hoc "+ Host ID…" tile has no resolvable recipient, so this is a
+// no-op — it just clears the highlight (matches Task 5/6's drop-first design:
+// "focus the recipient row", not a silent dead end).
+const xferSendZoneEl = document.getElementById('xfer-send');
+if (xferSendZoneEl) wireDrop(xferSendZoneEl, () => null);
 
 // ─── Shell router ────────────────────────────────────────────────────────────
 // ONE source of truth for which page is visible. The old shell wrote the

@@ -130,9 +130,13 @@ describe('renderer: Send… entry point + Transfers panel', () => {
   });
 
   test('renderer.js wires both send buttons (files/folder) through transferPickPaths(mode) + transferSend', () => {
+    // Task 6 retired the old single doSend(mode) in favor of a shared
+    // startSendTo() launcher (also used by drag-drop/click-to-browse on a
+    // recipient tile); the ad-hoc form + Browse buttons now route through
+    // adhocSend(mode), which still picks paths by mode before sending.
     expect(renderer).toMatch(/window\.farsightIpc\.transferPickPaths\(mode\)/);
-    expect(renderer).toMatch(/doSend\(['"]files['"]\)/);
-    expect(renderer).toMatch(/doSend\(['"]folder['"]\)/);
+    expect(renderer).toMatch(/adhocSend\(['"]files['"]\)/);
+    expect(renderer).toMatch(/adhocSend\(['"]folder['"]\)/);
     expect(renderer).toMatch(/window\.farsightIpc\.transferSend\(/);
   });
 
