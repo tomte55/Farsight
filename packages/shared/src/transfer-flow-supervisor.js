@@ -24,10 +24,19 @@
 // manifest/ctrl channel on the fresh worker.
 //
 // Starvation waiter (awaitFlow-compatible, feeds the send pool's awaitFlow): a
-// single pending deferred that resolves on the NEXT onFlowUp and rejects once
-// EVERY slot has exhausted maxRedialsPerSlot with none alive — so the pool
-// throws no_live_flows only when recovery is truly impossible. onSlotStarved
+// single pending deferred that resolves on the NEXT onFlowUp and rejects only
+// once a CONTINUOUS total outage (liveCount()===0 without interruption) has
+// lasted `outageGiveupMs` — so the pool throws no_live_flows (→ last-resort
+// whole-transfer resume) only when recovery has been impossible for a sustained
+// window, NOT the instant every slot happens to be down. On a shared satellite/
+// TURN path all N flows drop together (common-mode); a brief blip must ride out,
+// so per-slot dead-ness alone must NEVER reject the waiter. onSlotStarved
 // callbacks fire each time liveCount() falls to 0.
+//
+// Re-dial budget resets on connect: `maxRedialsPerSlot` bounds CONSECUTIVE
+// establish failures since the slot last connected (a genuinely-broken slot),
+// not lifetime drops — a slot reaching 'connected' resets its `attempt` to 0, so
+// a flow that worked and then dropped starts its re-dial budget fresh.
 
 export function createFlowSupervisor({
   flowCount,
@@ -39,6 +48,7 @@ export function createFlowSupervisor({
   staggerMs = 250,
   backoff = [500, 1000, 2000, 4000],
   maxRedialsPerSlot = 8,
+  outageGiveupMs = 180000,
   isRunning,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
@@ -60,7 +70,8 @@ export function createFlowSupervisor({
   const alive = new Map();
   const starvedCbs = [];
   let active = false;        // start() -> true, stop() -> false; hard kill-switch
-  let allExhausted = false;  // every slot reached slot.dead — no recovery possible
+  let allExhausted = false;  // continuous total outage reached outageGiveupMs — give up
+  let outageTimer = null;    // armed while liveCount()===0; a connect cancels it
   let waiter = null;         // pending { promise, resolve, reject } for awaitFlow
   // Cumulative count of slots ACTUALLY re-dialed this transfer (a worker
   // created because a prior one went terminal — never the initial staggered
@@ -91,28 +102,41 @@ export function createFlowSupervisor({
   function rejectWaiter(err) {
     if (waiter) { const w = waiter; waiter = null; w.reject(err); }
   }
-  // awaitFlow-compatible: resolves when the next flow comes up, rejects once
-  // every slot is exhausted. Matches createSendPool's `awaitFlow()` contract.
+  // awaitFlow-compatible: resolves when the next flow comes up, rejects once a
+  // continuous total outage has reached outageGiveupMs. Matches createSendPool's
+  // `awaitFlow()` contract.
   function awaitFlow() {
-    if (allExhausted) return Promise.reject(new Error('all_slots_exhausted'));
+    if (allExhausted) return Promise.reject(new Error('outage_giveup'));
     return ensureWaiter().promise;
   }
 
-  // A slot is PERMANENTLY dead only once `scheduleRedial` has confirmed its
-  // re-dial budget is spent AND its final worker went terminal (the `slot.dead`
-  // flag is set there, at that exact point). Do NOT infer death from
-  // `attempt >= max && !alive`: a slot in that state can still be MID-RECOVERY —
-  // its final-attempt re-dial timer may be pending, or its final worker may be
-  // dialed and still *connecting* (alive=false, not yet terminal). Counting
-  // those as dead let the waiter reject `all_slots_exhausted` the instant the
-  // last slot went terminal, aborting a transfer that was about to recover
-  // (the exact Starlink scenario this module exists to fix).
-  function checkAllExhausted() {
-    if (allExhausted) return;
-    if (slots.every((s) => s.dead)) {
-      allExhausted = true;
-      rejectWaiter(new Error('all_slots_exhausted'));
-    }
+  // --- total-outage giveup ---------------------------------------------------
+  // The waiter reject is governed by a CONTINUOUS total-outage timer, never by
+  // per-slot dead-ness. On a shared satellite/TURN path all N flows drop at once
+  // (common-mode), so every slot going dead is NOT proof the transfer can't
+  // recover — a re-dial (or a slot still mid-connect) may bring one back. So:
+  // while liveCount()===0, a single timer runs; only if it reaches
+  // outageGiveupMs UNINTERRUPTED do we declare exhaustion and reject the waiter
+  // (`outage_giveup` → last-resort whole-transfer resume). ANY slot reaching
+  // 'connected' cancels the timer (see handleState), and it re-arms the next
+  // time liveCount() falls to 0 — so a brief blip rides out for free.
+  function armOutageTimer() {
+    if (outageTimer != null || allExhausted) return;
+    if (!active || !isRunning()) return;
+    if (liveCount() !== 0) return;
+    outageTimer = setTimer(onOutageGiveup, outageGiveupMs);
+  }
+  function cancelOutageTimer() {
+    if (outageTimer != null) { clearTimer(outageTimer); outageTimer = null; }
+  }
+  function onOutageGiveup() {
+    outageTimer = null;
+    // Re-check: a connect may have restored a flow, or the transfer paused/
+    // stopped, in the meantime — never reject while it can still recover.
+    if (!active || !isRunning() || allExhausted) return;
+    if (liveCount() !== 0) return;
+    allExhausted = true;
+    rejectWaiter(new Error('outage_giveup'));
   }
 
   // --- dialing ---------------------------------------------------------------
@@ -146,6 +170,12 @@ export function createFlowSupervisor({
 
     if (state === 'connected') {
       alive.set(worker, true);
+      // Re-dial budget resets on a successful connect: maxRedialsPerSlot now
+      // counts CONSECUTIVE establish failures since this slot last connected,
+      // not lifetime drops (a worked-then-dropped flow re-dials from backoff[0]).
+      slot.attempt = 0;
+      // A live flow ends the total outage — cancel any running outage timer.
+      cancelOutageTimer();
       if (slotIndex === 0 && onCtrlReplaced) onCtrlReplaced(worker);
       if (onFlowUp) onFlowUp(slotIndex, makeFlow(worker));
       resolveWaiter();
@@ -155,7 +185,7 @@ export function createFlowSupervisor({
       // Transient — the worker debounces an ICE-restart. Mark not-alive but do
       // NOT re-dial; a true death escalates to 'failed' (terminal) below.
       alive.set(worker, false);
-      if (liveCount() === 0) fireStarved();
+      if (liveCount() === 0) { fireStarved(); armOutageTimer(); }
       return;
     }
     const terminal = state === 'failed' || state === 'closed'
@@ -163,7 +193,7 @@ export function createFlowSupervisor({
     if (terminal) {
       alive.set(worker, false);
       if (onFlowDown) onFlowDown(slotIndex);
-      if (liveCount() === 0) fireStarved();
+      if (liveCount() === 0) { fireStarved(); armOutageTimer(); }
       scheduleRedial(slotIndex);
       return;
     }
@@ -177,10 +207,14 @@ export function createFlowSupervisor({
     if (!active || !isRunning()) return;
     if (slot.attempt >= maxRedialsPerSlot) {
       // Budget spent and we reached here FROM the terminal handler, so the
-      // current worker is terminal and no timer is pending: this slot is now
-      // permanently dead. That is the only place `dead` is set.
+      // current worker is terminal and no timer is pending: this slot has given
+      // up re-dialing (a slot that never (re)connected within its budget — a
+      // genuinely-broken slot). That is the only place `dead` is set. Note this
+      // does NOT reject the waiter: the waiter reject is governed solely by the
+      // total-outage timer (armOutageTimer), so a common-mode drop where every
+      // slot goes dead still rides out until the outage window elapses, and any
+      // slot that reconnects meanwhile clears it.
       slot.dead = true;
-      checkAllExhausted();
       return;
     }
     const delay = backoffFor(slot.attempt);
@@ -205,9 +239,13 @@ export function createFlowSupervisor({
       for (let i = 1; i < flowCount; i += 1) {
         slots[i].timer = setTimer(((idx) => () => dial(idx))(i), staggerMs * i);
       }
+      // Nothing is connected yet — start the total-outage clock immediately, so
+      // a start that NEVER brings a flow up also gives up after outageGiveupMs.
+      armOutageTimer();
     },
     stop() {
       active = false;
+      cancelOutageTimer();
       for (const slot of slots) {
         if (slot.timer != null) { clearTimer(slot.timer); slot.timer = null; }
         if (slot.worker) { try { slot.worker.close(); } catch { /* best-effort */ } }

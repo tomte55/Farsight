@@ -197,6 +197,35 @@ describe('transfer-flow-supervisor', () => {
     expect(createWorker.all.length).toBe(4);
   });
 
+  it('resets the re-dial budget on connect: a slot that connected then dropped re-dials with attempt===0 (backoff[0])', () => {
+    // A slot accumulates attempts, CONNECTS (works), then drops. Its next
+    // re-dial must use backoff[0] again — connect resets `attempt` to 0, so
+    // maxRedialsPerSlot counts consecutive failures SINCE the last connect, not
+    // lifetime drops. (Mutation: drop the reset -> the fresh drop uses the
+    // accumulated backoff[2]=2000 and no worker appears at t+500 -> this fails.)
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500, 1000, 2000] });
+    const sup = createFlowSupervisor(args);
+    sup.start();
+
+    // Accumulate attempts WITHOUT connecting: attempt 0 -> backoff[0]=500,
+    // attempt 1 -> backoff[1]=1000.
+    createWorker.latestFor(0).emit('failed');
+    clock.advance(500);                       // worker #2 (attempt now 1)
+    createWorker.latestFor(0).emit('failed');
+    clock.advance(1000);                      // worker #3 (attempt now 2)
+    expect(createWorker.all.length).toBe(3);
+
+    // Now the slot CONNECTS -> attempt resets to 0.
+    createWorker.latestFor(0).emit('connected');
+
+    // It later drops. Its next re-dial must use backoff[0]=500 (NOT backoff[2]=2000).
+    createWorker.latestFor(0).emit('failed');
+    clock.advance(499);
+    expect(createWorker.all.length).toBe(3);  // not yet
+    clock.advance(1);                         // t+500 -> re-dial fires -> worker #4
+    expect(createWorker.all.length).toBe(4);
+  });
+
   it('isRunning() === false gates re-dial: a terminal state does not re-dial', () => {
     const { clock, createWorker, args } = baseArgs({ flowCount: 1, isRunning: () => false });
     const sup = createFlowSupervisor(args);
@@ -260,22 +289,53 @@ describe('transfer-flow-supervisor', () => {
     await expect(p).resolves.toBeUndefined(); // waiter resolved by the new flow
   });
 
-  it('awaitFlow rejects once every slot has exhausted maxRedialsPerSlot (pool then throws no_live_flows)', async () => {
-    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], maxRedialsPerSlot: 2 });
+  it('short total outage (liveCount()===0 for < outageGiveupMs) does NOT reject the waiter; a connect resets the outage timer', async () => {
+    // The waiter reject is governed by a CONTINUOUS total-outage timer, not by
+    // per-slot dead-ness. While liveCount()===0 for less than outageGiveupMs the
+    // waiter must stay pending — a brief common-mode blip must not tear the
+    // transfer down. A slot reaching 'connected' cancels/resets the timer.
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], outageGiveupMs: 180000 });
     const sup = createFlowSupervisor(args);
     sup.start();
 
     const p = sup.awaitFlow();
-    // exhaust: initial + 2 re-dials, all terminal
-    createWorker.latestFor(0).emit('failed');
-    clock.advance(500);
-    createWorker.latestFor(0).emit('failed');
-    clock.advance(500);
-    createWorker.latestFor(0).emit('failed'); // now attempt == max -> no re-dial -> exhausted
+    let rejected = false;
+    p.catch(() => { rejected = true; });
 
-    await expect(p).rejects.toThrow();
-    // a fresh awaitFlow after full exhaustion rejects immediately too
-    await expect(sup.awaitFlow()).rejects.toThrow();
+    // liveCount()===0 (nothing connected yet) for just under the outage window.
+    clock.advance(179000);
+    await Promise.resolve();
+    expect(rejected).toBe(false);
+
+    // Connect -> resolves the waiter AND cancels the outage timer.
+    createWorker.latestFor(0).emit('connected');
+    await expect(p).resolves.toBeUndefined();
+
+    // Drop again: a FRESH outage timer starts now (t=179000). Advancing another
+    // ~179000 (total wall-clock ~358000, but only 179000 since the reset) must
+    // NOT reject — proving the timer was reset by the connect, not accumulated.
+    createWorker.latestFor(0).emit('failed');
+    const p2 = sup.awaitFlow();
+    let rejected2 = false;
+    p2.catch(() => { rejected2 = true; });
+    clock.advance(179000);
+    await Promise.resolve();
+    expect(rejected2).toBe(false);
+  });
+
+  it('total outage for >= outageGiveupMs rejects the waiter with outage_giveup (pool then does last-resort resume)', async () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], outageGiveupMs: 180000 });
+    const sup = createFlowSupervisor(args);
+    sup.start();
+
+    const p = sup.awaitFlow();
+    // Nothing ever connects: liveCount()===0 continuously. At outageGiveupMs the
+    // outage timer fires -> allExhausted -> waiter rejects.
+    clock.advance(180000);
+
+    await expect(p).rejects.toThrow('outage_giveup');
+    // a fresh awaitFlow after outage giveup rejects immediately too
+    await expect(sup.awaitFlow()).rejects.toThrow('outage_giveup');
   });
 
   // CRITICAL regression: the waiter must NOT reject while ANY slot is still
@@ -315,26 +375,32 @@ describe('transfer-flow-supervisor', () => {
     expect(sup.liveCount()).toBe(1);
   });
 
-  it('rejects all_slots_exhausted only once EVERY slot is permanently dead (multi-slot)', async () => {
-    const { clock, createWorker, args } = baseArgs({ flowCount: 2, backoff: [500], maxRedialsPerSlot: 1 });
+  it('every slot dead (never connected) does NOT reject on its own — only the total-outage timer rejects, with outage_giveup', async () => {
+    // Per-slot dead-ness no longer governs the waiter reject. Even after EVERY
+    // slot has spent its re-dial budget and gone permanently dead, the waiter
+    // stays pending until the continuous total-outage timer reaches
+    // outageGiveupMs — THEN it rejects `outage_giveup`.
+    const { clock, createWorker, args } = baseArgs({ flowCount: 2, backoff: [500], maxRedialsPerSlot: 1, outageGiveupMs: 180000 });
     const sup = createFlowSupervisor(args);
     sup.start();
 
     const p = sup.awaitFlow();
+    let rejected = false;
+    p.catch(() => { rejected = true; });
+
     createWorker.latestFor(0).emit('failed');    // slot 0 -> re-dial @500
     clock.advance(250);                          // slot 1 dialed
     createWorker.latestFor(1).emit('failed');    // slot 1 -> re-dial @750
-
     clock.advance(250);                          // t=500: slot 0 final worker
-    createWorker.latestFor(0).emit('failed');    // slot 0 dead; slot 1 still pending -> no reject yet
-    let rejectedEarly = false;
-    p.catch(() => { rejectedEarly = true; });
-    await Promise.resolve();
-    expect(rejectedEarly).toBe(false);
-
+    createWorker.latestFor(0).emit('failed');    // slot 0 permanently dead
     clock.advance(250);                          // t=750: slot 1 final worker
-    createWorker.latestFor(1).emit('failed');    // slot 1 now dead too -> ALL dead
-    await expect(p).rejects.toThrow('all_slots_exhausted');
+    createWorker.latestFor(1).emit('failed');    // slot 1 permanently dead too -> ALL dead
+
+    await Promise.resolve();
+    expect(rejected).toBe(false);                // all dead, but outage timer not elapsed -> NO reject
+
+    clock.advance(180000);                       // outage timer (armed at t=0) elapses
+    await expect(p).rejects.toThrow('outage_giveup');
   });
 
   // Task 9: cumulative re-dial count, for UI health surfacing. Must count only
