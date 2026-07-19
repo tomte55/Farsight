@@ -595,3 +595,106 @@ describe('createMultiFlowSender — Final-review #2 stall watchdog', () => {
     await expect(done).rejects.toThrow('stalled');
   });
 });
+
+// Task 6 (common-mode-resilience): reconcile the stall watchdog with the
+// gentle-outage-recovery model (supervisor Tasks 2-4). A TOTAL outage now keeps
+// the session alive and gently re-dials for up to outageGiveupMs — the watchdog
+// must NOT fire during that legitimate recovery (0 live flows, supervisor not
+// yet given up), or it re-introduces the whole-transfer resume loop this phase
+// eliminates. It must STILL fire on a genuine wedge (bytes should be moving —
+// ≥1 flow alive — but aren't), and the send must still fail once the supervisor
+// gives up (via the pool's awaitFlow-reject path). The gate is INJECTED
+// (watchdogGate) — the assembly composes it from the supervisor's liveCount()/
+// hasGivenUp(); here it's driven directly for deterministic fake-clock control.
+describe('createMultiFlowSender — Task 6 stall-watchdog outage gate', () => {
+  function fakeClock() {
+    let now = 0, id = 0; const timers = new Map();
+    return {
+      setTimer: (fn, ms) => { const t = ++id; timers.set(t, { fn, at: now + ms }); return { __t: t, unref() {} }; },
+      clearTimer: (h) => { if (h && h.__t) timers.delete(h.__t); },
+      advance: async (ms) => {
+        now += ms;
+        for (const [t, e] of [...timers.entries()].sort((a, b) => a[1].at - b[1].at)) {
+          if (e.at <= now) { timers.delete(t); e.fn(); }
+        }
+        await Promise.resolve();
+      },
+    };
+  }
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const oneFile = { entries: [{ fileId: 0, size: 300 }] };
+  const src = new Map([[0, new Uint8Array(300)]]);
+  function makeCtrl() {
+    let cb = null;
+    return {
+      sendCtrl: (s) => { const f = parseCtrlFrame(s); if (f && (f.t === 'offer' || f.t === 'offer_end')) cb(acceptFrame({ jobId: JOB, resume: [], ranges: [] })); },
+      onCtrl: (c) => { cb = c; },
+      report: (files) => cb(rangeReportFrame({ jobId: JOB, files })),
+    };
+  }
+
+  it('total outage (0 live flows, supervisor still recovering) does NOT trip the stall watchdog', async () => {
+    const clk = fakeClock();
+    const ctrl = makeCtrl();
+    // A dead flow: the pump starves and parks on awaitFlow (which never resolves —
+    // the supervisor is quietly re-dialing). liveCount 0 and NOT given up, so the
+    // gate is CLOSED and the watchdog must keep re-arming rather than fail.
+    const flows = [{ isAlive: () => false, sendBulk: () => Promise.resolve() }];
+    const sender = createMultiFlowSender({
+      ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
+      awaitFlow: () => new Promise(() => {}), // parks forever (gentle recovery in progress)
+      watchdogGate: () => false, // liveCount()===0 && !hasGivenUp()
+      inactivityMs: 5000, setTimer: clk.setTimer, clearTimer: clk.clearTimer, completionTimeoutMs: 0,
+    });
+    const done = sender.start();
+    let settled = false; done.then(() => { settled = true; }, () => { settled = true; });
+    await flush(); await flush(); // accept -> pump -> park on awaitFlow, watchdog armed at t=0
+    await clk.advance(60000); // 12x the watchdog bound, still well under outageGiveupMs
+    await flush();
+    expect(settled).toBe(false); // the outage gate kept the watchdog from firing
+  });
+
+  it('a genuine wedge — ≥1 flow ALIVE but no progress — DOES trip the watchdog', async () => {
+    const clk = fakeClock();
+    const ctrl = makeCtrl();
+    // A LIVE flow whose sendBulk parks: the pump stays in-flight, no range_report
+    // ever comes back — bytes should be moving but aren't. The gate is OPEN.
+    const flows = [{ isAlive: () => true, sendBulk: () => new Promise(() => {}) }];
+    const sender = createMultiFlowSender({
+      ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
+      watchdogGate: () => true, // liveCount() >= 1
+      inactivityMs: 5000, setTimer: clk.setTimer, clearTimer: clk.clearTimer, completionTimeoutMs: 0, progressIntervalMs: 0,
+    });
+    const done = sender.start();
+    let settled = false; done.then(() => { settled = true; }, () => { settled = true; });
+    await flush(); await flush();
+    await clk.advance(5000);
+    await expect(done).rejects.toThrow('stalled');
+    expect(settled).toBe(true);
+  });
+
+  it('after the supervisor GIVES UP, the send fails through the awaitFlow-reject path (not the watchdog)', async () => {
+    const clk = fakeClock();
+    const ctrl = makeCtrl();
+    const flows = [{ isAlive: () => false, sendBulk: () => Promise.resolve() }];
+    let rejectAwait = null;
+    const sender = createMultiFlowSender({
+      ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
+      // The supervisor's starvation waiter, parked until its outage timer fires
+      // outageGiveupMs and rejects (the pool then throws no_live_flows).
+      awaitFlow: () => new Promise((_res, rej) => { rejectAwait = rej; }),
+      watchdogGate: () => false, // liveCount 0 the whole time; the watchdog stays quiet
+      inactivityMs: 5000, setTimer: clk.setTimer, clearTimer: clk.clearTimer, completionTimeoutMs: 0,
+    });
+    const done = sender.start();
+    await flush(); await flush(); // park on awaitFlow, watchdog armed (gate closed)
+    await clk.advance(20000); // several watchdog bounds pass — gate closed, no 'stalled'
+    await flush();
+    expect(typeof rejectAwait).toBe('function'); // still parked, not torn down by the watchdog
+    rejectAwait(new Error('outage_giveup')); // supervisor gave up (outageGiveupMs elapsed)
+    await expect(done).rejects.toThrow('no_live_flows'); // failed via the pool's awaitFlow-reject path
+  });
+});

@@ -382,6 +382,13 @@ export function createFlowSupervisor({
       }
     },
     liveCount,
+    // Task 6 (common-mode-resilience): has the CONTINUOUS total-outage timer
+    // elapsed (outageGiveupMs) so recovery is abandoned and the waiter rejected?
+    // The multi-flow sender's stall-watchdog gate reads this (with liveCount())
+    // to tell a genuine giveup — where the send SHOULD fail — apart from an
+    // in-progress gentle recovery (liveCount()===0 but hasGivenUp()===false),
+    // during which the watchdog must stay quiet.
+    hasGivenUp: () => allExhausted,
     redialCount: () => redials,
     onSlotStarved(cb) { if (typeof cb === 'function') starvedCbs.push(cb); },
     awaitFlow,

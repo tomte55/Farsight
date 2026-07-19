@@ -338,9 +338,14 @@ describe('transfer-flow-supervisor', () => {
     const p = sup.awaitFlow();
     // Nothing ever connects: liveCount()===0 continuously. At outageGiveupMs the
     // outage timer fires -> allExhausted -> waiter rejects.
+    expect(sup.hasGivenUp()).toBe(false); // still recovering before the window elapses
     clock.advance(180000);
 
     await expect(p).rejects.toThrow('outage_giveup');
+    // Task 6: hasGivenUp() now reads true — the multi-flow sender's watchdog gate
+    // consults this so a genuine giveup is treated as a wedge (fire), distinct
+    // from an in-progress gentle recovery (liveCount 0 but hasGivenUp() false).
+    expect(sup.hasGivenUp()).toBe(true);
     // a fresh awaitFlow after outage giveup rejects immediately too
     await expect(sup.awaitFlow()).rejects.toThrow('outage_giveup');
   });

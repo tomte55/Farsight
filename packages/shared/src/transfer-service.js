@@ -361,6 +361,13 @@ export function createTransferService({ store, transferDir, consent, openChannel
               // supervisor wired) falls back to createMultiFlowSender's own
               // `() => 0` default.
               redialCount: opened.redialCount,
+              // Task 6 (common-mode-resilience): the supervisor-derived
+              // stall-watchdog gate (assembleSendFlows.watchdogGate). Lets the
+              // sender's watchdog fire only on a real wedge (≥1 flow alive) or a
+              // supervisor giveup — never during a total-outage gentle recovery.
+              // undefined for a caller/fixture with no supervisor wired falls
+              // back to createMultiFlowSender's own `() => true` (always fire).
+              watchdogGate: opened.watchdogGate,
               onEvent: onSendEvent,
             })
           : createSender({ channel: opened.channel, jobId, manifest, sources, onEvent: onSendEvent });

@@ -212,6 +212,15 @@ export function assembleSendFlows({
     // supervisor, which is the only thing that knows when a slot was ACTUALLY
     // re-dialed (vs. its initial staggered dial).
     redialCount: () => supervisor.redialCount(),
+    // Task 6 (common-mode-resilience): the multi-flow sender's stall-watchdog
+    // gate. TRUE when the watchdog may fire — a genuine wedge: ≥1 flow is ALIVE
+    // (bytes should be moving but aren't) OR the supervisor has GIVEN UP on a
+    // total outage (outageGiveupMs elapsed; awaitFlow has/will reject). FALSE
+    // while the supervisor is legitimately recovering a total outage (0 live
+    // flows, not yet given up) — the sender then re-arms rather than failing, so
+    // a common-mode outage recovery isn't mistaken for a wedge (which would
+    // re-introduce the whole-transfer resume loop this phase eliminates).
+    watchdogGate: () => supervisor.liveCount() >= 1 || supervisor.hasGivenUp(),
     // Registered by transfer-service AFTER it builds the sender: on every slot-0
     // (re)connect, swap the sender's ctrl channel to the fresh one so the OFFER/
     // range_report control plane survives a slot-0 death.

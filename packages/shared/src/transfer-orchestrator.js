@@ -177,19 +177,35 @@ export function createMultiFlowSender({
   offerBatchBytes = 49152,
   completionTimeoutMs = 120000,
   reconcileWaitMs = 3000,
-  // Final-review #2: sender-side inactivity/stall watchdog. pump() can park
-  // indefinitely on the send pool's awaitFlow when every flow is down and the
-  // supervisor never reaches all-slots-`dead` (a final-attempt slot that
-  // connects then sits stuck in 'disconnected' never sets `dead`, so awaitFlow
-  // never rejects) — the post-`all-sent` no_confirmation timer is armed too late
-  // to catch that, and nothing else fails the send. Mirrors createMultiFlow
-  // Receiver's ~25s inactivity watchdog: armed at accept (pump start), reset on
-  // every inbound range_report (the receiver's liveness signal — time-driven
-  // ~reportIntervalMs in a healthy transfer, so steady progress can't false-trip
-  // it), and disarmed at `all-sent` (the no_confirmation completion timer owns
-  // the drain phase) and on settle. On expiry it fail('stalled')s so the app's
-  // existing fail->auto-resume path takes over. 0 disables (single-flow/legacy).
-  inactivityMs = 25000,
+  // Sender-side inactivity/stall watchdog for a GENUINE WEDGE — bytes should be
+  // moving (a flow is alive) but no receiver range_report has arrived within the
+  // bound. Mirrors createMultiFlowReceiver's ~25s inactivity watchdog: armed at
+  // accept (pump start), reset on every inbound range_report (the receiver's
+  // liveness signal — time-driven ~reportIntervalMs in a healthy transfer, so
+  // steady progress can't false-trip it), and disarmed at `all-sent` (the
+  // no_confirmation completion timer owns the drain phase) and on settle. On
+  // expiry it fail('stalled')s so the app's existing fail->auto-resume path takes
+  // over. 0 disables (single-flow/legacy).
+  //
+  // Task 6 (common-mode-resilience) — the watchdog is GATED so it does NOT fire
+  // during a legitimate total-outage GENTLE RECOVERY. With the flow supervisor's
+  // Tasks 2-4, a common-mode outage (all N flows share one satellite/TURN path,
+  // so they drop together) now KEEPS the session alive and re-dials for up to
+  // outageGiveupMs; an unrecoverable outage ends by the supervisor's OWN outage
+  // timer, which rejects awaitFlow (`outage_giveup` → the pool throws, failing
+  // the send through that path). If the watchdog fired blindly at ~25s into such
+  // an outage it would re-introduce the whole-transfer resume loop this phase
+  // exists to eliminate. So on expiry the watchdog consults `watchdogGate()`:
+  //   true  -> a real wedge (≥1 flow ALIVE, or the supervisor has GIVEN UP) -> fail('stalled')
+  //   false -> a total outage still being gently recovered (0 live flows, not yet
+  //            given up) -> DON'T fail; re-arm and keep watching.
+  // (The stale rationale this block used to carry — "a stuck 'disconnected' slot
+  // means awaitFlow never rejects" — no longer holds: the supervisor's time-based
+  // outage timer guarantees awaitFlow eventually rejects, so the watchdog's job is
+  // now just the alive-but-stalled wedge, not compensating for a wedged waiter.)
+  // Default `() => true` preserves single-flow/legacy/static-flow-set behavior (no
+  // supervisor behind the flows to recover an outage — so any stall IS terminal).
+  inactivityMs = 25000, watchdogGate = () => true,
   setTimer = setTimeout, clearTimer = clearTimeout,
   // Per-chunk progress would flood IPC; throttle to a human-legible cadence,
   // same discipline as single-flow createSender's emitProgress. Clock injected
@@ -242,12 +258,25 @@ export function createMultiFlowSender({
   const resolveOnce = (v) => { if (!settled) { settled = true; watching = false; stopWatchdog(); clearCompletion(); resolve(v); } };
   const fail = (e) => { if (!settled) { settled = true; watching = false; stopWatchdog(); clearCompletion(); reject(e); } };
   const run = serializer(fail);
-  const pokeWatchdog = () => {
+  // Arm (or reset) the stall watchdog. Called at pump start and on every inbound
+  // range_report (liveness). ≤ 1 timer at a time.
+  const armWatchdog = () => {
     if (!watching || settled || !(inactivityMs > 0)) return;
     if (inactive) clearTimer(inactive);
-    inactive = setTimer(() => { if (!settled) fail(new Error('stalled')); }, inactivityMs);
+    inactive = setTimer(onWatchdogExpiry, inactivityMs);
     if (inactive && inactive.unref) inactive.unref();
   };
+  // On expiry, only fail on a GENUINE wedge (gate open: ≥1 flow alive, or the
+  // supervisor has given up). While a total outage is still being gently
+  // recovered (gate closed) don't fail — re-arm and keep watching, so a wedge
+  // that develops AFTER a flow returns is still caught, and an outage that never
+  // recovers is failed by the supervisor's awaitFlow reject, not by us.
+  function onWatchdogExpiry() {
+    if (settled || !watching) return;
+    if (watchdogGate()) { fail(new Error('stalled')); return; }
+    armWatchdog();
+  }
+  const pokeWatchdog = armWatchdog;
 
   // Each file's hash, computed once by the initial full-file read (below) and
   // reused by any later gap pass's re-sent file_end — a resumed, already
