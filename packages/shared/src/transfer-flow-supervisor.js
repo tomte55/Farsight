@@ -37,6 +37,27 @@
 // establish failures since the slot last connected (a genuinely-broken slot),
 // not lifetime drops — a slot reaching 'connected' resets its `attempt` to 0, so
 // a flow that worked and then dropped starts its re-dial budget fresh.
+//
+// GENTLE re-dial (Task 3) — all N flows share one satellite/TURN path, so a blip
+// drops them together (common-mode) and a naive supervisor re-dials all 8-16
+// slots at once on a short backoff, and lingering dead workers hold TURN
+// allocations: a live incident hit 755 concurrent coturn allocations (~flowCount×2
+// expected), saturating the relay and causing MORE drops (a death spiral). Three
+// bounds keep re-dialing gentle, all governing RE-dials (never the initial
+// staggered dial):
+//   3. CONCURRENCY CAP — at most `maxConcurrentDials` workers may be MID-DIAL
+//      (created via createWorker, not yet 'connected' or terminal) at once. Excess
+//      re-dials QUEUE and start as dial-slots free (a mid-dial worker connects or
+//      goes terminal). Bounds the simultaneous TURN-allocation rate.
+//   4. GROWN BACKOFF — the default tail reaches 15s so a chronically-failing slot
+//      churns slowly, not every 4s.
+//   5. TOTAL-OUTAGE PROBE MODE — when liveCount()===0 we do NOT fan out all slots;
+//      only up to `maxConcurrentDials` PROBE slots dial (on the grown backoff) to
+//      test the link, and the rest stay QUEUED until a probe reaches 'connected'
+//      (link is back), then normal re-dialing of the rest resumes. Implemented as:
+//      the cap bounds concurrent probes, and the queue drains ONLY while a flow is
+//      live (drainQueue is a no-op during a total outage) — so a probe FAILURE
+//      re-probes only itself and never releases a queued slot; a probe CONNECT does.
 
 export function createFlowSupervisor({
   flowCount,
@@ -46,8 +67,9 @@ export function createFlowSupervisor({
   onFlowDown,
   onCtrlReplaced,
   staggerMs = 250,
-  backoff = [500, 1000, 2000, 4000],
+  backoff = [500, 1000, 2000, 4000, 8000, 15000],
   maxRedialsPerSlot = 8,
+  maxConcurrentDials = 4,
   outageGiveupMs = 180000,
   isRunning,
   setTimer = setTimeout,
@@ -60,6 +82,10 @@ export function createFlowSupervisor({
     worker: null,
     attempt: 0,
     timer: null,
+    dialing: false, // true while this slot's CURRENT worker is mid-dial (created,
+                    // not yet 'connected' or terminal) — it is then counted in
+                    // inFlightDials and occupies one of the maxConcurrentDials
+                    // dial slots. Cleared the moment it connects or goes terminal.
     dead: false, // set ONLY once this slot's re-dial budget is spent AND its
                  // final worker went terminal — see scheduleRedial. A slot with
                  // a pending final-attempt timer, or a final worker still
@@ -79,6 +105,12 @@ export function createFlowSupervisor({
   // is a re-dial iff scheduleRedial already bumped slot.attempt past 0 before
   // arming the timer that leads here (see dial()'s check below).
   let redials = 0;
+  // Concurrency-cap bookkeeping (Task 3). inFlightDials = number of slots whose
+  // current worker is mid-dial (slot.dialing). dialQueue holds slotIndexes whose
+  // RE-dial was deferred because the cap was full (or a total outage is being
+  // probed); they start via drainQueue as dial-slots free AND a flow is live.
+  let inFlightDials = 0;
+  const dialQueue = [];
 
   const backoffFor = (attempt) => backoff[Math.min(attempt, backoff.length - 1)];
 
@@ -154,12 +186,41 @@ export function createFlowSupervisor({
     // slot.attempt is 0 only for the INITIAL dial (start()'s staggered loop);
     // scheduleRedial always increments it before arming the timer that calls
     // back in here, so attempt > 0 at this point means this dial is a re-dial.
+    // The concurrency cap governs RE-dials ONLY — the initial staggered dial is
+    // already spread by staggerMs and must always proceed. A re-dial that would
+    // exceed maxConcurrentDials in-flight QUEUES instead; it starts later from
+    // drainQueue when a dial-slot frees AND a flow is live (probe-mode gating).
+    if (slot.attempt > 0 && inFlightDials >= maxConcurrentDials) {
+      if (!dialQueue.includes(slotIndex)) dialQueue.push(slotIndex);
+      return;
+    }
     if (slot.attempt > 0) redials += 1;
     const worker = createWorker(slotIndex);
     slot.worker = worker;
+    slot.dialing = true;
+    inFlightDials += 1;
     alive.set(worker, false);
     worker.onSessionState((state) => handleState(slotIndex, worker, state));
     worker.startRendezvous(makeParams(slotIndex));
+  }
+
+  // A mid-dial worker just left mid-dial (connected or terminal): free its dial
+  // slot so a queued re-dial can start.
+  function releaseDialSlot(slot) {
+    if (slot.dialing) { slot.dialing = false; inFlightDials -= 1; }
+  }
+
+  // Start queued re-dials as dial-slots free — but ONLY while a flow is live.
+  // During a total outage (liveCount()===0) this is a no-op: the ≤ cap probe
+  // slots keep re-dialing themselves on backoff, and the remaining slots stay
+  // QUEUED until a probe reaches 'connected' (link is back), which resumes
+  // draining. This is the total-outage PROBE mode — don't hammer a dead link
+  // with all N slots.
+  function drainQueue() {
+    if (liveCount() === 0) return;
+    while (dialQueue.length > 0 && inFlightDials < maxConcurrentDials) {
+      dial(dialQueue.shift());
+    }
   }
 
   function handleState(slotIndex, worker, state) {
@@ -170,6 +231,8 @@ export function createFlowSupervisor({
 
     if (state === 'connected') {
       alive.set(worker, true);
+      // This worker is no longer mid-dial — free its dial slot.
+      releaseDialSlot(slot);
       // Re-dial budget resets on a successful connect: maxRedialsPerSlot now
       // counts CONSECUTIVE establish failures since this slot last connected,
       // not lifetime drops (a worked-then-dropped flow re-dials from backoff[0]).
@@ -179,6 +242,9 @@ export function createFlowSupervisor({
       if (slotIndex === 0 && onCtrlReplaced) onCtrlReplaced(worker);
       if (onFlowUp) onFlowUp(slotIndex, makeFlow(worker));
       resolveWaiter();
+      // A probe reached 'connected' (or a normal slot freed): the link is live,
+      // so resume re-dialing any QUEUED slots (up to the cap).
+      drainQueue();
       return;
     }
     if (state === 'disconnected') {
@@ -192,9 +258,15 @@ export function createFlowSupervisor({
       || (typeof state === 'string' && state.startsWith('error:'));
     if (terminal) {
       alive.set(worker, false);
+      // This worker is no longer mid-dial — free its dial slot before scheduling
+      // the next re-dial (and before draining), so the freed slot is available.
+      releaseDialSlot(slot);
       if (onFlowDown) onFlowDown(slotIndex);
       if (liveCount() === 0) { fireStarved(); armOutageTimer(); }
       scheduleRedial(slotIndex);
+      // Release a queued re-dial only if a flow is still live — a no-op during a
+      // total outage (probe mode keeps the rest queued until a probe connects).
+      drainQueue();
       return;
     }
     // Unknown/intermediate states (e.g. 'connecting') are ignored.
@@ -246,8 +318,11 @@ export function createFlowSupervisor({
     stop() {
       active = false;
       cancelOutageTimer();
+      dialQueue.length = 0;
+      inFlightDials = 0;
       for (const slot of slots) {
         if (slot.timer != null) { clearTimer(slot.timer); slot.timer = null; }
+        slot.dialing = false;
         if (slot.worker) { try { slot.worker.close(); } catch { /* best-effort */ } }
       }
     },

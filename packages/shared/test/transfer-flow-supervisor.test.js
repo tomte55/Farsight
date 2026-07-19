@@ -429,6 +429,110 @@ describe('transfer-flow-supervisor', () => {
     expect(sup.redialCount()).toBe(2); // unchanged
   });
 
+  // Task 3: gentle re-dial — a concurrency cap on in-flight dials so a
+  // common-mode drop can't re-dial all N slots at once (the "755 TURN
+  // allocations" storm). At most maxConcurrentDials workers may be MID-DIAL
+  // (created, not yet connected-or-terminal) at once; excess RE-dials queue and
+  // start as dial-slots free. The INITIAL staggered dial is NOT gated.
+  it('re-dial concurrency cap: at most maxConcurrentDials workers are mid-dial at once; the rest dial as earlier ones settle', () => {
+    const { clock, createWorker, args } = baseArgs({
+      flowCount: 7, maxConcurrentDials: 2, backoff: [500], maxRedialsPerSlot: 20,
+    });
+    const sup = createFlowSupervisor(args);
+    sup.start();
+    clock.advance(1500); // dial all 7 (stagger 250 each: slot 6 at t=1500)
+    expect(createWorker.all.length).toBe(7);
+
+    // Keep slot 0 alive so we're NEVER in total outage (probe mode stays off) —
+    // this isolates the plain re-dial cap.
+    createWorker.latestFor(0).emit('connected');
+    expect(sup.liveCount()).toBe(1);
+
+    // Fail slots 1..6 all at once -> each schedules a re-dial at +500.
+    for (let i = 1; i <= 6; i += 1) createWorker.latestFor(i).emit('failed');
+
+    const before = createWorker.all.length; // 7
+    clock.advance(500); // all six re-dial timers fire together...
+    // ...but only cap(2) may be mid-dial at once -> only 2 new workers created.
+    expect(createWorker.all.length - before).toBe(2);
+
+    const redials = createWorker.all.slice(before);
+    // Settle one mid-dial worker by CONNECTING it -> frees a dial slot; a live
+    // flow exists so a queued slot dials.
+    redials[0].emit('connected');
+    expect(createWorker.all.length - before).toBe(3);
+    // Settle the other by a TERMINAL state -> frees a dial slot -> next queued dials.
+    redials[1].emit('failed');
+    expect(createWorker.all.length - before).toBe(4);
+    // At no point were more than cap new workers mid-dial simultaneously.
+  });
+
+  // Task 3: total-outage PROBE mode. When liveCount()===0, do NOT fan out all
+  // slots — dial at most maxConcurrentDials PROBE slots to test the link and
+  // keep the rest QUEUED until a probe reaches 'connected', THEN resume normal
+  // re-dialing of the rest. Bounds TURN allocations against a dead link.
+  it('total-outage probe mode: only maxConcurrentDials probes dial; the rest fan out ONLY after a probe connects', () => {
+    const { clock, createWorker, args } = baseArgs({
+      flowCount: 6, maxConcurrentDials: 2, backoff: [500], maxRedialsPerSlot: 20, outageGiveupMs: 1e9,
+    });
+    const sup = createFlowSupervisor(args);
+    sup.start();
+    clock.advance(1250); // dial all 6 (slot 5 at t=1250)
+    // Connect all, then drop ALL at once = common-mode TOTAL outage.
+    for (let i = 0; i < 6; i += 1) createWorker.latestFor(i).emit('connected');
+    expect(sup.liveCount()).toBe(6);
+    for (let i = 0; i < 6; i += 1) createWorker.latestFor(i).emit('failed');
+    expect(sup.liveCount()).toBe(0); // TOTAL OUTAGE
+
+    const before = createWorker.all.length; // 6
+    const newSlots = () => new Set(createWorker.all.slice(before).map((w) => w.slotIndex));
+
+    clock.advance(500); // all six re-dial timers fire together...
+    // ...probe mode: only cap(2) distinct probe slots dial; the other 4 stay QUEUED.
+    expect(newSlots().size).toBe(2);
+    const probeSlots = [...newSlots()];
+
+    // A probe FAILS -> must NOT release a queued slot (still a total outage);
+    // it re-dials ITSELF on backoff.
+    createWorker.latestFor(probeSlots[0]).emit('failed');
+    clock.advance(500); // the failed probe's OWN re-dial fires (a re-probe)
+    // Still only the same 2 slots have ever dialed — the 4 queued did NOT fan out.
+    expect(newSlots().size).toBe(2);
+
+    // NOW a probe CONNECTS -> the link is back -> the remaining slots fan out
+    // (gated by the cap, then draining as each settles).
+    createWorker.latestFor(probeSlots[0]).emit('connected');
+    expect(sup.liveCount()).toBe(1);
+    expect(newSlots().size).toBe(3); // one queued slot released immediately (up to cap)
+    // Drive the rest to connect; the queue drains fully -> all 6 slots dial.
+    for (let guard = 0; guard < 20 && newSlots().size < 6; guard += 1) {
+      for (const w of [...createWorker.all]) {
+        if (sup.liveCount() > 0 && newSlots().size < 6) w.emit('connected');
+      }
+    }
+    expect(newSlots().size).toBe(6);
+  });
+
+  // Task 3: the DEFAULT backoff grows to a longer tail so a slot that keeps
+  // failing churns slowly (every 15s), not every 4s.
+  it('default backoff grows to the [500,1000,2000,4000,8000,15000] tail (last value repeats)', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, maxRedialsPerSlot: 10, outageGiveupMs: 1e9 });
+    delete args.backoff; // use the module DEFAULT
+    const sup = createFlowSupervisor(args);
+    sup.start();
+
+    const delays = [500, 1000, 2000, 4000, 8000, 15000, 15000];
+    let expected = 1;
+    for (const d of delays) {
+      createWorker.latestFor(0).emit('failed');
+      clock.advance(d - 1);
+      expect(createWorker.all.length).toBe(expected); // not yet
+      clock.advance(1);
+      expected += 1;
+      expect(createWorker.all.length).toBe(expected); // re-dial fired at exactly d
+    }
+  });
+
   it('stop(): cancels pending re-dial timers and closes live workers; no re-dials afterward', () => {
     const { clock, createWorker, args } = baseArgs({ flowCount: 2, backoff: [500] });
     const sup = createFlowSupervisor(args);
