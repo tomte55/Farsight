@@ -166,8 +166,13 @@ function wireDataChannel(ch) {
   }
   if (ch.label === 'ft-bulk') {
     try { ch.binaryType = 'arraybuffer'; } catch { /* guarded */ }
-    // Mirrors peer.js's fileChannel threshold — backs the credit signal below.
-    try { ch.bufferedAmountLowThreshold = 262144; } catch { /* guarded */ }
+    // The send window backing the credit signal below: the credit backpressure
+    // keeps at most this many bytes in flight per flow, so throughput <= window /
+    // RTT. The old 256 KB capped a single flow at ~1.8 MB/s over a 210ms
+    // NL<->South-America RTT regardless of link speed. 4 MiB lifts that ceiling to
+    // ~19 MB/s at 210ms. Kept <=8 MiB: ft-ctrl shares this SCTP association, so a
+    // deeper bulk backlog would delay cancel/progress frames.
+    try { ch.bufferedAmountLowThreshold = 4 * 1024 * 1024; } catch { /* guarded */ }
     bulkChannel = ch;
     ch.addEventListener('message', (m) => {
       if (!(m.data instanceof ArrayBuffer)) return;

@@ -140,9 +140,24 @@ describe('transfer-worker/worker.js bridges IPC <-> the ft-ctrl/ft-bulk/auth dat
     }
   });
 
-  test('sets binaryType=arraybuffer and a bufferedAmountLowThreshold on ft-bulk, like peer.js\'s fileChannel', () => {
+  test('sets binaryType=arraybuffer on ft-bulk', () => {
     expect(workerRenderer).toMatch(/binaryType\s*=\s*['"]arraybuffer['"]/);
-    expect(workerRenderer).toMatch(/bufferedAmountLowThreshold\s*=\s*262144/);
+  });
+
+  // The ft-bulk send window (bufferedAmountLowThreshold) IS the throughput
+  // ceiling: the credit backpressure keeps at most this many bytes in flight per
+  // flow, so throughput <= window / RTT. A 256 KB window caps a single flow at
+  // ~1.8 MB/s over a 210ms NL<->South-America RTT regardless of link speed. This
+  // guards the CLASS of regression, not a literal: the window must stay a
+  // BDP-sized 4-8 MiB (>=19 MB/s at 210ms), never drop back to a ~256 KB value.
+  // Kept <=8 MiB because ft-ctrl shares the SCTP association — a deeper bulk
+  // backlog delays cancel/progress frames.
+  test('sizes the ft-bulk send window to the bandwidth-delay product (4-8 MiB), not the old 256 KB cap', () => {
+    const m = workerRenderer.match(/bufferedAmountLowThreshold\s*=\s*([0-9*\s]+?)\s*;/);
+    expect(m).toBeTruthy();
+    const windowBytes = Function(`"use strict"; return (${m[1]});`)();
+    expect(windowBytes).toBeGreaterThanOrEqual(4 * 1024 * 1024);
+    expect(windowBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
   });
 
   test('emits a credit signal on ft-bulk bufferedamountlow', () => {
