@@ -1529,6 +1529,34 @@ function buildDeckCtl(jobId) {
 // in place; only a genuine structural change (job start/switch, or the
 // flow-lane count changing) tears down and rebuilds via replaceChildren().
 let deckEls = null;
+// The flow-lane equalizer animates on its own rAF loop (not the ~4/s progress
+// tick, which is too coarse for smooth motion). Each live lane's height waves;
+// the wave AMPLITUDE scales with actual throughput, so the bars are tall+lively
+// while bytes flow and calm+low when connected-but-idle/stalled -- i.e. they show
+// connection (alive vs dead lane) AND actual transfer (how much is moving). Dead
+// lanes stay a flat sliver. Honors prefers-reduced-motion (static pattern, no rAF).
+let deckRaf = null;
+const deckReduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+function animateLanes(ts) {
+  const d = deckEls;
+  if (!d || !d.laneEls || !d.laneEls.length) { deckRaf = null; return; }
+  const act = d.activity || 0; // 0 (idle/stalled) .. 1 (at peak throughput)
+  for (let i = 0; i < d.laneEls.length; i += 1) {
+    const el = d.laneEls[i];
+    if (d.laneStates[i] === 'dead') { el.style.height = '4px'; continue; }
+    const wave = 0.5 + 0.5 * Math.sin(ts * 0.005 + i * 0.8); // travelling wave, per-lane phase
+    const amp = 2 + act * 28; // ~2px shimmer when idle -> up to 30px when flowing
+    el.style.height = `${Math.round(5 + amp * wave)}px`;
+  }
+  deckRaf = requestAnimationFrame(animateLanes);
+}
+
+function startLaneAnim() {
+  if (deckReduceMotion || deckRaf) return;
+  if (!deckEls || !deckEls.laneEls || !deckEls.laneEls.length) return;
+  deckRaf = requestAnimationFrame(animateLanes);
+}
 
 function buildDeck(job, m) {
   const frag = document.createElement('div');
@@ -1607,6 +1635,7 @@ function buildDeck(job, m) {
     cTransferred, cFiles, cEta, cElapsed,
     areaP, lineP,
     lanes, laneEls, meta,
+    laneStates: m.lanes.map((l) => l.state), activity: 0,
     pauseBtn, cancelBtn,
   };
 }
@@ -1639,11 +1668,18 @@ function patchDeck(job, m) {
   d.lanes.style.display = m.lanes.length ? '' : 'none';
   d.meta.style.display = m.flowText ? '' : 'none';
   d.meta.textContent = m.flowText;
-  const peakRate = peakRates.get(job.jobId) || 1;
+  // Feed the rAF equalizer: per-lane connection state + a throughput "activity"
+  // (current rate / peak; 0 when idle or stalled). The animation loop reads these.
+  d.laneStates = m.lanes.map((l) => l.state);
+  const rateBps = Number.isFinite(job.rate) && job.rate > 0 ? job.rate : 0;
+  const peakBps = Math.max(peakRates.get(job.jobId) || 0, rateBps, 1);
+  d.activity = rateBps > 0 ? Math.max(0.1, Math.min(1, rateBps / peakBps)) : 0;
   m.lanes.forEach((l, i) => {
     const bar2 = d.laneEls[i];
     bar2.classList.toggle('dead', l.state === 'dead');
-    bar2.style.height = l.state === 'dead' ? '4px' : `${10 + Math.round(Math.abs(Math.sin(peakRate + i)) * 22)}px`;
+    if (l.state === 'dead') bar2.style.height = '4px';
+    else if (deckReduceMotion) bar2.style.height = `${8 + (i % 5) * 5}px`; // static (no rAF)
+    // else: animateLanes owns the live-lane heights.
   });
 
   // Can only pause an actively-transferring send (not awaiting-approval /
@@ -1662,6 +1698,7 @@ function renderDeck(job) {
     buildDeck(job, m);
     patchDeck(job, m);
   }
+  startLaneAnim(); // kick the equalizer rAF loop if it isn't already running
 }
 
 const xferQueueEl = document.getElementById('xfer-queue');
