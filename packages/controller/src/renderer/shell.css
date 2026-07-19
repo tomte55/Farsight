@@ -19,9 +19,13 @@
 .u-num { width: 72px; flex: none; margin-bottom: 0; }
 #menu-save-parallel-connections { margin-bottom: 11px; }
 
+/* Home: two columns on a wide window (connect | this-computer), stack when narrow. */
+.home-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
+@media (max-width: 760px) { .home-grid { grid-template-columns: 1fr; } }
+
 /* Home page: this-computer credentials card + the "Allow this computer to be
    controlled" toggle (unification step 3, task 6). */
-#host-card { margin-top: 20px; }
+#host-card { margin-top: 0; }
 .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; cursor: pointer; }
 .toggle-row .lbl { margin-bottom: 0; }
 #host-credentials[hidden] { display: none; }
