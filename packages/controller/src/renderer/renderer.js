@@ -10,6 +10,7 @@ import { transferLabel } from '@farsight/shared/transfer-label';
 // unit-tested in packages/shared/test.
 import { upsertFailedFile } from '@farsight/shared/transfer-detail';
 import { deckModel } from '@farsight/shared/transfer-deck';
+import { pushSample, waveformPath } from '@farsight/shared/transfer-samples';
 import { MSG } from '@farsight/shared/protocol';
 import { CONTROL, validateControlEvent } from '@farsight/shared/control-events';
 import { runConnectionAuth } from '@farsight/shared/connection-auth';
@@ -1395,6 +1396,7 @@ function buildActionButton(jobId, active) {
       transferJobs.delete(jobId);
       sendRateEstimators.delete(jobId);
       peakRates.delete(jobId);
+      rateSamples.delete(jobId);
       renderTransfers();
     };
     return removeBtn;
@@ -1410,6 +1412,7 @@ async function clearFinishedTransfers() {
     transferJobs.delete(j.jobId);
     sendRateEstimators.delete(j.jobId);
     peakRates.delete(j.jobId);
+    rateSamples.delete(j.jobId);
   }
   renderTransfers();
 }
@@ -1421,6 +1424,16 @@ function peakRateFor(jobId, rate) {
   if (!Number.isFinite(rate) || rate <= 0) return peakRates.get(jobId) || 0;
   const next = Math.max(peakRates.get(jobId) || 0, rate);
   peakRates.set(jobId, next);
+  return next;
+}
+
+// Rolling throughput samples per job for the deck waveform — the event stream
+// carries no history, so accumulate our own {t, rate} ring (mirrors peakRates).
+const rateSamples = new Map(); // jobId -> [{t, rate}]
+function pushRateSample(jobId, rate) {
+  const cur = rateSamples.get(jobId) || [];
+  const next = pushSample(cur, Date.now(), rate, { maxAgeMs: 60000, maxLen: 240 });
+  rateSamples.set(jobId, next);
   return next;
 }
 
@@ -1494,7 +1507,24 @@ function renderDeck(job) {
     cell('Elapsed', m.elapsedText || '—'),
   );
 
-  frag.append(top, rateRow, bar, grid);
+  // Live throughput waveform (network rate). SVG paths set via setAttribute('d', ...)
+  // -- CSP-safe, no inline style. Empty until a couple of samples exist.
+  const samples = rateSamples.get(job.jobId) || [];
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  svg.setAttribute('class', 'xfer-wave');
+  svg.setAttribute('viewBox', '0 0 600 64');
+  svg.setAttribute('preserveAspectRatio', 'none');
+  const wp = waveformPath(samples, 600, 64, { pad: 3 });
+  const areaP = document.createElementNS(svgNS, 'path');
+  areaP.setAttribute('class', 'xfer-wave-area');
+  areaP.setAttribute('d', wp.area);
+  const lineP = document.createElementNS(svgNS, 'path');
+  lineP.setAttribute('class', 'xfer-wave-line');
+  lineP.setAttribute('d', wp.line);
+  svg.append(areaP, lineP);
+
+  frag.append(top, rateRow, svg, bar, grid);
 
   if (m.lanes.length) {
     const flows = document.createElement('div'); flows.className = 'xfer-deck-flows';
@@ -1687,6 +1717,7 @@ window.farsightIpc.onTransferEvent((ev) => {
     existing.progress = ev.progress;
     if (existing.state !== 'finishing') existing.state = 'active';
     existing.rate = sendEstimatorFor(ev.jobId).sample(bytesDone(ev.progress));
+    pushRateSample(ev.jobId, existing.rate);
   }
   transferJobs.set(ev.jobId, existing);
   if (activePage === 'transfers') renderTransfers();

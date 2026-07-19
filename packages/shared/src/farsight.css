@@ -388,3 +388,5 @@ body.in-session .cog, body.in-session .menu { display: none; }
 
 @media (max-width: 900px) { .xfer-work { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { .xfer-lane, .xfer-pill .pd { animation: none !important; transition: none !important; } }
+.xfer-wave-area { fill: rgba(74, 168, 255, .22); stroke: none; }
+.xfer-wave-line { fill: none; stroke: var(--acc2); stroke-width: 2; }
