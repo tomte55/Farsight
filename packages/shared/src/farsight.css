@@ -327,3 +327,64 @@ body.in-session .cog, body.in-session .menu { display: none; }
 .linkbtn:hover { text-decoration: underline; }
 .acct-links { display: flex; justify-content: space-between; margin-top: 13px; }
 .acct-opt { color: var(--sub); font-weight: 400; text-transform: none; letter-spacing: 0; }
+
+/* ─── Transfers overhaul (Plan 1): Telemetry Deck + two-column workspace ───────
+   Additive. Slate Console tokens only. The flow-lane equalizer uses --go (health),
+   kept distinct from the --acc/--acc2 progress hue so "healthy" never reads as
+   "progress". */
+.xfer-work { display: grid; grid-template-columns: 1.55fr 1fr; gap: 18px; align-items: start; }
+
+/* Deck — the active send, as an instrument panel */
+.xfer-deck { background: linear-gradient(180deg, #15171f, #101219); border: 1px solid var(--line); border-radius: 13px; padding: 18px; position: relative; overflow: hidden; }
+.xfer-deck-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
+.xfer-deck-name { font-family: var(--mono); font-size: 14px; font-weight: 600; }
+.xfer-deck-name .dir { color: var(--acc2); margin-right: 6px; }
+.xfer-deck-way { font-size: 11px; color: var(--sub2); text-transform: uppercase; letter-spacing: .08em; margin-top: 3px; }
+.xfer-pill { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--go-dim); background: var(--go-bg); border-radius: 999px; padding: 5px 11px; white-space: nowrap; }
+.xfer-pill .pd { width: 7px; height: 7px; border-radius: 50%; background: var(--go-dim); box-shadow: 0 0 8px var(--go-dim); animation: xfer-pulse 1.6s ease-in-out infinite; }
+@keyframes xfer-pulse { 50% { opacity: .35; } }
+.xfer-rate { display: flex; align-items: baseline; gap: 8px; margin: 16px 0 2px; }
+.xfer-rate-big { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 46px; font-weight: 700; letter-spacing: -.02em; line-height: 1; background: linear-gradient(120deg, #fff, var(--acc2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.xfer-rate-un { font-family: var(--mono); font-size: 16px; color: var(--sub); }
+.xfer-rate-peak { margin-left: auto; font-size: 10px; color: var(--sub2); text-align: right; text-transform: uppercase; letter-spacing: .07em; }
+.xfer-rate-peak b { display: block; font-family: var(--mono); font-size: 14px; color: var(--sub); letter-spacing: 0; }
+.xfer-wave { width: 100%; height: 64px; display: block; margin-top: 6px; }
+.xfer-deck-bar { height: 4px; border-radius: 999px; background: var(--line); overflow: hidden; margin: 12px 0 14px; }
+.xfer-deck-bar-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--acc), var(--acc2)); transition: width .2s ease; }
+.xfer-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line2); border: 1px solid var(--line2); border-radius: 9px; overflow: hidden; }
+.xfer-cell { background: var(--panel2); padding: 10px 12px; }
+.xfer-cell .k { font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--sub2); }
+.xfer-cell .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 15px; margin-top: 3px; }
+.xfer-cell .v small { color: var(--sub); font-size: 11px; }
+.xfer-deck-flows { display: flex; align-items: center; gap: 14px; margin-top: 16px; }
+.xfer-lanes { display: flex; align-items: flex-end; gap: 2px; height: 38px; }
+.xfer-lane { width: 5px; border-radius: 1.5px; background: linear-gradient(180deg, var(--go-dim), var(--go)); transition: height .5s cubic-bezier(.4, 0, .2, 1); }
+.xfer-lane.dead { background: var(--line); }
+.xfer-deck-flows .meta { font-size: 11px; color: var(--sub); }
+.xfer-deck-flows .meta b { font-family: var(--mono); color: var(--ink); }
+
+/* Queue column — up next / receiving / history */
+.xfer-queue { display: flex; flex-direction: column; gap: 8px; }
+.xfer-qgroup-h { font-size: 11px; text-transform: uppercase; letter-spacing: .12em; color: var(--sub2); font-weight: 700; margin: 6px 0 2px; display: flex; justify-content: space-between; align-items: center; }
+.xfer-qrow { display: flex; align-items: center; gap: 10px; padding: 10px 11px; border-radius: 10px; border: 1px solid var(--line2); background: var(--panel); }
+.xfer-qrow .m { flex: 1; min-width: 0; }
+.xfer-qrow .nm { font-family: var(--mono); font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.xfer-qrow .nm .dir { color: var(--acc2); margin-right: 5px; }
+.xfer-qrow .mt { font-size: 10px; color: var(--sub2); text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
+.xfer-qrow.recv { border-color: rgba(74, 168, 255, .28); }
+.xfer-qrow.done .nm .dir { color: var(--ok); }
+.xfer-qrow.warnrow { border-color: rgba(240, 180, 41, .3); }
+.xfer-qrow.fail { border-color: var(--danger-line); }
+.xfer-qrow.fail .nm .dir { color: var(--danger-ink); }
+.xfer-qrow.fail .mt { color: var(--danger-ink); }
+.xfer-miniwrap { display: flex; align-items: center; gap: 8px; width: 104px; flex: 0 0 auto; }
+.xfer-mini { flex: 1; height: 3px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.xfer-mini-fill { display: block; height: 100%; background: linear-gradient(90deg, var(--acc2), var(--acc)); transition: width .2s ease; }
+.xfer-mini-pct { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 10.5px; color: var(--sub); }
+.xfer-tag { font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 3px 7px; border-radius: 5px; white-space: nowrap; }
+.xfer-qrow.done .xfer-tag { color: var(--ok); background: rgba(67, 209, 158, .12); }
+.xfer-qrow.fail .xfer-tag { color: var(--danger-ink); background: var(--danger-bg); }
+.xfer-qrow.warnrow .xfer-tag { color: var(--warn); background: rgba(240, 180, 41, .13); }
+
+@media (max-width: 900px) { .xfer-work { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .xfer-lane, .xfer-pill .pd { animation: none !important; transition: none !important; } }
