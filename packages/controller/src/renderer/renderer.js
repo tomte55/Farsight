@@ -1564,7 +1564,10 @@ function renderQueue() {
   const waitingSends = all
     .filter((j) => j.direction !== 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && (!active || j.jobId !== active.jobId) && j.state !== 'interrupted')
     .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-  const receives = all.filter((j) => j.direction === 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state));
+  // Interrupted receives belong in History (as "Resuming"), same as interrupted
+  // sends — exclude them here so an interrupted receive renders ONCE, not once
+  // under Receiving (mini bar) and again under History.
+  const receives = all.filter((j) => j.direction === 'recv' && !TERMINAL_TRANSFER_STATES.includes(j.state) && j.state !== 'interrupted');
   const history = all
     .filter((j) => TERMINAL_TRANSFER_STATES.includes(j.state) || j.state === 'interrupted')
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
@@ -1575,7 +1578,7 @@ function renderQueue() {
   }
   if (receives.length) {
     xferQueueEl.append(qGroupHeader('Receiving'));
-    receives.forEach((j) => xferQueueEl.append(qRow(j, { meta: stateLabel(j), mini: true })));
+    receives.forEach((j) => xferQueueEl.append(qRow(j, { cls: 'recv', meta: stateLabel(j), mini: true })));
   }
   if (history.length) {
     xferQueueEl.append(qGroupHeader('History'));
