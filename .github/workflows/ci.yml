@@ -34,13 +34,12 @@ jobs:
   # data channels, real loopback signaling) rather than vitest's faked-wire
   # unit tests, so it's a separate job, not folded into `test` above.
   # See packages/controller/test/harness-spike/two-process-harness.mjs.
-  # WIP: CI-registration under diagnosis — the first live run found a real gap
-  # (fixed below: the missing vendor step), but this stays continue-on-error
-  # until a second green CI run confirms the fix, so the branch isn't red
-  # while that's pending.
+  # Confirmed green on windows-latest: the harness delivers a 4-flow, multi-file
+  # transfer byte-identical over real WebRTC. A REQUIRED gate — a real transfer
+  # regression (e.g. an F-B10-class OFFER drop) fails CI, not just the unit suite.
+  # The harness has a built-in retry-once for transient real-WebRTC/ICE hiccups.
   real-wire:
     runs-on: windows-latest
-    continue-on-error: true
     env:
       # The harness never touches account-server/Prisma — skip that install
       # cost entirely for this job.
