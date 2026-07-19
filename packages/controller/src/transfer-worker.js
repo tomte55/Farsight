@@ -202,6 +202,25 @@ export function createTransferWorker({ onLog, inboundBufferMaxBytes = INBOUND_BU
 
   let closed = false;
 
+  // F-B2 (Plan 1b Task 6): detect a worker RENDERER CRASH. Without this, a
+  // post-accept crash left main sending into a dead renderer — single-flow awaited
+  // a credit forever, multi-flow never learned the slot died, and rendererReady
+  // stayed true so a would-be reload never re-queued sends. Surface a terminal
+  // session-state (the supervisor re-dials the slot; a lone flow fails the transfer
+  // loudly) AND fail the channel (rejects any in-flight sendBulk so the send pool's
+  // Promise.race unwinds instead of hanging on the dead flow), then reset
+  // rendererReady so a reload re-flushes through the pre-ready queue. Guarded so a
+  // crash after close() (intentional teardown) is silent.
+  function onWorkerGone(reason) {
+    if (closed) return;
+    rendererReady = false;
+    if (typeof onLog === 'function') { try { onLog({ workerId, event: `worker-gone:${reason}` }); } catch { /* ignore */ } }
+    if (sessionStateCb) { try { sessionStateCb(`error:worker_${reason}`); } catch { /* ignore */ } }
+    try { channel.fail('worker_gone'); } catch { /* ignore */ }
+  }
+  win.webContents.on('render-process-gone', (_e, details) => onWorkerGone((details && details.reason) || 'crashed'));
+  win.webContents.on('unresponsive', () => onWorkerGone('unresponsive'));
+
   return {
     // params: { role: 'initiator'|'attach', signalingUrl, targetId?, password?,
     // linked?, sessionId?, version?, groupId?, flowIndex?, flowCount? } — see
@@ -222,6 +241,11 @@ export function createTransferWorker({ onLog, inboundBufferMaxBytes = INBOUND_BU
     // by the env-gated faultHooks.dispatch; the renderer only acts on it when
     // launched with --ft-test-hooks=1. sendToWorker queues until did-finish-load.
     sendTestFault(cmd, args) { sendToWorker(topics.testFault, { cmd, args: args || {} }); },
+    // Plan-1b Task 4/6 fault injection ONLY (killWorker): force a renderer crash so
+    // the render-process-gone path (F-B2) fires — faithfully simulating a worker
+    // process death, unlike close() (a clean destroy that never crashes). Gated:
+    // only reachable via the env-gated faultHooks.dispatch.
+    crashRenderer() { try { if (!win.isDestroyed()) win.webContents.forcefullyCrashRenderer(); } catch { /* ignore */ } },
     // Round-trips a getStats() request to the worker renderer's
     // RTCPeerConnection (main has no direct WebRTC handle — the PC lives in
     // the worker renderer). Resolves [] on timeout/teardown rather than

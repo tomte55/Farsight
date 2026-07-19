@@ -18,6 +18,7 @@ import { createFaultHooks } from '../src/transfer-fault-hooks.js';
 function fakeWorker() {
   return {
     close: vi.fn(async () => {}),
+    crashRenderer: vi.fn(),
     sendTestFault: vi.fn(),
   };
 }
@@ -42,7 +43,7 @@ describe('createFaultHooks — DISABLED (no FARSIGHT_TEST_HOOKS) is fully inert'
 });
 
 describe('createFaultHooks — ENABLED addresses workers by (side, flowIndex)', () => {
-  test('killWorker closes exactly the addressed worker (main-side fault, F-B2)', async () => {
+  test('killWorker CRASHES exactly the addressed worker renderer (F-B2 — a real crash, not a clean close)', async () => {
     const hooks = createFaultHooks({ enabled: true });
     const s0 = fakeWorker(); const s1 = fakeWorker(); const r0 = fakeWorker();
     hooks.register('send', 0, s0);
@@ -50,9 +51,12 @@ describe('createFaultHooks — ENABLED addresses workers by (side, flowIndex)', 
     hooks.register('receive', 0, r0);
 
     await hooks.dispatch({ cmd: 'killWorker', side: 'send', flowIndex: 1 });
-    expect(s1.close).toHaveBeenCalledTimes(1);
-    expect(s0.close).not.toHaveBeenCalled();
-    expect(r0.close).not.toHaveBeenCalled();
+    // A crash (render-process-gone), NOT worker.close() — close() is a clean
+    // teardown that never fires render-process-gone, so it wouldn't exercise F-B2.
+    expect(s1.crashRenderer).toHaveBeenCalledTimes(1);
+    expect(s1.close).not.toHaveBeenCalled();
+    expect(s0.crashRenderer).not.toHaveBeenCalled();
+    expect(r0.crashRenderer).not.toHaveBeenCalled();
   });
 
   test('receive-side addressing is independent of send-side (same flowIndex, different side)', async () => {
@@ -62,8 +66,8 @@ describe('createFaultHooks — ENABLED addresses workers by (side, flowIndex)', 
     hooks.register('receive', 0, r0);
 
     await hooks.dispatch({ cmd: 'killWorker', side: 'receive', flowIndex: 0 });
-    expect(r0.close).toHaveBeenCalledTimes(1);
-    expect(s0.close).not.toHaveBeenCalled();
+    expect(r0.crashRenderer).toHaveBeenCalledTimes(1);
+    expect(s0.crashRenderer).not.toHaveBeenCalled();
   });
 
   test('transport faults are forwarded into the addressed worker renderer with their args', async () => {
@@ -107,7 +111,7 @@ describe('createFaultHooks — ENABLED addresses workers by (side, flowIndex)', 
     hooks.unregister('send', 0, original);
     expect(hooks._size('send')).toBe(1);
     await hooks.dispatch({ cmd: 'killWorker', side: 'send', flowIndex: 0 });
-    expect(replacement.close).toHaveBeenCalledTimes(1);
-    expect(original.close).not.toHaveBeenCalled();
+    expect(replacement.crashRenderer).toHaveBeenCalledTimes(1);
+    expect(original.crashRenderer).not.toHaveBeenCalled();
   });
 });

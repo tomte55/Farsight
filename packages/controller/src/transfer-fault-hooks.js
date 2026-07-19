@@ -14,8 +14,10 @@
 // outside one).
 //
 // Faults:
-//   killWorker        — destroy the addressed worker's hidden BrowserWindow
-//                       (simulates F-B2 worker-process death). Main-side only.
+//   killWorker        — CRASH the addressed worker's renderer process
+//                       (forcefullyCrashRenderer → render-process-gone), simulating
+//                       F-B2 worker-process death. NOT worker.close(): a clean
+//                       destroy never fires render-process-gone. Main-side only.
 //   dropFlowSocket    — close the worker's signaling WebSocket (F-B1). Renderer.
 //   injectOversizeCtrl— send a ctrl frame over the ~256KB DC send limit (F-B3).
 //   stallFlow/resumeFlow — pause/resume the flow's outbound bulk (shaping/wedge).
@@ -48,7 +50,11 @@ export function createFaultHooks({ enabled = false } = {}) {
     if (!enabled) throw new Error('fault_hooks_disabled');
     const worker = workers[side] && workers[side].get(flowIndex);
     if (!worker) throw new Error(`no_worker:${side}:${flowIndex}`);
-    if (cmd === 'killWorker') { await worker.close(); return { ok: true }; }
+    if (cmd === 'killWorker') {
+      if (typeof worker.crashRenderer !== 'function') throw new Error('worker_no_crash');
+      worker.crashRenderer();
+      return { ok: true };
+    }
     if (TRANSPORT_FAULTS.has(cmd)) {
       if (typeof worker.sendTestFault !== 'function') throw new Error('worker_no_test_fault');
       worker.sendTestFault(cmd, args);

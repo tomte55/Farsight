@@ -50,52 +50,53 @@ async function injectUntilLands(sendWs, fault, { tries = 200, everyMs = 20 } = {
   return r;
 }
 
-async function runFB1() {
+// A fault scenario: inject `fault` on flow 1 mid-transfer, then assert the
+// finding's LOUD + BOUNDED contract — the fault is SURFACED in the sender log
+// (`surfacedRegex`) and the transfer reaches a terminal outcome within timeout,
+// NEVER a silent zombie. Full byte-identical delivery is reported as INFO (an
+// incomplete recovery of an in-flight LARGE file after a flow death is the
+// Phase-2 multi-flow RESUPPLY gap F-B11, not a miss of the fault under test).
+async function runScenario({ label, fault, surfacedRegex }) {
   const { cleanups, cleanupAll, tmp } = makeAttemptContext();
   try {
     const signalingUrl = await startSignaling(cleanups);
     const { srcDir, expected } = await writeFaultPayload(await tmp('fault-src-'));
-    log(`F-B1: payload ${expected.size} files; flowCount=${FLOW_COUNT}`);
+    log(`${label}: payload ${expected.size} files; flowCount=${FLOW_COUNT}`);
 
     const { sendWs, hostId, hostPw, recvDownloads, sendChild, recvChild } =
       await bringUpPair({ signalingUrl, cleanups, tmp, extraEnv: { FARSIGHT_TEST_HOOKS: '1' } });
 
     const sendRes = await cdpEval(sendWs, `window.farsightIpc.transferSend(${JSON.stringify({ target: { id: hostId, password: hostPw, flowCount: FLOW_COUNT }, paths: [srcDir] })})`);
     if (!sendRes || sendRes.error) throw new Error('transfer:send failed: ' + JSON.stringify(sendRes));
-    log('send issued; injecting dropFlowSocket on flow 1...');
 
-    // Drop flow 1's signaling socket mid-transfer (unexpected drop → dropForTest).
-    const dropped = await injectUntilLands(sendWs, { cmd: 'dropFlowSocket', side: 'send', flowIndex: 1 });
-    log('dropFlowSocket(flow 1) =>', dropped);
+    // Inject MID-TRANSFER (spec: "killWorker mid-transfer"). Wait until bytes are
+    // actually flowing — a progress event — so every flow's renderer is fully
+    // loaded + connected. Injecting during rendezvous is unreliable for a crash
+    // (forcefullyCrashRenderer on a still-loading renderer may not fire
+    // render-process-gone) and gives a less realistic test.
+    await awaitLogLine(sendChild, /send ev=progress/, 20000);
+    log(`transfer flowing; injecting ${fault.cmd} on flow ${fault.flowIndex}...`);
 
-    // ── What F-B1 GUARANTEES (and what this asserts) ────────────────────────────
-    // F-B1 = "the transfer signaling socket REPORTS its own failure" — so a dropped
-    // socket must be SURFACED (loud) and the transfer must reach a TERMINAL outcome
-    // within a bounded time, NEVER a silent zombie / infinite `await signal.ready`.
-    // It does NOT guarantee the transfer still completes byte-identical — recovering
-    // an in-flight LARGE file after a flow dies is the multi-flow RESUPPLY job
-    // (Phase 2), tracked separately (see F-B11 note in the 1b plan). So we assert
-    // the loud+bounded contract here and REPORT delivery as info.
+    const injected = await injectUntilLands(sendWs, fault);
+    log(`${fault.cmd}(flow ${fault.flowIndex}) =>`, injected);
+
     const failures = [];
-    if (typeof dropped !== 'string' || !dropped.includes('"ok":true')) failures.push('dropFlowSocket never landed on a live flow-1 worker: ' + dropped);
+    if (typeof injected !== 'string' || !injected.includes('"ok":true')) failures.push(`${fault.cmd} never landed on a live flow-${fault.flowIndex} worker: ${injected}`);
 
-    // (1) LOUD: the worker reported error:signaling_* (logs an ft-worker conn: event).
-    const surfaced = await awaitLogLine(sendChild, /conn:error:signaling_(error|dropped|closed|timeout)/, 20000);
-    log('signaling-failure surfaced:', surfaced ? surfaced.slice(-90) : 'NO');
-    if (!surfaced) failures.push('F-B1 REGRESSION: the dropped signaling socket was NOT surfaced (silent, as before the fix)');
+    // (1) LOUD: the fault was surfaced in the sender's ft-worker log.
+    const surfaced = await awaitLogLine(sendChild, surfacedRegex, 20000);
+    log('fault surfaced:', surfaced ? surfaced.slice(-90) : 'NO');
+    if (!surfaced) failures.push(`${label} REGRESSION: the fault was NOT surfaced (${surfacedRegex}) — silent, as before the fix`);
 
-    // (2) BOUNDED: the RECEIVER reaches a terminal outcome (completed OR interrupted)
-    //     within timeout — never an indefinite hang. (The receiver's inactivity
-    //     watchdog makes an unrecoverable stall LOUD + resumable.)
+    // (2) BOUNDED: the RECEIVER reaches a terminal outcome within timeout — never a hang.
     const terminal = await awaitLogLine(recvChild, /recv ev=(completed|interrupted|failed|canceled)/, WAIT_MS);
     log('receiver terminal outcome:', terminal ? terminal.replace(/.*recv ev=/, 'recv ev=').slice(0, 40) : 'NONE (HANG!)');
-    if (!terminal) failures.push('F-B1 HANG: the transfer never reached a terminal state within timeout (zombie)');
+    if (!terminal) failures.push(`${label} HANG: the transfer never reached a terminal state within timeout (zombie)`);
 
-    // Info only: did recovery also fully deliver? A miss here is the Phase-2 resupply
-    // gap (F-B11), NOT an F-B1 failure — as long as it terminated loudly above.
+    // Info only: full recovery vs the Phase-2 resupply gap (F-B11).
     const received = await awaitDelivery(recvDownloads, expected, 3000);
     const deliveredAll = received.size === expected.size;
-    log(`delivery: ${received.size}/${expected.size} files ${deliveredAll ? '(full recovery)' : '(INCOMPLETE — Phase-2 resupply gap F-B11; failed loud above, not an F-B1 miss)'}`);
+    log(`delivery: ${received.size}/${expected.size} files ${deliveredAll ? '(full recovery)' : '(INCOMPLETE — Phase-2 resupply gap F-B11; failed loud above, not a miss of the fault under test)'}`);
 
     return { pass: failures.length === 0, failures };
   } finally {
@@ -104,7 +105,12 @@ async function runFB1() {
 }
 
 async function main() {
-  const scenarios = { fb1: runFB1 };
+  const scenarios = {
+    // F-B1: the transfer signaling socket reports its own failure.
+    fb1: () => runScenario({ label: 'F-B1', fault: { cmd: 'dropFlowSocket', side: 'send', flowIndex: 1 }, surfacedRegex: /conn:error:signaling_(error|dropped|closed|timeout)/ }),
+    // F-B2: a worker RENDERER CRASH is detected (render-process-gone).
+    fb2: () => runScenario({ label: 'F-B2', fault: { cmd: 'killWorker', side: 'send', flowIndex: 1 }, surfacedRegex: /worker-gone:|error:worker_/ }),
+  };
   const run = scenarios[SCENARIO];
   if (!run) { console.error('unknown SPIKE_SCENARIO: ' + SCENARIO); process.exit(2); }
   try {
