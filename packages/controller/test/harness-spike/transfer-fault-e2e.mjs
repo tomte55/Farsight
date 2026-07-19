@@ -104,6 +104,45 @@ async function runScenario({ label, fault, surfacedRegex }) {
   }
 }
 
+// F-A7: a SENDER user-cancel must reach the receiver as a `cancel` frame so the
+// receiver terminates 'canceled', NOT a lingering (auto-resuming) 'interrupted'.
+// Unlike the transport faults this isn't ftTestFault — it's the real
+// transfer:cancel IPC path. Asserts the receiver logs recv ev=canceled and never
+// recv ev=interrupted.
+async function runFA7() {
+  const { cleanups, cleanupAll, tmp } = makeAttemptContext();
+  try {
+    const signalingUrl = await startSignaling(cleanups);
+    const { srcDir, expected } = await writeFaultPayload(await tmp('fault-src-'));
+    log(`F-A7: payload ${expected.size} files; flowCount=${FLOW_COUNT}`);
+
+    const { sendWs, hostId, hostPw, sendChild, recvChild } =
+      await bringUpPair({ signalingUrl, cleanups, tmp, extraEnv: { FARSIGHT_TEST_HOOKS: '1' } });
+
+    const sendRes = await cdpEval(sendWs, `window.farsightIpc.transferSend(${JSON.stringify({ target: { id: hostId, password: hostPw, flowCount: FLOW_COUNT }, paths: [srcDir] })})`);
+    if (!sendRes || sendRes.error || !sendRes.jobId) throw new Error('transfer:send failed: ' + JSON.stringify(sendRes));
+    const jobId = sendRes.jobId;
+
+    // Cancel MID-transfer (once bytes are flowing).
+    await awaitLogLine(sendChild, /send ev=progress/, 20000);
+    log('transfer flowing; issuing USER cancel on the sender...');
+    await cdpEval(sendWs, `window.farsightIpc.transferCancel(${JSON.stringify(jobId)})`);
+
+    const failures = [];
+    // The receiver must terminate 'canceled' (loud + deliberate), within timeout.
+    const canceled = await awaitLogLine(recvChild, /recv ev=canceled/, WAIT_MS);
+    log('receiver canceled event:', canceled ? 'YES' : 'NO');
+    if (!canceled) failures.push('F-A7: receiver never recorded ev=canceled after a sender cancel');
+    // And it must NOT fall back to the resumable 'interrupted' (the field bug).
+    const interrupted = recvChild.lines.some((l) => /recv ev=interrupted/.test(l));
+    if (interrupted) failures.push('F-A7 REGRESSION: receiver saw ev=interrupted (a sender cancel that arrived as a bare channel drop — auto-resumes a canceled transfer)');
+
+    return { pass: failures.length === 0, failures };
+  } finally {
+    await delay(500); await cleanupAll(); await delay(300);
+  }
+}
+
 async function main() {
   const scenarios = {
     // F-B1: the transfer signaling socket reports its own failure.
@@ -112,6 +151,8 @@ async function main() {
     fb2: () => runScenario({ label: 'F-B2', fault: { cmd: 'killWorker', side: 'send', flowIndex: 1 }, surfacedRegex: /worker-gone:|error:worker_/ }),
     // F-B3: an oversize ctrl frame throws + kills the channel — surfaced, not swallowed.
     fb3: () => runScenario({ label: 'F-B3', fault: { cmd: 'injectOversizeCtrl', side: 'send', flowIndex: 1, bytes: 300000 }, surfacedRegex: /error:dc_ft-ctrl|error:ctrl_send/ }),
+    // F-A7: sender user-cancel → receiver 'canceled', not lingering 'interrupted'.
+    fa7: runFA7,
   };
   const run = scenarios[SCENARIO];
   if (!run) { console.error('unknown SPIKE_SCENARIO: ' + SCENARIO); process.exit(2); }

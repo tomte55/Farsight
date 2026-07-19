@@ -204,6 +204,10 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // then hangs the receive and leaks the attach worker's hidden BrowserWindow.
   // Timer injected so a fake clock can prove the bound without a real wait.
   jobIdTimeoutMs = 30000, setTimer = setTimeout, clearTimer = clearTimeout,
+  // F-A7: how long cancel() waits after emitting the `cancel` frame for it to
+  // leave the wire, before tearing the channel down. Short (the frame is tiny);
+  // injected so a test can prove the ORDER (frame before close) without a real wait.
+  cancelFlushMs = 250,
   // SP3 Phase 4 auto-resume: when provided, an own-fleet interrupted send is
   // re-established via the resume watcher (getFleet resolves the peer's current
   // signalingId by deviceId). resumeOpts injects the watcher's timers for tests.
@@ -261,6 +265,11 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // -- disarming its approvalTimer via runSend's own `finally` -- so it can
   // never resurface later. Set alongside activeClose, cleared the same way.
   let activeAbort = null;
+  // F-A7: the ACTIVE send's sender.notifyCancel — sends a `cancel` ctrl frame to
+  // the receiver so a USER cancel lands as 'canceled' there, not a lingering
+  // (auto-resuming) 'interrupted'. Set alongside activeAbort, cleared the same way,
+  // and invoked by cancel() BEFORE activeClose (while the channel is still alive).
+  let activeCancelNotify = null;
   // Live receives, keyed by jobId, so cancel() can actually reach one. Sends are
   // serialized (one activeClose suffices); receives are explicitly NOT queue-gated,
   // so several can be in flight — this must be a map, not a single slot.
@@ -428,6 +437,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
           : createSender({ channel: opened.channel, jobId, manifest, sources, onEvent: onSendEvent, limiter });
         abortFn = (reason) => sender.abort(reason);
         activeAbort = abortFn;
+        activeCancelNotify = () => sender.notifyCancel(); // F-A7: cancel() calls this before teardown
         // Resilient multi-flow: when the supervisor re-dials a dead slot 0, hand
         // the sender the fresh ctrl channel so the control plane (OFFER/
         // range_report/complete) survives a slot-0 death. Registered AFTER the
@@ -496,7 +506,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
       if (recoverable) { emit(jobId, 'send', { type: 'interrupted' }); if (resumeWatcher) resumeWatcher.notify(); }
     } finally {
       disarmApprovalTimer();
-      if (activeClose === close) activeClose = null; // don't clobber a NEWER job's handle
+      if (activeClose === close) { activeClose = null; activeCancelNotify = null; } // don't clobber a NEWER job's handle
       if (activeAbort === abortFn) activeAbort = null; // ditto
       if (close) { try { await close(); } catch { /* ignore close errors */ } }
     }
@@ -517,6 +527,18 @@ export function createTransferService({ store, transferDir, consent, openChannel
       sendRunning = true;
       runSend(active).catch(() => {}); // runSend never rejects (settles `entry` itself)
     }
+  }
+
+  // F-A7: a receive that was terminated by a SENDER-initiated `cancel` frame
+  // fails 'canceled', but the orchestrator's saveRecord no-ops once settled and no
+  // cancel() call owns this path — so flip the persisted record to 'canceled' here
+  // (load + re-save, preserving manifest/perFile) instead of leaving a stale
+  // 'active'/'interrupted' row lingering. Best-effort; a receive that never got as
+  // far as persisting an 'active' record (cancel before accept) simply has nothing
+  // to flip.
+  async function persistReceiveCanceled(jobId) {
+    if (!jobId) return;
+    try { const job = await store.load(jobId); if (job) await store.save({ ...job, jobState: 'canceled' }); } catch { /* best effort */ }
   }
 
   // cancel(jobId): the ACTIVE job's channel is torn down via its close() (in
@@ -557,6 +579,19 @@ export function createTransferService({ store, transferDir, consent, openChannel
     queue.remove(jobId);
     if (isActive) {
       sendRunning = false;
+      // F-A7: BEFORE tearing the channel down, tell the receiver this is a
+      // deliberate CANCEL (a `cancel` ctrl frame it already handles → 'canceled'),
+      // then wait briefly for that frame to leave the wire. Without this the
+      // receiver only sees the channel vanish → its inactivity watchdog fires
+      // 'stalled' → recoverable 'interrupted', and an own-fleet receiver would
+      // AUTO-RESUME a transfer the user just canceled. Best-effort + bounded: a
+      // dead/slow channel just means the frame doesn't arrive and the receiver
+      // falls back to 'interrupted' (no worse than before). Sent while the channel
+      // is still alive (before activeClose), which is why the order matters.
+      if (activeCancelNotify) {
+        const notify = activeCancelNotify; activeCancelNotify = null;
+        try { notify(); await delay(cancelFlushMs); } catch { /* best effort */ }
+      }
       if (activeClose) { const c = activeClose; activeClose = null; try { await c(); } catch { /* ignore */ } }
       // Clear the stale handle AND promptly settle an unaccepted canceled
       // sender with reason 'canceled' (terminal -> recoverable=false ->
@@ -874,7 +909,13 @@ export function createTransferService({ store, transferDir, consent, openChannel
 
     activeReceives.set(jobId, { abort: (r) => receiver.abort(r) });
     try {
-      const result = await receiver.start();
+      let result;
+      try {
+        result = await receiver.start();
+      } catch (err) {
+        if (String(err && err.message) === 'canceled') await persistReceiveCanceled(jobId); // F-A7
+        throw err;
+      }
       // createMultiFlowReceiver's own persistRanges cadence stops once it
       // settles (stopReporter()) -- persist the TERMINAL state once more here so
       // a completed/failed job's record reflects final coverage, not whatever
@@ -991,6 +1032,9 @@ export function createTransferService({ store, transferDir, consent, openChannel
       receiverRef = receiver;
       try {
         return await receiver.start();
+      } catch (err) {
+        if (String(err && err.message) === 'canceled') await persistReceiveCanceled(currentJobId); // F-A7
+        throw err;
       } finally {
         if (currentJobId) activeReceives.delete(currentJobId);
         // Grace before tearing down the worker so the receiver's `complete` ack

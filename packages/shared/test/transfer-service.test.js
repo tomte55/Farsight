@@ -273,6 +273,76 @@ test('a receive surfaces the manifest on accept so the UI can label it before an
   expect(labeled).toBeTruthy(); // a receive event carried the manifest → name renders live
 });
 
+test('F-A7: cancelling an active send emits a `cancel` frame to the receiver BEFORE tearing the channel down', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const seq = []; // ordered log of ctrl frames + the sentinel close marker
+  const channel = {
+    sendCtrl(s) { seq.push(s); },
+    onCtrl() {}, onBulk() {},
+    sendBulk() { return new Promise(() => {}); }, // never resolves → the send stays in flight
+  };
+  const svc = createTransferService({
+    store: memStore(), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel, close: async () => { seq.push('__close__'); } }),
+    cancelFlushMs: 0, // no real wait in the test — we assert ORDER, not duration
+  });
+  const jobId = newJobId();
+  const p = svc.startSend({ jobId, manifest, sources, target: { id: 'dev', password: 'pw' } });
+  await until(() => seq.some((s) => s !== '__close__' && /"t":"offer/.test(s))); // send active: OFFER on the wire
+  await svc.cancel(jobId);
+
+  const cancelIdx = seq.findIndex((s) => s !== '__close__' && parseCtrlFrame(s)?.t === 'cancel');
+  const closeIdx = seq.indexOf('__close__');
+  expect(cancelIdx).toBeGreaterThanOrEqual(0);                 // a cancel frame was emitted
+  expect(parseCtrlFrame(seq[cancelIdx]).jobId).toBe(jobId);    // ...for this job
+  expect(closeIdx).toBeGreaterThanOrEqual(0);                  // the channel was torn down
+  expect(cancelIdx).toBeLessThan(closeIdx);                    // ...AFTER the frame went out (while alive)
+  await p.catch(() => {});
+});
+
+test('F-A7: a sender USER-cancel makes the receiver record `canceled`, not a resumable `interrupted`', async () => {
+  // A multi-chunk file over a PACED channel, so the transfer is observably in
+  // flight (not a one-microtask flush) and the cancel lands mid-transfer.
+  const src = join(tmp(), 'payload');
+  mkdirSync(src, { recursive: true });
+  writeFileSync(join(src, 'big.txt'), Buffer.alloc(2 * 1024 * 1024, 7)); // 16 chunks at the 128KB default
+  const { entries, sources } = await walkSource([{ path: src }]);
+  const manifest = buildManifestReal(entries);
+
+  // loopback() with a per-bulk delay on the sender side so bytes take real time —
+  // 16 chunks x 25ms gives a wide window to cancel mid-transfer deterministically.
+  const { sideA, sideB } = loopback();
+  const rawSendBulk = sideA.sendBulk.bind(sideA);
+  sideA.sendBulk = (b) => new Promise((r) => setTimeout(() => rawSendBulk(b).then(r), 25));
+
+  const recvStore = createJobsStore({ dir: tmp() });
+  const receiverSvc = createTransferService({
+    store: recvStore, transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    receiveCloseGraceMs: 0,
+  });
+  const sendEvents = [];
+  const senderSvc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    onEvent: (ev) => sendEvents.push(ev),
+    cancelFlushMs: 0,
+  });
+  const jobId = newJobId();
+  const recvP = receiverSvc.startReceive({ rendezvous: 'r1' });
+  const sendP = senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', password: 'pw' } });
+  // 'accepted' fires once the receiver has accepted — the transfer is now flowing
+  // (paced), so cancelling immediately lands mid-transfer, not before it engaged.
+  await until(() => sendEvents.some((e) => e.type === 'accepted'), 4000);
+
+  await senderSvc.cancel(jobId);
+  await Promise.allSettled([recvP, sendP]);
+
+  const recvJobs = await recvStore.list();
+  expect(recvJobs.some((j) => j.jobState === 'canceled')).toBe(true);       // the receiver knows it was CANCELED
+  expect(recvJobs.some((j) => j.jobState === 'interrupted')).toBe(false);   // NOT the resumable state that would auto-resume
+});
+
 test('SP3 P4: an own-fleet (linked) send passes target.linked to openChannel and records tier:fleet', async () => {
   const { manifest, sources } = await oneFileSource();
   const dest = tmp();

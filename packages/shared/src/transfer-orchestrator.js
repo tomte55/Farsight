@@ -156,6 +156,13 @@ export function createSender({
     // failed or the peer never accepted before the timeout. Rejects start()'s
     // promise (idempotent via `settled`); a no-op once the send has settled.
     abort(reason = 'aborted') { canceled = true; fail(new Error(reason)); },
+    // F-A7: a USER cancel notifies the receiver with a `cancel` ctrl frame (which
+    // the receiver already handles → terminates 'canceled') BEFORE the caller
+    // tears the channel down — so the receiver records 'canceled', not a lingering
+    // (own-fleet auto-resuming) 'interrupted'. Sender-initiated counterpart of the
+    // receiver's cancel frame. Best-effort; the caller waits briefly after this for
+    // the frame to flush, then closes. NOT called for a stalled/interrupted abort.
+    notifyCancel() { try { channel.sendCtrl(cancelFrame(jobId)); } catch { /* best effort */ } },
   };
 }
 
@@ -547,6 +554,10 @@ export function createMultiFlowSender({
       if (pendingWaiterResolve) pendingWaiterResolve();
       fail(new Error(reason));
     },
+    // F-A7: see createSender.notifyCancel. Sends on the CURRENT ctrl channel (the
+    // mutable `ctrl`, kept live across a slot-0 re-dial by setCtrl) so the cancel
+    // frame goes out on whichever channel is actually connected.
+    notifyCancel() { try { ctrl.sendCtrl(cancelFrame(jobId)); } catch { /* best effort */ } },
   };
 }
 
@@ -929,6 +940,11 @@ export function createReceiver({
     if (settled) return;
     const f = parseCtrlFrame(str);
     if (!f) return;
+    // F-A7: a SENDER-initiated cancel — terminate 'canceled' (fail sets `settled`,
+    // which guards every subsequent ctrl/bulk side effect above). Mirrors
+    // createMultiFlowReceiver's inbound-cancel handling; without it a single-flow
+    // receive ignored the frame and only fell to 'interrupted' via its watchdog.
+    if (f.t === 'cancel') { onEvent({ type: 'canceled' }); fail(new Error('canceled')); return; }
     if (f.t === 'offer') {
       if (job || offerAccum) return;
       await beginReceive({ offJobId: f.jobId, protoVer: f.protoVer, entries: f.entries });
