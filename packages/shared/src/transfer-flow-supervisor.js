@@ -278,15 +278,28 @@ export function createFlowSupervisor({
     // waiter as `all_slots_exhausted`; it simply declines to re-dial for now.
     if (!active || !isRunning()) return;
     if (slot.attempt >= maxRedialsPerSlot) {
-      // Budget spent and we reached here FROM the terminal handler, so the
-      // current worker is terminal and no timer is pending: this slot has given
-      // up re-dialing (a slot that never (re)connected within its budget — a
-      // genuinely-broken slot). That is the only place `dead` is set. Note this
-      // does NOT reject the waiter: the waiter reject is governed solely by the
-      // total-outage timer (armOutageTimer), so a common-mode drop where every
-      // slot goes dead still rides out until the outage window elapses, and any
-      // slot that reconnects meanwhile clears it.
-      slot.dead = true;
+      // Per-slot maxRedialsPerSlot is the WRONG giveup signal DURING A TOTAL
+      // outage: every slot is failing for one COMMON reason (the shared
+      // satellite/TURN link is down), not because THIS slot is individually
+      // broken. A common-mode Starlink outage routinely lasts 60-180s; letting a
+      // probe die at ~60s (budget spent on the grown backoff) leaves nothing
+      // dialing, so an outage that recovers in the 60-180s window can only end
+      // via `outage_giveup` → the heavyweight whole-transfer resume this phase
+      // exists to eliminate. So while liveCount()===0, do NOT go dead on a spent
+      // budget — keep probing at the capped (tail) backoff for the FULL outage
+      // window; recovery (a probe connects) or the outage timer (outageGiveupMs)
+      // decides the end. The per-slot cap applies ONLY when a flow is LIVE (a
+      // slot that can't connect while OTHERS are up IS individually broken —
+      // give up on it normally). `dead` is diagnostic only; the waiter reject is
+      // governed solely by the total-outage timer (armOutageTimer).
+      if (liveCount() > 0) {
+        slot.dead = true;
+        return;
+      }
+      // Total outage: re-dial on the tail backoff. Do NOT advance `attempt` (it's
+      // already at/above the array length, so backoffFor stays at the longest
+      // value) — this keeps the probe cycling until connect or outage giveup.
+      slot.timer = setTimer(() => dial(slotIndex), backoffFor(slot.attempt));
       return;
     }
     const delay = backoffFor(slot.attempt);

@@ -179,22 +179,29 @@ describe('transfer-flow-supervisor', () => {
     expect(createWorker.all.length).toBe(1); // ...but NO re-dial scheduled
   });
 
-  it('caps re-dials at maxRedialsPerSlot: the slot stops re-dialing afterward', () => {
-    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], maxRedialsPerSlot: 3 });
+  // Per-slot cap applies ONLY when a flow is LIVE (not a total outage): a slot
+  // that cannot connect while OTHER flows are up IS individually broken, so it
+  // goes dead after maxRedialsPerSlot. (During a total outage the probe slots
+  // keep dialing for the full outage window — see the recovery test below.)
+  it('caps re-dials at maxRedialsPerSlot when a flow is live: the failing slot stops re-dialing afterward', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 2, maxConcurrentDials: 2, backoff: [500], maxRedialsPerSlot: 3 });
     const sup = createFlowSupervisor(args);
     sup.start();
+    clock.advance(250); // slot 1 dialed
+    createWorker.latestFor(0).emit('connected'); // slot 0 ALIVE -> NOT a total outage
+    expect(sup.liveCount()).toBe(1);
 
-    // 3 allowed re-dials produce workers #2, #3, #4 (initial is #1)
+    // 3 allowed re-dials of slot 1 produce fresh slot-1 workers.
     for (let i = 0; i < 3; i += 1) {
-      createWorker.latestFor(0).emit('failed');
+      createWorker.latestFor(1).emit('failed');
       clock.advance(500);
     }
-    expect(createWorker.all.length).toBe(4);
+    expect(createWorker.all.filter((w) => w.slotIndex === 1).length).toBe(4); // initial + 3
 
-    // the 4th terminal is past the cap -> no further re-dial
-    createWorker.latestFor(0).emit('failed');
+    // the 4th terminal is past the cap AND a flow is live -> slot goes dead, no further re-dial
+    createWorker.latestFor(1).emit('failed');
     clock.advance(100000);
-    expect(createWorker.all.length).toBe(4);
+    expect(createWorker.all.filter((w) => w.slotIndex === 1).length).toBe(4);
   });
 
   it('resets the re-dial budget on connect: a slot that connected then dropped re-dials with attempt===0 (backoff[0])', () => {
@@ -511,6 +518,71 @@ describe('transfer-flow-supervisor', () => {
       }
     }
     expect(newSlots().size).toBe(6);
+  });
+
+  // Task 3 (review gap): during a TOTAL outage the probe slots must keep dialing
+  // for the FULL outage window — a per-slot budget must NOT kill them, because
+  // every slot is failing for one COMMON reason (the shared link is down). A
+  // common-mode Starlink outage routinely lasts 60-180s; if the probes died at
+  // ~60s (grown-backoff budget spent) an outage that recovers in the 60-180s
+  // window could only end via outage_giveup -> heavyweight whole-transfer resume.
+  it('total outage that recovers within outageGiveupMs: probes keep dialing PAST maxRedialsPerSlot and reconnect when the link returns', async () => {
+    const { clock, createWorker, args } = baseArgs({
+      flowCount: 2, maxConcurrentDials: 2, maxRedialsPerSlot: 8, outageGiveupMs: 180000,
+    });
+    delete args.backoff; // module DEFAULT grown backoff (500..15000)
+    const sup = createFlowSupervisor(args);
+    sup.start();
+    clock.advance(250); // slot 1's staggered initial dial (stays parked mid-dial)
+
+    const p = sup.awaitFlow();
+    let rejected = false;
+    p.catch(() => { rejected = true; });
+
+    // Nothing connects -> total outage from t=0. Drive slot 0 to keep FAILING,
+    // advancing 15000 (>= any backoff step) per round for 10 rounds -> t=150000:
+    // WELL past maxRedialsPerSlot(8) and the ~60s point where the OLD per-slot
+    // cap marked the slot dead, yet still under outageGiveupMs(180000).
+    for (let i = 0; i < 10; i += 1) {
+      createWorker.latestFor(0).emit('failed');
+      clock.advance(15000);
+    }
+    await Promise.resolve();
+    expect(rejected).toBe(false);                 // outage timer (180s) not reached
+    expect(clock.now()).toBe(150250);
+    // Probe kept re-dialing past the cap: initial + 10 re-dials = 11 slot-0 workers.
+    // (MUTATION: re-apply the per-slot dead cap during liveCount()===0 -> the slot
+    // dies at round 8 -> this count is < 11 -> this assertion fails.)
+    expect(createWorker.all.filter((w) => w.slotIndex === 0).length).toBe(11);
+
+    // The link returns: the still-dialing probe connects -> recovery, waiter resolves.
+    createWorker.latestFor(0).emit('connected');
+    await expect(p).resolves.toBeUndefined();
+    expect(sup.liveCount()).toBe(1);
+    expect(rejected).toBe(false);
+  });
+
+  // The fix must NOT defeat giveup: a genuine total outage that never recovers
+  // still rejects with outage_giveup at outageGiveupMs, even though the probes
+  // keep dialing the whole time.
+  it('genuine total outage that never recovers still gives up at outageGiveupMs (probes keep dialing but never connect)', async () => {
+    const { clock, createWorker, args } = baseArgs({
+      flowCount: 2, maxConcurrentDials: 2, maxRedialsPerSlot: 8, outageGiveupMs: 180000,
+    });
+    delete args.backoff;
+    const sup = createFlowSupervisor(args);
+    sup.start();
+    clock.advance(250);
+
+    const p = sup.awaitFlow();
+    // Probes cycle past the per-slot cap (no connect ever)...
+    for (let i = 0; i < 8; i += 1) {
+      createWorker.latestFor(0).emit('failed');
+      clock.advance(15000);
+    }
+    // ...then let the total-outage timer (armed at t=0) reach outageGiveupMs.
+    clock.advance(180000 - clock.now());
+    await expect(p).rejects.toThrow('outage_giveup');
   });
 
   // Task 3: the DEFAULT backoff grows to a longer tail so a slot that keeps
