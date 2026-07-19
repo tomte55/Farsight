@@ -8,7 +8,7 @@
 // #panic-warning), all of which pinned to bottom:0 and would otherwise collide.
 import { formatBytes, formatRate, formatDuration, etaSeconds, bytesDone } from './transfer-rate.js';
 
-const TERMINAL = ['done', 'canceled', 'error', 'declined'];
+const TERMINAL = ['done', 'canceled', 'error', 'declined', 'completed_with_errors'];
 
 const SIGNALING_TEXT = {
   connecting: { text: 'Connecting to signaling…', dot: 'acc' },

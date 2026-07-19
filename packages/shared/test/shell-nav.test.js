@@ -32,6 +32,7 @@ describe('activeTransferCount', () => {
       { state: 'canceled' },
       { state: 'error' },
       { state: 'declined' },
+      { state: 'completed_with_errors' },
     ];
     expect(activeTransferCount(jobs)).toBe(3);
   });
@@ -45,8 +46,15 @@ describe('activeTransferCount', () => {
     expect(activeTransferCount(undefined)).toBe(0);
   });
 
+  // F-A4: 'completed_with_errors' is a terminal state (a finished job with some
+  // per-file failures) — it must not keep lighting the rail badge as if the
+  // job were still moving.
+  test('a completed_with_errors job is treated as terminal, not active', () => {
+    expect(activeTransferCount([{ state: 'completed_with_errors' }])).toBe(0);
+  });
+
   test('TERMINAL_TRANSFER_STATES matches the renderer freeze list', () => {
-    expect([...TERMINAL_TRANSFER_STATES]).toEqual(['done', 'canceled', 'error', 'declined']);
+    expect([...TERMINAL_TRANSFER_STATES]).toEqual(['done', 'canceled', 'error', 'declined', 'completed_with_errors']);
   });
 });
 

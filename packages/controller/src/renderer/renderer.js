@@ -1913,6 +1913,10 @@ function computeQueueRows() {
   history.forEach((j) => {
     if (j.state === 'interrupted') rows.push({ jobId: j.jobId, section: 'history', kind: 'warn', action: 'none', job: j, opts: { cls: 'warnrow', meta: interruptedMeta(j), tag: 'Resuming' } });
     else if (j.state === 'done') rows.push({ jobId: j.jobId, section: 'history', kind: 'done', action: 'remove', job: j, opts: { cls: 'done', meta: stateLabel(j), tag: 'Done', action: 'remove' } });
+    // 'completed_with_errors' is terminal (F-A4) but not a clean failure — its
+    // meta text already says "Completed with errors", so the tag must agree
+    // instead of the generic 'Failed' a genuine error/cancel gets below.
+    else if (j.state === 'completed_with_errors') rows.push({ jobId: j.jobId, section: 'history', kind: 'fail', action: 'remove', job: j, opts: { cls: 'fail', meta: stateLabel(j), tag: 'Errors', action: 'remove' } });
     else rows.push({ jobId: j.jobId, section: 'history', kind: 'fail', action: 'remove', job: j, opts: { cls: 'fail', meta: stateLabel(j), tag: 'Failed', action: 'remove' } });
   });
   return { rows, waitingCount: waitingSends.length };
@@ -2321,7 +2325,7 @@ function showPage(name) {
 const railButtons = new Map();
 
 function buildRail() {
-  for (const item of railItems({ active: activePage, transferCount: activeTransferCount([...transferJobs.values()].filter((j) => j.state !== 'completed_with_errors')) })) {
+  for (const item of railItems({ active: activePage, transferCount: activeTransferCount([...transferJobs.values()]) })) {
     const b = document.createElement('button');
     b.className = `rail-item${item.selected ? ' sel' : ''}`;
     b.dataset.page = item.page;
@@ -2347,7 +2351,7 @@ function buildRail() {
 
 function renderRail() {
   if (railButtons.size === 0) { buildRail(); return; }
-  for (const item of railItems({ active: activePage, transferCount: activeTransferCount([...transferJobs.values()].filter((j) => j.state !== 'completed_with_errors')) })) {
+  for (const item of railItems({ active: activePage, transferCount: activeTransferCount([...transferJobs.values()]) })) {
     const entry = railButtons.get(item.page);
     if (!entry) continue;
     entry.btn.classList.toggle('sel', item.selected);

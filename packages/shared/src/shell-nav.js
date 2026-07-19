@@ -29,7 +29,7 @@ export function isShellPage(name) {
 
 // The transfer states a job never leaves. Single source of truth: renderer.js used
 // to define this list locally, and the host renderer keeps its own copy.
-export const TERMINAL_TRANSFER_STATES = Object.freeze(['done', 'canceled', 'error', 'declined']);
+export const TERMINAL_TRANSFER_STATES = Object.freeze(['done', 'canceled', 'error', 'declined', 'completed_with_errors']);
 
 // A job with no state yet has not settled, so it counts — a fresh job seeded by
 // onTransferEvent before its first typed event must still light the rail badge.

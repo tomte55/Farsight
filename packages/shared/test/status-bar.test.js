@@ -119,7 +119,13 @@ describe('buildStatusSegments — transfers', () => {
   test('terminal jobs never reach the bar', () => {
     const segs = buildStatusSegments({
       signaling: 'ready',
-      transfers: [{ ...job, state: 'done' }, { ...job, jobId: 'j3', state: 'error' }],
+      transfers: [
+        { ...job, state: 'done' },
+        { ...job, jobId: 'j3', state: 'error' },
+        // F-A4: a finished-with-some-failures job is terminal too — it must not
+        // keep rendering as a live status-bar segment.
+        { ...job, jobId: 'j4', state: 'completed_with_errors' },
+      ],
     });
     expect(segs.filter((s) => s.kind === 'transfer')).toHaveLength(0);
   });
