@@ -1,6 +1,6 @@
 // packages/controller/src/preload.cjs
 // CommonJS because the renderer runs with sandbox: true (R-7).
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 contextBridge.exposeInMainWorld('farsightIpc', {
   getScreenSource: () => ipcRenderer.invoke('get-screen-source'),
   getScreenSize: () => ipcRenderer.invoke('get-screen-size'),
@@ -70,6 +70,7 @@ contextBridge.exposeInMainWorld('farsightIpc', {
   transferCancel: (jobId) => ipcRenderer.invoke('transfer:cancel', jobId),
   transferRemove: (jobId) => ipcRenderer.invoke('transfer:remove', jobId),
   onTransferEvent: (cb) => ipcRenderer.on('transfer:event', (_e, ev) => cb(ev)),
+  pathForFile: (file) => webUtils.getPathForFile(file),
   // SP3 receive path (v2): the host-registration socket relays a TRANSFER_REQUEST,
   // which the renderer forwards to main; main round-trips consent (manifest preview)
   // before anything touches disk.
