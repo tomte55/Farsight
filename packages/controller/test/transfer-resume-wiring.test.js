@@ -21,20 +21,20 @@ describe('controller main: auto-resume wiring', () => {
     expect(main).toMatch(/startResumeWatcher\(\)/);
   });
 
-  test('sweeps stale active sends (recoverStaleSends) BEFORE starting the resume watcher', () => {
+  test('sweeps stale active sends (recoverStaleJobs) BEFORE starting the resume watcher', () => {
     // BUG 1 (field-diagnosed): a killed/restarted process left dir:'send' records
     // stuck at 'active' forever — impossible-by-definition once the app has just
-    // launched. recoverStaleSends() must run, and complete, before the watcher's
+    // launched. recoverStaleJobs() must run, and complete, before the watcher's
     // first sweep, or the watcher's first tick won't see the freshly-interrupted
     // records.
-    const sweepIdx = main.indexOf('recoverStaleSends()');
+    const sweepIdx = main.indexOf('recoverStaleJobs()');
     const watcherIdx = main.indexOf('startResumeWatcher()');
     expect(sweepIdx).toBeGreaterThan(-1);
     expect(watcherIdx).toBeGreaterThan(-1);
     expect(sweepIdx).toBeLessThan(watcherIdx);
     // Awaited, not fire-and-forget — the watcher's first sweep must see the
     // swept 'interrupted' records, not race the still-in-flight rewrite.
-    expect(main).toMatch(/await\s+getTransferService\(\)\.recoverStaleSends\(\)/);
+    expect(main).toMatch(/await\s+getTransferService\(\)\.recoverStaleJobs\(\)/);
   });
 
   test('transfer:send persists sourceRoots (the picked paths) for resume', () => {

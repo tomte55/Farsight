@@ -5,7 +5,7 @@
 // old process's [ft-worker] heartbeat kept beating for 24s after "controller
 // starting" from the new instance, which showed its own empty Transfers list).
 // Two instances sharing one jobs-store also makes BUG 1's startup sweep
-// (recoverStaleSends) dangerous: instance #2 could rewrite instance #1's
+// (recoverStaleJobs) dangerous: instance #2 could rewrite instance #1's
 // genuinely-live 'active' record to 'interrupted' out from under it, and the
 // resume watcher would then try to resume a job that is still actively sending.
 //
