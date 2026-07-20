@@ -138,6 +138,15 @@ async function readPersistedRanges(store, jobId) {
   if (!rec || rec.dir !== 'recv' || !Array.isArray(rec.perFile)) return {};
   const out = {};
   for (const pf of rec.perFile) {
+    // F-A2 clean-break (load-bearing — see transfer-service-multiflow.test.js
+    // "legacy single-flow recv ... restart from zero"): resume coverage ONLY
+    // from an explicit `ivals` range list. A legacy single-flow record has no
+    // `ivals`, so it yields {} here -> the coverage receiver re-sends every
+    // byte, overwriting any stale sequential `.part` before it can publish.
+    // Do NOT add a shortcut that infers coverage from `.part` size/existence
+    // (e.g. "size == final -> skip resend"): a preallocated sparse `.part` is
+    // full-size but mostly zero, so that shortcut republishes a zero-filled
+    // file. Completion must stay driven by tracked write-coverage, never disk size.
     if (pf && typeof pf.fileId !== 'undefined' && Array.isArray(pf.ivals)) out[pf.fileId] = pf.ivals;
   }
   return out;
