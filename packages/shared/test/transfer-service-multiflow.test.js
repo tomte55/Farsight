@@ -798,6 +798,60 @@ describe('transfer-service multi-flow: pre-consent join buffer (F-B6)', () => {
     await tick(5);
     expect(lateClosed).toBe(1);
   });
+
+  // Review fix: the primary test above only exercises the accept path, where
+  // pend.buffer is already empty by the time `finally` runs (the 'accepted'
+  // handler already drained it) -- so it never actually proves the `finally`
+  // leftover-close loop does anything. This pins that loop directly: consent
+  // is gated, a rolling-join is offered while still PENDING, then consent
+  // resolves FALSE (declined) -- the buffer is never drained by 'accepted'
+  // (which never fires on a decline), so only the `finally` leftover-close
+  // loop can close the buffered handle. Mutation-checked: deleting that loop
+  // makes this fail (see task-2-report.md fix-report addendum).
+  it('a declined (never-accepted) receive closes a buffered handle via the finally leftover-close loop, not a leak', async () => {
+    const srcDir = await tmp(); const dstDir = await tmp();
+    const sendStore = createJobsStore({ dir: await tmp() });
+    const recvStore = createJobsStore({ dir: await tmp() });
+    const data = new Uint8Array(1000).map((_, i) => (i * 13) & 0xff);
+    await writeFile(join(srcDir, 'f.bin'), data);
+    const entries = [{ fileId: 0, path: 'f.bin', size: data.length, mtime: 1 }];
+    const manifest = { entries, totalBytes: data.length, totalFiles: 1 };
+    const sources = new Map([[0, join(srcDir, 'f.bin')]]);
+
+    const { senderCtrl, receiverCtrl, senderFlows, receiverFlows } = link({ flowCount: 2 });
+    const SESSION = 'r-buf-decline';
+
+    // A consent we control: block until we release it, then DECLINE (false) --
+    // 'accepted' never fires, so the drain-on-accept path never runs.
+    let releaseConsent; const consentGate = new Promise((r) => { releaseConsent = r; });
+    const receiverSvc = createTransferService({
+      store: recvStore, transferDir: dstDir,
+      consent: async () => { await consentGate; return false; },
+      openChannel: async () => ({ ctrl: receiverCtrl, flows: receiverFlows, close: async () => {} }),
+      receiveCloseGraceMs: 20,
+    });
+    const senderSvc = createTransferService({
+      store: sendStore, transferDir: srcDir, consent: async () => true,
+      openChannel: async () => ({ ctrl: senderCtrl, flows: senderFlows, close: async () => {} }),
+    });
+
+    const jobId = 'e'.repeat(32);
+    const recvPromise = receiverSvc.startReceive({ rendezvous: SESSION });
+    await tick(10);
+    const sendPromise = senderSvc.startSend({ jobId, manifest, sources, target: { id: 'device-decline', flowCount: 2 } });
+
+    await tick(10);
+    let joinClosed = 0;
+    const joinHandle = { channel: { onBulk: () => {}, sendCtrl: () => {} }, flowIndex: 5, close: async () => { joinClosed += 1; } };
+    expect(receiverSvc.offerRollingJoin(SESSION, joinHandle, 5)).toBe('buffered');
+    expect(joinClosed).toBe(0); // held, not yet closed
+
+    releaseConsent(); // human declines -> 'accepted' never fires, receive tears down
+    await Promise.allSettled([sendPromise, recvPromise]);
+    await tick(30); // past receiveCloseGraceMs, teardown's finally has run
+
+    expect(joinClosed).toBe(1); // swept by the finally leftover-close loop, not leaked
+  });
 });
 
 // Final-review Important #2: transfer-service.js:891 computes
@@ -928,5 +982,35 @@ describe('Final-review #3: runMultiFlowReceive bounds await jobIdKnown', () => {
     await flush();
     expect(settled).toBe(false); // still hung -> proves the timeout (not something else) settles it
     expect(closeCount).toBe(0);
+  });
+
+  // Review fix (F-B6 follow-up): pins the jobId-timeout CATCH-path leak-close
+  // loop specifically -- a flow offered while pending, on a receive that never
+  // gets an OFFER at all (phantom group), must still be closed once `no_offer`
+  // fires. Only the catch-path loop (not the `finally` one, not the drain-on-
+  // accept path -- 'accepted' never fires here) can close it. Mutation-checked:
+  // deleting that loop makes this fail (see task-2-report.md fix-report addendum).
+  it('a buffered rolling-join is closed when the receive times out with no_offer (catch-path leak-close loop)', async () => {
+    const clk = fakeClock();
+    let closeCount = 0;
+    const ctrl = { sendCtrl() {}, onCtrl() {} };
+    const flows = [{ onBulk() {} }, { onBulk() {} }];
+    const svc = createTransferService({
+      store: createJobsStore({ dir: await tmp() }), transferDir: await tmp(), consent: async () => true,
+      openChannel: async () => ({ ctrl, flows, close: async () => { closeCount += 1; } }),
+      receiveCloseGraceMs: 0, jobIdTimeoutMs: 10000, setTimer: clk.setTimer, clearTimer: clk.clearTimer,
+    });
+
+    const recvPromise = svc.startReceive({ rendezvous: { sessionId: 'phantom-buf' } }).catch((e) => e.message);
+    await flush(); await flush(); // openChannel resolved, receivePending registered, timeout armed
+
+    let joinClosed = 0;
+    const joinHandle = { channel: {}, flowIndex: 5, close: async () => { joinClosed += 1; } };
+    expect(svc.offerRollingJoin('phantom-buf', joinHandle, 5)).toBe('buffered');
+    expect(joinClosed).toBe(0); // held, not yet closed
+
+    await clk.advance(10000); // reach the jobId timeout -> no_offer
+    expect(await recvPromise).toBe('no_offer');
+    expect(joinClosed).toBe(1); // swept by the catch-path leak-close loop, not leaked
   });
 });
