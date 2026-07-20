@@ -1,6 +1,6 @@
 // packages/shared/test/transfer-multiflow-sender.test.js
 import { describe, it, expect } from 'vitest';
-import { createMultiFlowSender } from '../src/transfer-orchestrator.js';
+import { createMultiFlowSender, createMultiFlowReceiver } from '../src/transfer-orchestrator.js';
 import { decodeBulkFrame } from '../src/transfer-chunk.js';
 import { parseCtrlFrame, acceptFrame, rangeReportFrame, completeFrame } from '../src/transfer-protocol.js';
 
@@ -724,5 +724,86 @@ describe('createMultiFlowSender — Task 6 stall-watchdog outage gate', () => {
     expect(typeof rejectAwait).toBe('function'); // still parked, not torn down by the watchdog
     rejectAwait(new Error('outage_giveup')); // supervisor gave up (outageGiveupMs elapsed)
     await expect(done).rejects.toThrow('no_live_flows'); // failed via the pool's awaitFlow-reject path
+  });
+});
+
+// Phase 2 Task 3 (one-path cleanup): the single-flow driver's regression test
+// for the v1.11.2 field bug ("a 2974-file folder packed the whole manifest
+// into ONE ft-ctrl OFFER (~300KB), overran the ~256KB channel limit, and the
+// send killed ft-ctrl before delivery -> receiver never saw the OFFER ->
+// controller stuck") was deleted along with the single-flow drivers it
+// exercised. batchEntriesBySize/offerBatchBytes is SHARED code — the
+// multi-flow sender chunks its OFFER the identical way (see :398-404 in the
+// orchestrator) — but nothing proved that end-to-end for createMultiFlowSender
+// + createMultiFlowReceiver until this test. Real drivers, a real (small)
+// simulated channel-size limit, and a manifest big enough to force
+// offer_begin -> offer_entries* -> offer_end instead of one legacy `offer`
+// frame.
+function sizedCtrlPair(maxBytes) {
+  let toA = null, toB = null;
+  const stats = { maxCtrl: 0, dropped: 0 };
+  const send = (s, deliver) => {
+    stats.maxCtrl = Math.max(stats.maxCtrl, s.length);
+    if (s.length > maxBytes) { stats.dropped += 1; return; } // oversized -> lost, as a real dc.send() throw would kill delivery
+    queueMicrotask(() => deliver && deliver(s));
+  };
+  const senderCtrl = { sendCtrl: (s) => send(s, toB), onCtrl: (cb) => { toA = cb; } };
+  const receiverCtrl = { sendCtrl: (s) => send(s, toA), onCtrl: (cb) => { toB = cb; } };
+  return { senderCtrl, receiverCtrl, stats };
+}
+
+// One bulk flow bridging a real sender's sendBulk straight to a real
+// receiver's onBulk registration.
+function bulkBridge() {
+  let cb = null;
+  const senderFlow = { isAlive: () => true, sendBulk: (buf) => { queueMicrotask(() => cb && cb(buf)); return Promise.resolve(); } };
+  const receiverFlow = { onBulk: (fn) => { cb = fn; } };
+  return { senderFlow, receiverFlow };
+}
+
+describe('createMultiFlowSender + createMultiFlowReceiver: OFFER chunking over a size-limited channel', () => {
+  it('a large manifest is split into offer_begin/offer_entries*/offer_end so no ctrl frame exceeds the channel limit, and the receiver reassembles every file', async () => {
+    const N = 60;
+    const entries = [];
+    const sources = new Map();
+    for (let i = 0; i < N; i += 1) {
+      const path = `file-with-a-moderately-long-name-${String(i).padStart(4, '0')}.dat`;
+      const data = new Uint8Array(24).fill((i * 37 + 3) & 0xff);
+      sources.set(i, data);
+      entries.push({ fileId: i, path, size: data.length, mtime: 0 });
+    }
+    const manifest = { entries, totalBytes: entries.reduce((a, e) => a + e.size, 0), totalFiles: N };
+
+    const MAX = 4096; // pretend data-channel message limit -- one legacy `offer` frame for 60 files would exceed this
+    const { senderCtrl, receiverCtrl, stats } = sizedCtrlPair(MAX);
+    const { senderFlow, receiverFlow } = bulkBridge();
+
+    const dest = new Map();
+    const rx = createMultiFlowReceiver({
+      ctrl: receiverCtrl, flows: [receiverFlow], jobId: JOB, consent: async () => true,
+      openPart: (relPath) => {
+        const entry = entries.find((e) => e.path === relPath);
+        const b = new Uint8Array(entry.size);
+        dest.set(relPath, b);
+        return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null });
+      },
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      reportIntervalMs: 10_000,
+    });
+    const rxDone = rx.start();
+
+    const sender = createMultiFlowSender({
+      ctrl: senderCtrl, flows: [senderFlow], jobId: JOB, manifest, chunkSize: 512, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash, offerBatchBytes: 1024,
+    });
+    const sndDone = sender.start();
+
+    const rxRes = await rxDone; // a dropped/oversized OFFER would leave this hanging
+    await sndDone;
+
+    expect(rxRes.ok).toBe(true);
+    expect(stats.dropped).toBe(0);          // no ctrl frame exceeded the channel limit
+    expect(stats.maxCtrl).toBeLessThanOrEqual(MAX);
+    for (const e of entries) expect([...dest.get(e.path)]).toEqual([...sources.get(e.fileId)]);
   });
 });

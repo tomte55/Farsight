@@ -2,11 +2,10 @@
 // receiver orchestrator, jobs-store, and serial send queue into an app-facing
 // service. Exercised via loopback channels — no Electron, no real WebRTC.
 import { expect, test, afterEach, describe, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, utimesSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createTransferService, resolveFlowCount, isAuthoritativeFlowError, jobStateForCompletion } from '../src/transfer-service.js';
-import { createReceiver, createSender } from '@farsight/shared/transfer-orchestrator';
 import { walkSource } from '@farsight/shared/transfer-io';
 import { buildManifest as buildManifestReal } from '@farsight/shared/transfer-manifest';
 import { createJobsStore } from '@farsight/shared/jobs-store';
@@ -40,8 +39,8 @@ function loopback() {
     const side = {
       ctrlCb: null, bulkCb: null, peer: null,
       sendCtrl(s) { queueMicrotask(() => side.peer.ctrlCb && side.peer.ctrlCb(s)); },
-      // Deliver the payload AS-IS (no Buffer.from() coercion): single-flow's
-      // createReceiver does its own `Buffer.from(buf)` on arrival (works from
+      // Deliver the payload AS-IS (no Buffer.from() coercion): the removed
+      // single-flow receiver driver did its own `Buffer.from(buf)` on arrival (works from
       // either an ArrayBuffer or a Buffer), but multi-flow's decodeBulkFrame
       // (transfer-chunk.js) requires a genuine `buf instanceof ArrayBuffer` --
       // pre-coercing to a Node Buffer here made decodeBulkFrame silently
@@ -73,55 +72,6 @@ function single(channel) {
   if (typeof channel.isAlive !== 'function') channel.isAlive = () => true;
   return { ctrl: channel, flows: [channel] };
 }
-
-// A loopback that mimics a real WebRTC data channel's max message size: a ctrl
-// frame larger than maxBytes is DROPPED (as the real send() throws + kills the
-// channel), and the largest frame seen is recorded.
-function sizedLoopback(maxBytes) {
-  const A = makeSide(), B = makeSide(); A.peer = B; B.peer = A;
-  const stats = { maxCtrl: 0, dropped: 0 };
-  return { sideA: A, sideB: B, stats };
-  function makeSide() {
-    const side = {
-      ctrlCb: null, bulkCb: null, peer: null,
-      sendCtrl(s) {
-        stats.maxCtrl = Math.max(stats.maxCtrl, s.length);
-        if (s.length > maxBytes) { stats.dropped += 1; return; } // oversized → lost
-        queueMicrotask(() => side.peer.ctrlCb && side.peer.ctrlCb(s));
-      },
-      sendBulk(b) { const buf = Buffer.from(b); return new Promise((r) => queueMicrotask(() => { side.peer.bulkCb && side.peer.bulkCb(buf); r(); })); },
-      onCtrl(cb) { side.ctrlCb = cb; }, onBulk(cb) { side.bulkCb = cb; },
-    };
-    return side;
-  }
-}
-
-test('SP3 bugfix: a large-manifest OFFER is chunked so it fits the data-channel message limit (a big folder no longer kills ft-ctrl)', async () => {
-  // Repro of the field bug: a 2974-file folder packed the whole manifest into ONE
-  // ft-ctrl OFFER (~300KB), overran the ~256KB channel limit, and the send killed
-  // ft-ctrl before delivery → receiver never saw the OFFER → controller stuck.
-  const srcDir = tmp();
-  const N = 60;
-  for (let i = 0; i < N; i++) {
-    writeFileSync(join(srcDir, `file-with-a-moderately-long-name-${String(i).padStart(4, '0')}.dat`), Buffer.from('x'.repeat(24)));
-  }
-  const { entries, sources } = await walkSource([{ path: srcDir }]);
-  const manifest = buildManifestReal(entries);
-  const dest = tmp();
-  const MAX = 4096; // pretend data-channel message limit (legacy single OFFER > this)
-  const { sideA, sideB, stats } = sizedLoopback(MAX);
-  const rx = createReceiver({ channel: sideB, destRoot: dest, store: memStore(), consent: async () => true, inactivityMs: 1500 });
-  const sender = createSender({ channel: sideA, jobId: '3343755fbfe467755d81fb251260178b', manifest, sources, chunkSize: 512, offerBatchBytes: 1024, completionTimeoutMs: 5000 });
-  const rxP = rx.start();
-  const sndP = sender.start();
-
-  const rxRes = await rxP;              // legacy single OFFER would be dropped → this would stall
-  await sndP;
-  expect(rxRes.ok).toBe(true);
-  expect(stats.dropped).toBe(0);        // no frame exceeded the channel limit
-  expect(stats.maxCtrl).toBeLessThanOrEqual(MAX);
-  for (const e of manifest.entries) expect(existsSync(join(dest, ...e.path.split('/')))).toBe(true);
-});
 
 test('loopback send -> receive through the service layer lands files byte-identical and records done', async () => {
   const srcRoot = tmp();
@@ -174,9 +124,10 @@ test('loopback send -> receive through the service layer lands files byte-identi
 });
 
 // Plan 3 Task 6: createTransferService threads its ONE rate limiter (real or
-// injected) into the single-flow createSender it constructs -- proved here
-// end to end, through the real loopback send/receive path, with an injected
-// fake limiter whose take() records the byte counts it was asked to pace.
+// injected) into the sender it constructs -- proved here end to end, through
+// the real loopback send/receive path (Phase 2: now always the multi-flow
+// send pool), with an injected fake limiter whose take() records the byte
+// counts it was asked to pace.
 test('Plan 3 Task 6: an injected rateLimiter is threaded into the send path -- take() paces every chunk sent', async () => {
   const srcRoot = tmp();
   const src = join(srcRoot, 'payload');
@@ -558,7 +509,7 @@ test('SECURITY: happy path — a contact resuming a genuinely UNFINISHED job wit
   // then the connection drops before job_done. A fresh re-offer of the SAME
   // jobId with the IDENTICAL manifest (an unchanged source re-walked) must NOT
   // re-prompt — this is the whole point of the SP3 consent-memo feature.
-  // Frames are driven by hand (not a real createSender) so the first "peer" can
+  // Frames are driven by hand (not a real sender driver) so the first "peer" can
   // be stopped deliberately right after ACCEPT, before any file bytes/job_done —
   // producing a genuinely 'active' (not 'done') persisted record, which a full
   // real send would not let us observe from outside.
@@ -1122,37 +1073,6 @@ test('SP3 P4: startReceive threads the own-fleet linked flag into openChannel', 
   expect(recvOpenArgs).toMatchObject({ role: 'attach', sessionId: 's-link', linked: true });
 });
 
-test('SP3 bugfix: a file the receiver ALREADY HAS (skip-existing) completes instead of hanging, and leaves no .part', async () => {
-  // Repro of the field bug: sending a file whose name already exists in the dest
-  // (identical size+mtime) → the sender skips it entirely (no FILE_END), but the
-  // receiver used to park it in `pending` awaiting a FILE_END that never comes →
-  // stalled receive + orphaned .part + sender hung on the delivery ack.
-  const srcDir = tmp();
-  const srcFile = join(srcDir, 'note.txt');
-  writeFileSync(srcFile, Buffer.from('identical content '.repeat(80)));
-  const { entries, sources } = await walkSource([{ path: srcFile }]);
-  const manifest = buildManifestReal(entries);
-  const entry = manifest.entries[0];
-
-  // Dest already holds an identical file with matching size+mtime → skip-existing.
-  const dest = tmp();
-  writeFileSync(join(dest, entry.path), readFileSync(srcFile));
-  const secs = entry.mtime / 1000;
-  utimesSync(join(dest, entry.path), secs, secs);
-
-  const { sideA, sideB } = loopback();
-  const rx = createReceiver({ channel: sideB, destRoot: dest, store: memStore(), consent: async () => true, inactivityMs: 800 });
-  const sender = createSender({ channel: sideA, jobId: '23bcd9bb42b365395b23d495259546cb', manifest, sources, chunkSize: 64, completionTimeoutMs: 3000 });
-  const rxP = rx.start();
-  const sndP = sender.start();
-
-  const rxRes = await rxP;                 // must RESOLVE (not reject 'stalled')
-  expect(rxRes).toEqual({ jobId: '23bcd9bb42b365395b23d495259546cb', ok: true });
-  await sndP;                              // sender resolves only on the complete ack
-  expect(existsSync(join(dest, entry.path + '.part'))).toBe(false); // no orphan .part
-  expect(readFileSync(join(dest, entry.path))).toEqual(readFileSync(srcFile));
-});
-
 // A channel that never feeds anything back — models a peer that never attaches/
 // accepts (offline host, dropped rendezvous).
 function deadChannel() {
@@ -1313,8 +1233,8 @@ test('serial queue: two enqueued sends never have more than one active channel a
     // Phase 2 (one path): the service under test always sends through
     // createMultiFlowSender now, so the hand-driven peer on the other end of
     // this loopback must speak the same multi-flow wire protocol (self-
-    // addressed bulk frames) -- a bare single-flow createReceiver() here would
-    // misinterpret the per-chunk header as file bytes. Drive it through a
+    // addressed bulk frames) -- a bare single-flow receiver driver (removed)
+    // here would misinterpret the per-chunk header as file bytes. Drive it through a
     // second createTransferService (same high-level API the rest of this file
     // uses), not a hand-rolled createMultiFlowReceiver (its openPart/
     // verifyAndFinalize/persistRanges wiring is exactly what transfer-

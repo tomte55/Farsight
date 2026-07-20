@@ -448,8 +448,8 @@ describe('transfer-service multi-flow branch: close() teardown on every settle p
     // separate concern (see the note below) and isn't asserted here.
     expect(closeCount).toBeGreaterThanOrEqual(1);
     // NOTE (discovered while writing this test, out of scope for Task 5):
-    // unlike single-flow's createReceiver, which persists an 'active' record
-    // immediately on accept (transfer-orchestrator.js's saveRecord('active')),
+    // unlike the removed single-flow receiver driver, which persisted an
+    // 'active' record immediately on accept (transfer-orchestrator.js's saveRecord('active')),
     // createMultiFlowReceiver only persists via the periodic persistRanges tick
     // (default reportIntervalMs=3000) — so canceling a multi-flow receive THIS
     // early (before the first tick) leaves no jobs-store record to flip to

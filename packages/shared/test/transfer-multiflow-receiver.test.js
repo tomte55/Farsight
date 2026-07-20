@@ -91,8 +91,8 @@ describe('createMultiFlowReceiver', () => {
   // UI-event-wiring gap: the receiver drove real bytes onto disk but never told
   // the app UI the transfer had moved off "Waiting for approval" (no 'accepted')
   // nor that any bytes had arrived (no aggregate 'progress') — a WORKING
-  // transfer looked frozen. Mirrors single-flow createReceiver's onEvent({type:
-  // 'accepted', manifest: m}), emitted right after consent, before the accept
+  // transfer looked frozen. Mirrors the removed single-flow receiver driver's
+  // onEvent({type: 'accepted', manifest: m}), emitted right after consent, before the accept
   // frame goes out.
   it('emits an accepted event carrying the manifest right after consent (mirrors single-flow)', async () => {
     const size = 8;
@@ -287,7 +287,7 @@ describe('createMultiFlowReceiver', () => {
   // periodic tick() (~reportIntervalMs later, default 3s). A multi-flow receive
   // canceled/interrupted within that window left NO jobs-store record at all —
   // it vanished from the Transfers list and could never be resumed. Mirrors
-  // single-flow createReceiver's immediate saveRecord('active') on accept. Uses
+  // the removed single-flow receiver driver's immediate saveRecord('active') on accept. Uses
   // a huge reportIntervalMs (never fired via tickOnce here) so the ONLY way
   // persistRanges could have been called is the new immediate accept-path call.
   it('persists the record ONCE immediately on accept, independent of the periodic tick (no vanish on fast cancel)', async () => {
@@ -475,8 +475,8 @@ describe('createMultiFlowReceiver', () => {
     expect(unboundedTracker.coveredFor(4).toJSON()).toEqual([]);          // untouched
   });
 
-  // Unlike single-flow createReceiver — whose ctrl handler has no `cancel`
-  // branch at all (a single-flow receive instead recovers from a vanished
+  // Unlike the removed single-flow receiver driver — whose ctrl handler had no
+  // `cancel` branch at all (a single-flow receive instead recovers from a vanished
   // sender via its own inactivity watchdog, once the sender's channel
   // teardown stops bytes arriving) — the multi-flow receiver adds EXPLICIT
   // inbound-cancel handling: a sender-initiated cancel must settle the
@@ -512,8 +512,8 @@ describe('createMultiFlowReceiver', () => {
     expect(fake.pending()).toBe(0); // every timer (reporter + watchdog) cleared, none dangling
   });
 
-  // Mirrors createReceiver's inactivity watchdog: a consented, active receive
-  // that stops getting ANY ctrl/bulk traffic (sender vanished, connection
+  // Mirrors the removed single-flow receiver driver's inactivity watchdog: a
+  // consented, active receive that stops getting ANY ctrl/bulk traffic (sender vanished, connection
   // dropped) must not hang at 'active' forever.
   it('fails the receive on inactivity: no ctrl/bulk frame within inactivityMs after accept stalls it', async () => {
     const size = 8;
@@ -595,8 +595,8 @@ describe('createMultiFlowReceiver', () => {
   // frames — pokeWatchdog() is called at the very top of the ctrl handler,
   // before the frame is even parsed for jobId/type. Uses a `prompting` frame
   // as the poke: it's a valid, parseable ctrl frame for this jobId that the
-  // multi-flow receiver's ctrl handler has NO case for (unlike single-flow
-  // createReceiver, it never surfaces a 'prompting' event), so besides the
+  // multi-flow receiver's ctrl handler has NO case for (unlike the removed
+  // single-flow receiver driver, it never surfaces a 'prompting' event), so besides the
   // watchdog reset it has no side effect at all — nothing here completes or
   // cancels the transfer, isolating exactly the ctrl-side reset behavior.
   it('watchdog reset: a ctrl frame delivered just before the deadline delays the stall past it', async () => {
@@ -690,7 +690,7 @@ describe('createMultiFlowReceiver', () => {
   // UI-legibility gap: live-observed as sender "21/22 · 0 MB/s", receiver
   // "20/22 · 0 MB/s", no phase label — the receiver never told the UI it had
   // entered the verify-only tail (all bytes in, still hashing/finalizing).
-  // Mirrors single-flow createReceiver's job_done `pending.size > 0` check,
+  // Mirrors the removed single-flow receiver driver's job_done `pending.size > 0` check,
   // but computed from router coverage since multi-flow completion is
   // coverage-defined. Two files: file 0 finalizes fast; file 1's
   // verifyAndFinalize hangs on a controllable promise so the receive sits in

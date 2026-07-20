@@ -147,8 +147,9 @@ function ivalsCoverFile(ivals, size) {
 
 // Persist the multi-flow receive record with each file's current byte-ranges
 // attached (perFile[i].ivals), alongside the same fields the single-flow receive
-// record carries (dir/tier/peer/destRoot/manifest/jobState -- see createReceiver's
-// own saveRecord in transfer-orchestrator.js). Called periodically
+// record carried (dir/tier/peer/destRoot/manifest/jobState -- see the removed
+// single-flow receiver driver's own saveRecord, formerly in
+// transfer-orchestrator.js). Called periodically
 // (createMultiFlowReceiver's persistRanges seam, every reportIntervalMs) and once
 // more with the terminal state when the receive settles. store.save() is itself
 // serialized per jobId (jobs-store.js), so concurrent calls here are safe
