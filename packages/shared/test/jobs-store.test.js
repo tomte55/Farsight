@@ -3,8 +3,7 @@ import { expect, test, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
-import { createJobsStore, JOB_STATES } from '../src/jobs-store.js';
-import { nextJobState } from '../src/transfer-engine.js';
+import { createJobsStore } from '../src/jobs-store.js';
 
 const dirs = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), 'ftjobs-')); dirs.push(d); return d; }
@@ -115,13 +114,6 @@ test('remove never escapes the store dir for a traversal-shaped jobId (no-op, do
 
   await store.remove('../' + basename(outsideDir) + '/victim');
   expect(existsSync(join(outsideDir, 'victim.json'))).toBe(true); // untouched
-});
-
-test('JOB_STATES covers every state the engine reducer can reach', () => {
-  const events = ['pause', 'resume', 'disconnect', 'reconnect', 'complete', 'fail', 'cancel', 'retry'];
-  const reachable = new Set(['active']); // the initial state
-  for (const s of [...JOB_STATES]) for (const e of events) reachable.add(nextJobState(s, e));
-  for (const s of reachable) expect(JOB_STATES).toContain(s);
 });
 
 test('concurrent saves for the SAME jobId never publish a corrupt record', async () => {

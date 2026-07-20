@@ -3,7 +3,7 @@ import { expect, test, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { confineDestPath, freeSpaceBytes, hasFreeSpace } from '../src/transfer-io.js';
+import { confineDestPath } from '../src/transfer-io.js';
 
 const dirs = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), 'ftio-')); dirs.push(d); return d; }
@@ -22,15 +22,6 @@ test('confineDestPath rejects traversal / absolute / drive-letter escapes', () =
   expect(() => confineDestPath(root, '/etc/passwd')).toThrow();
   expect(() => confineDestPath(root, 'C:/Windows')).toThrow();
   expect(() => confineDestPath(root, '')).toThrow();
-});
-
-test('freeSpaceBytes is a positive number and hasFreeSpace compares to it', async () => {
-  const root = tmp();
-  const free = await freeSpaceBytes(root);
-  expect(typeof free).toBe('number');
-  expect(free).toBeGreaterThan(0);
-  expect(await hasFreeSpace(root, 0)).toBe(true);
-  expect(await hasFreeSpace(root, free + 1_000_000_000_000)).toBe(false);
 });
 
 import { hashFile } from '../src/transfer-io.js';
@@ -83,68 +74,23 @@ test('walkSource recurses a directory with posix relative paths under the dir na
   expect(new Set(entries.map((e) => e.fileId)).size).toBe(entries.length);
 });
 
-import { createPartFile } from '../src/transfer-io.js';
-import { statSync, readFileSync } from 'node:fs';
+// createPartFile/sendFile (single-flow-only) were removed in Phase 2 Task 6 (F-C1/C2
+// dead code) along with hasFreeSpace/freeSpaceBytes/publishFullyReceivedFile.
+// finalizeReceivedFile survives (it's still exercised as a verifyAndFinalize strategy
+// by the multi-flow receiver in transfer-io-sparse.test.js and
+// transfer-multiflow-service-loopback.test.js) — paired here with the coverage path's
+// createSparsePartFile instead of the deleted createPartFile.
+import { createSparsePartFile, finalizeReceivedFile } from '../src/transfer-io.js';
+import { statSync, readFileSync, existsSync } from 'node:fs';
 
-test('createPartFile writes bytes to a .part and tracks a live hash', async () => {
+test('finalizeReceivedFile verifies via completion read, renames .part and restores mtime', async () => {
   const root = tmp();
-  const pf = await createPartFile({ destRoot: root, relPath: 'out/data.bin', resumeFrom: 0, hashLive: true });
-  expect(pf.offset).toBe(0);
-  const chunk = Buffer.from('hello world');
-  await pf.write(chunk);
-  await pf.fsync();
-  await pf.close();
-  expect(statSync(pf.partPath).size).toBe(chunk.length);
-  expect(readFileSync(pf.partPath)).toEqual(chunk);
-  expect(pf.liveDigest()).toBe(createHash('sha256').update(chunk).digest('hex'));
-});
-
-test('createPartFile resumes append at the existing .part size', async () => {
-  const root = tmp();
-  const first = await createPartFile({ destRoot: root, relPath: 'r.bin', resumeFrom: 0, hashLive: false });
-  await first.write(Buffer.from('AAAA'));
-  await first.fsync(); await first.close();
-  expect(first.liveDigest()).toBeNull();
-
-  const resumed = await createPartFile({ destRoot: root, relPath: 'r.bin', resumeFrom: 4, hashLive: false });
-  expect(resumed.offset).toBe(4);
-  await resumed.write(Buffer.from('BBBB'));
-  await resumed.close();
-  expect(readFileSync(resumed.partPath)).toEqual(Buffer.from('AAAABBBB'));
-});
-
-test('createPartFile forces completion-read hashing when resuming (no valid live hash)', async () => {
-  const root = tmp();
-  const a = await createPartFile({ destRoot: root, relPath: 'resume-hash.bin', resumeFrom: 0, hashLive: true });
-  await a.write(Buffer.from('AAAA')); await a.close();
-  // Resuming re-opens the writer → the live hash cannot cover the prior bytes,
-  // so liveDigest() must be null, forcing finalize to do a completion read.
-  const b = await createPartFile({ destRoot: root, relPath: 'resume-hash.bin', resumeFrom: 4, hashLive: true });
-  expect(b.offset).toBe(4);
-  await b.write(Buffer.from('BBBB')); await b.close();
-  expect(b.liveDigest()).toBeNull();
-});
-
-test('createPartFile with resumeFrom 0 truncates a stale .part', async () => {
-  const root = tmp();
-  const a = await createPartFile({ destRoot: root, relPath: 's.bin', resumeFrom: 0, hashLive: false });
-  await a.write(Buffer.from('STALE-DATA')); await a.close();
-  const b = await createPartFile({ destRoot: root, relPath: 's.bin', resumeFrom: 0, hashLive: false });
-  expect(b.offset).toBe(0);
-  await b.write(Buffer.from('X')); await b.close();
-  expect(readFileSync(b.partPath)).toEqual(Buffer.from('X'));
-});
-
-import { finalizeReceivedFile } from '../src/transfer-io.js';
-import { existsSync } from 'node:fs';
-
-test('finalizeReceivedFile with a matching live hash renames .part and restores mtime', async () => {
-  const root = tmp();
-  const pf = await createPartFile({ destRoot: root, relPath: 'ok/file.bin', resumeFrom: 0, hashLive: true });
+  const pf = await createSparsePartFile({ destRoot: root, relPath: 'ok/file.bin' });
   const data = Buffer.from('payload-bytes-1234');
-  await pf.write(data); await pf.fsync(); await pf.close();
+  await pf.writeAt(0, data); await pf.fsync(); await pf.close();
+  const expected = createHash('sha256').update(data).digest('hex');
   const mtime = 1_700_000_000_000; // ms
-  const r = await finalizeReceivedFile({ partFile: pf, expectedHash: pf.liveDigest(), mtime });
+  const r = await finalizeReceivedFile({ partFile: pf, expectedHash: expected, mtime });
   expect(r.ok).toBe(true);
   expect(existsSync(pf.partPath)).toBe(false);
   expect(existsSync(pf.finalPath)).toBe(true);
@@ -153,58 +99,12 @@ test('finalizeReceivedFile with a matching live hash renames .part and restores 
   expect(Math.round(statSync(pf.finalPath).mtimeMs / 1000)).toBe(Math.round(mtime / 1000));
 });
 
-test('finalizeReceivedFile falls back to a completion read when there is no live hash', async () => {
-  const root = tmp();
-  const pf = await createPartFile({ destRoot: root, relPath: 'noh.bin', resumeFrom: 0, hashLive: false });
-  const data = Buffer.from('restart-path-bytes');
-  await pf.write(data); await pf.close();
-  const expected = createHash('sha256').update(data).digest('hex');
-  expect(pf.liveDigest()).toBeNull();
-  const r = await finalizeReceivedFile({ partFile: pf, expectedHash: expected, mtime: 1_700_000_000_000 });
-  expect(r.ok).toBe(true);
-  expect(existsSync(pf.finalPath)).toBe(true);
-});
-
 test('finalizeReceivedFile discards the .part on a hash mismatch', async () => {
   const root = tmp();
-  const pf = await createPartFile({ destRoot: root, relPath: 'bad.bin', resumeFrom: 0, hashLive: true });
-  await pf.write(Buffer.from('corrupted')); await pf.close();
+  const pf = await createSparsePartFile({ destRoot: root, relPath: 'bad.bin' });
+  await pf.writeAt(0, Buffer.from('corrupted')); await pf.close();
   const r = await finalizeReceivedFile({ partFile: pf, expectedHash: 'deadbeef', mtime: 1 });
   expect(r.ok).toBe(false);
   expect(existsSync(pf.partPath)).toBe(false);
   expect(existsSync(pf.finalPath)).toBe(false);
-});
-
-import { sendFile } from '../src/transfer-io.js';
-
-test('sendFile hashes the whole file and streams every byte when offset is 0', async () => {
-  const root = tmp();
-  const f = join(root, 'src.bin');
-  const data = Buffer.from('0123456789'.repeat(500)); // 5000 bytes
-  writeFileSync(f, data);
-  const got = [];
-  const { hash } = await sendFile({ sourcePath: f, offset: 0, chunkSize: 512, onChunk: async (b) => { got.push(Buffer.from(b)); } });
-  expect(hash).toBe(createHash('sha256').update(data).digest('hex'));
-  expect(Buffer.concat(got)).toEqual(data);
-});
-
-test('sendFile rejects and tears down the stream when onChunk throws', async () => {
-  const root = tmp();
-  const f = join(root, 'abort.bin');
-  writeFileSync(f, Buffer.alloc(10000));
-  await expect(sendFile({
-    sourcePath: f, offset: 0, chunkSize: 256, onChunk: async () => { throw new Error('boom'); },
-  })).rejects.toThrow('boom');
-});
-
-test('sendFile hashes the whole file but only streams bytes from the offset on resume', async () => {
-  const root = tmp();
-  const f = join(root, 'src2.bin');
-  const data = Buffer.from('ABCDEFGHIJ'.repeat(300)); // 3000 bytes
-  writeFileSync(f, data);
-  const offset = 1234;
-  const got = [];
-  const { hash } = await sendFile({ sourcePath: f, offset, chunkSize: 256, onChunk: async (b) => { got.push(Buffer.from(b)); } });
-  expect(hash).toBe(createHash('sha256').update(data).digest('hex')); // whole-file hash
-  expect(Buffer.concat(got)).toEqual(data.subarray(offset)); // only the tail streamed
 });
