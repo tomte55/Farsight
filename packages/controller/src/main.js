@@ -39,7 +39,7 @@ import { newJobId } from '@farsight/shared/transfer-queue';
 // electron import — unit-testable directly) and the group-rendezvous
 // coordinator that folds N incoming per-flow TRANSFER_REQUESTs into one
 // consent/receive.
-import { assembleSendFlows, assembleReceiveGroup, dispatchReceiveFlowJoin } from './transfer-channel-assembly.js';
+import { assembleSendFlows, assembleReceiveGroup } from './transfer-channel-assembly.js';
 import { createGroupRendezvous } from '@farsight/shared/transfer-group-rendezvous';
 import { createFaultHooks } from './transfer-fault-hooks.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -299,18 +299,18 @@ const groupRendezvous = createGroupRendezvous({
   // there's nothing to route into, so close the orphan handle (the sender's
   // supervisor re-dials).
   onFlowJoin: (handle, flowIndex) => {
-    const sink = getTransferService().getReceiveFlowSink(handle && handle.groupId);
-    if (sink) {
-      dispatchReceiveFlowJoin(sink, handle.channel, flowIndex);
-      // Important #2: hand the joined handle's close to the active receive so its
-      // hidden worker window is swept on teardown (it is NOT one of the
-      // assembleReceiveGroup handles the receive already closes) — else every
-      // rolling-join leaks a BrowserWindow that keeps the app alive.
-      if (handle && typeof handle.close === 'function' && typeof sink.retain === 'function') sink.retain(handle.close);
-      log?.child('transfer').info(`rolling-join flow=${flowIndex} group=${handle.groupId}`);
+    const groupId = handle && handle.groupId;
+    const outcome = getTransferService().offerRollingJoin(groupId, handle, flowIndex);
+    if (outcome === 'attached') {
+      log?.child('transfer').info(`rolling-join flow=${flowIndex} group=${groupId}`);
+    } else if (outcome === 'buffered') {
+      // Held until consent resolves (F-B6): a flow that races the consent window is
+      // no longer dropped — the service attaches it on accept, closes it on decline.
+      log?.child('transfer').info(`rolling-join buffered flow=${flowIndex} group=${groupId}`);
     } else {
-      log?.child('transfer').warn(`rolling-join dropped (no active receive) flow=${flowIndex} group=${handle && handle.groupId}`);
-      if (handle && typeof handle.close === 'function') { Promise.resolve(handle.close()).catch(() => {}); }
+      // The ONE correct drop: the receive already ended (post-teardown). The sender's
+      // supervisor stops re-dialing once its own transfer settles.
+      log?.child('transfer').warn(`rolling-join dropped (receive ended) flow=${flowIndex} group=${groupId}`);
     }
   },
   onGroupReady: ({ groupId, flowCount, flows }) => {

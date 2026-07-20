@@ -162,6 +162,14 @@ describe('main.js: SEND assembly wiring (text-based — main.js imports electron
     expect(main).toMatch(/if\s*\(\s*!bundle\s*\)\s*\{[\s\S]*?groupRendezvous\.cancel\(groupId\);[\s\S]*?return;[\s\S]*?\}/);
   });
 
+  test('onFlowJoin delegates to the service buffer (offerRollingJoin), not a sink-or-drop branch (F-B6)', () => {
+    expect(main).toMatch(/onFlowJoin:\s*\([^)]*\)\s*=>/);
+    expect(main).toMatch(/offerRollingJoin\(/);
+    // distinct loud logging for all three outcomes
+    expect(main).toMatch(/rolling-join buffered/);
+    expect(main).toMatch(/rolling-join dropped \(receive ended\)/);
+  });
+
   test('openChannel(attach) looks up the pre-opened bundle from pendingGroupReceives by sessionId', () => {
     expect(main).toMatch(/pendingGroupReceives\.get\(sessionId\)/);
     expect(main).toMatch(/pendingGroupReceives\.delete\(sessionId\)/);

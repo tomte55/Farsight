@@ -320,15 +320,16 @@ describe('dispatchReceiveFlowJoin (receiver rolling-join dispatch)', () => {
 });
 
 describe('main.js: rolling-join receive wiring (text-based — main.js imports electron)', () => {
-  test('imports dispatchReceiveFlowJoin from the assembly module', () => {
-    expect(main).toMatch(/import\s*\{[^}]*\bdispatchReceiveFlowJoin\b[^}]*\}\s*from\s*['"]\.\/transfer-channel-assembly\.js['"]/);
-  });
+  // Phase 3b Task 3 (F-B6): onFlowJoin no longer imports/calls
+  // getReceiveFlowSink+dispatchReceiveFlowJoin itself -- it delegates the whole
+  // attach/buffer/drop decision to the service's offerRollingJoin. Internally the
+  // service's attachJoin mirrors dispatchReceiveFlowJoin's setCtrl+addFlow logic
+  // inline (transfer-service.js) rather than calling it -- dispatchReceiveFlowJoin
+  // itself remains a real, separately unit-tested function (above) even though
+  // main.js no longer references it. That new wiring's source-contract guard
+  // lives in openchannel-multiflow.test.js (F-B6 test), not here.
   test('createGroupRendezvous is given an onFlowJoin handler', () => {
     expect(main).toMatch(/onFlowJoin:/);
-  });
-  test('onFlowJoin looks up the active receive sink by the handle\'s groupId and dispatches (or closes the handle)', () => {
-    expect(main).toMatch(/getReceiveFlowSink\(/);
-    expect(main).toMatch(/dispatchReceiveFlowJoin\(/);
   });
   test('the attach handle carries groupId so a late join can be routed to the right receive', () => {
     expect(main).toMatch(/openAttachFlow[\s\S]{0,400}groupId,/);
