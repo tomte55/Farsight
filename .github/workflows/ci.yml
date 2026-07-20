@@ -78,10 +78,17 @@ jobs:
           SPIKE_FLOWS: '1'
       # Fault-injection reliability gate (Phase 3a Task 5, F-B11). Kills a LIVE
       # flow mid-transfer (dropped signaling socket / crashed worker renderer)
-      # and asserts the supervisor's bounded disconnected-grace + re-dial still
-      # delivers byte-identical N/N — not the pre-Phase-3a stall to 5/6 files.
-      # Confirmed locally: 5/5 for both fb1 (signaling drop) and fb2 (worker
-      # crash) at flowCount=4, each run completing in well under a minute.
+      # and the harness asserts THREE things, all in code (not just observed):
+      # (1) the fault was SURFACED loud in the sender log, (2) the receiver
+      # reaches a terminal outcome within timeout (never a silent zombie), AND
+      # (3) that terminal outcome is 'completed' with byte-identical N/N
+      # delivery — a terminal interrupted/failed/canceled, or any dropped file,
+      # now FAILS the gate. (3) used to be logged as INFO only and never
+      # asserted, which would have let the gate pass green on the exact
+      # pre-Phase-3a stall-to-5/6-files bug; hardened as a review fix so the
+      # gate can't silently regress. Confirmed locally: 5/5 for both fb1
+      # (signaling drop) and fb2 (worker crash) at flowCount=4, each run
+      # completing in well under a minute, under the hardened assertion.
       - name: Real-wire fault-injection harness (flow socket drop, F-B1)
         run: node packages/controller/test/harness-spike/transfer-fault-e2e.mjs
         timeout-minutes: 5
