@@ -6,6 +6,7 @@
 import {
   offerFrame, offerBeginFrame, offerEntriesFrame, offerEndFrame,
   fileEndFrame, jobDoneFrame, cancelFrame, parseCtrlFrame,
+  fileHashesBeginFrame, fileHashesEntriesFrame, fileHashesEndFrame,
 } from './transfer-protocol.js';
 import { createHash } from 'node:crypto';
 import { TRANSFER_CHUNK_BYTES } from './transfer-chunk.js';
@@ -26,6 +27,9 @@ import { batchEntriesBySize, serializer } from './transfer-orchestrator-shared.j
 export function createSender({
   ctrl: ctrl0, flows, jobId, manifest, chunkSize = TRANSFER_CHUNK_BYTES, flowCount, groupId,
   readerFor, newHash = () => createHash('sha256'),
+  // Phase 4: per-chunk hash function (hex). Injectable so tests can drive
+  // controlled digests; defaults to real SHA-256 over the chunk bytes.
+  hashChunk = (bytes) => createHash('sha256').update(bytes).digest('hex'),
   // Resilient multi-flow: the supervisor's starvation waiter. The send pool
   // awaits it (instead of throwing no_live_flows) when it has a chunk to send
   // but no live flow yet — a staggered dial still in progress, or every flow
@@ -158,7 +162,8 @@ export function createSender({
   // file the accept-time coverage already reports complete previously never
   // got read/hashed at all, so its file_end never went out and the receiver
   // could never finalize it).
-  const fileHash = new Map();
+  const fileHash = new Map();          // fileId -> whole-file hex (from the pre-pass)
+  const fileChunkHashes = new Map();   // fileId -> hex[] per-chunk (from the pre-pass)
 
   // Throttled AGGREGATE progress from the coverage tracker (the sender's
   // authoritative record of what the RECEIVER has confirmed) — mirrors the
@@ -230,15 +235,60 @@ export function createSender({
   // file_end. This is what fixes the hang: without a full read here, a
   // resumed-complete file never gets hashed and its file_end never goes out,
   // so the receiver has every byte but nothing to finalize against.
+  // Phase 4: read a file once, computing BOTH its whole-file hash and every 128KB
+  // chunk's hash, and (unless the file is already fully covered) emit its chunk-hash
+  // manifest on ctrl BEFORE any of its bulk goes out — so the receiver can verify
+  // each chunk live and trust its persisted verified coverage on resume. Runs once
+  // per file (idempotent guard). The whole-file hash comes from here now; the bulk
+  // producer no longer folds it.
+  async function prehashFile(file) {
+    if (fileChunkHashes.has(file.fileId)) return;
+    const reader = readerFor(file.fileId);
+    const whole = newHash();
+    const hashes = [];
+    try {
+      let offset = 0;
+      while (offset < file.size) {
+        if (canceled) return;
+        const len = Math.min(chunkSize, file.size - offset);
+        const payload = await reader.readAt(offset, len);
+        whole.update(payload);
+        hashes.push(hashChunk(payload));
+        offset += len;
+      }
+    } finally { await reader.close(); }
+    if (canceled) return;
+    fileChunkHashes.set(file.fileId, hashes);
+    fileHash.set(file.fileId, whole.digest('hex'));
+    // A file the receiver already has in full (resume) needs no chunk-hash send —
+    // it finalizes on its whole-file hash; sending ~64B/chunk for it is pure waste.
+    if (!tracker.coveredFor(file.fileId).isComplete(file.size)) sendFileHashes(file.fileId, hashes);
+  }
+
+  // Emit begin/entries*/end, packing digests so no ft-ctrl frame nears the DC limit
+  // (mirrors sendOffer's byte-batched split).
+  function sendFileHashes(fileId, hashes) {
+    ctrl.sendCtrl(fileHashesBeginFrame({ jobId, fileId, chunkBytes: chunkSize, totalChunks: hashes.length }));
+    let from = 0, batch = [], bytes = 0;
+    const flush = () => { if (batch.length) { ctrl.sendCtrl(fileHashesEntriesFrame({ jobId, fileId, from, hashes: batch })); from += batch.length; batch = []; bytes = 0; } };
+    for (const h of hashes) {
+      const add = h.length + 3; // "hh", plus comma/quote overhead
+      if (bytes + add > offerBatchBytes && batch.length) flush();
+      batch.push(h); bytes += add;
+    }
+    flush();
+    ctrl.sendCtrl(fileHashesEndFrame({ jobId, fileId }));
+  }
+
   async function* initialPass() {
     for (const file of manifest.entries) {
       if (canceled) return;
+      await prehashFile(file); // reads+hashes; emits file_hashes(F) before F's bulk
+      if (canceled) return;
       const reader = readerFor(file.fileId);
-      const hasher = newHash();
       const producer = createChunkProducer({
         readChunk: (o, l) => reader.readAt(o, l),
-        hashUpdate: (b) => hasher.update(b),
-        chunkSize,
+        chunkSize, // hashUpdate defaults to a no-op now — whole-file hash came from prehashFile
       });
       for await (const c of producer.produce(file, tracker.coveredFor(file.fileId))) {
         if (canceled) { await reader.close(); return; }
@@ -246,9 +296,7 @@ export function createSender({
       }
       await reader.close();
       if (canceled) return;
-      const h = hasher.digest('hex');
-      fileHash.set(file.fileId, h);
-      ctrl.sendCtrl(fileEndFrame({ jobId, fileId: file.fileId, hash: h }));
+      ctrl.sendCtrl(fileEndFrame({ jobId, fileId: file.fileId, hash: fileHash.get(file.fileId) }));
     }
   }
 

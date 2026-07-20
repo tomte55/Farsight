@@ -3,9 +3,11 @@ import { describe, it, expect } from 'vitest';
 import { createSender } from '../src/transfer-sender.js';
 import { createReceiver } from '../src/transfer-receiver.js';
 import { decodeBulkFrame } from '../src/transfer-chunk.js';
-import { parseCtrlFrame, acceptFrame, rangeReportFrame, completeFrame } from '../src/transfer-protocol.js';
+import { parseCtrlFrame, acceptFrame, rangeReportFrame, completeFrame, fileHashesEntriesFrame } from '../src/transfer-protocol.js';
+import { createHash } from 'node:crypto';
 
 const JOB = 'a'.repeat(32);
+const realChunkHash = (b) => createHash('sha256').update(b).digest('hex');
 
 // A fake receiver wired to the sender's ctrl+flows: writes delivered bytes into a
 // dest map keyed by fileId, tracks per-file received ranges, and drives the ctrl
@@ -100,6 +102,71 @@ describe('createSender', () => {
     // on its encoded frame's byte length (16-byte header + payload).
     expect(takenCalls.length).toBeGreaterThan(0);
     expect(takenCalls.reduce((a, b) => a + b, 0)).toBe(16 * takenCalls.length + A.length + B.length);
+  });
+
+  it('sends file_hashes (begin/entries/end) with every chunk digest for each file, and no frame exceeds the batch limit', async () => {
+    const size = 4096 * 5 + 10; // 6 chunks at chunkSize 4096
+    const A = new Uint8Array(size).map((_, i) => (i * 7) & 0xff);
+    const sources = new Map([[0, A]]);
+    const manifest = { entries: [{ fileId: 0, size }] };
+    const frames = [];
+    let onCtrl = null;
+    const ctrl = {
+      sendCtrl: (s) => {
+        const f = parseCtrlFrame(s); frames.push(f);
+        if (f && (f.t === 'offer' || f.t === 'offer_end')) onCtrl(acceptFrame({ jobId: JOB, resume: [], ranges: [] }));
+        if (f && f.t === 'file_end') onCtrl(rangeReportFrame({ jobId: JOB, files: [{ fileId: 0, ivals: [[0, size]] }] }));
+        if (f && f.t === 'job_done') onCtrl(completeFrame({ jobId: JOB, ok: true }));
+      },
+      onCtrl: (cb) => { onCtrl = cb; },
+    };
+    const flows = [{ isAlive: () => true, sendBulk: () => Promise.resolve() }];
+    const sender = createSender({
+      ctrl, flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 1, groupId: 'b'.repeat(32),
+      readerFor: readerFor(sources), reconcileWaitMs: 50, offerBatchBytes: 300, // tiny batch -> multiple entries frames
+    });
+    const r = await sender.start();
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    const begin = frames.find((f) => f && f.t === 'file_hashes_begin' && f.fileId === 0);
+    expect(begin).toBeTruthy();
+    expect(begin.chunkBytes).toBe(4096);
+    expect(begin.totalChunks).toBe(6);
+    const entries = frames.filter((f) => f && f.t === 'file_hashes_entries' && f.fileId === 0);
+    const digests = [];
+    for (const e of entries) { expect(e.from).toBe(digests.length); for (const h of e.hashes) digests.push(h); }
+    expect(frames.some((f) => f && f.t === 'file_hashes_end' && f.fileId === 0)).toBe(true);
+    const expected = [];
+    for (let o = 0; o < size; o += 4096) expected.push(realChunkHash(A.subarray(o, Math.min(o + 4096, size))));
+    expect(digests).toEqual(expected);
+    for (const e of entries) {
+      const s = fileHashesEntriesFrame({ jobId: JOB, fileId: 0, from: e.from, hashes: e.hashes });
+      expect(s.length).toBeLessThanOrEqual(300 + 80); // batch budget + one-hash slack
+    }
+  });
+
+  it('skips file_hashes for a file already fully covered at accept (resume), but still sends its file_end', async () => {
+    const size = 4096 * 2;
+    const A = new Uint8Array(size).map((_, i) => (i * 5) & 0xff);
+    const frames = [];
+    let onCtrl = null;
+    const ctrl = {
+      sendCtrl: (s) => {
+        const f = parseCtrlFrame(s); frames.push(f);
+        if (f && (f.t === 'offer' || f.t === 'offer_end')) onCtrl(acceptFrame({ jobId: JOB, resume: [], ranges: [{ fileId: 0, ivals: [[0, size]] }] }));
+        if (f && f.t === 'file_end') onCtrl(rangeReportFrame({ jobId: JOB, files: [{ fileId: 0, ivals: [[0, size]] }] }));
+        if (f && f.t === 'job_done') onCtrl(completeFrame({ jobId: JOB, ok: true }));
+      },
+      onCtrl: (cb) => { onCtrl = cb; },
+    };
+    const flows = [{ isAlive: () => true, sendBulk: () => Promise.resolve() }];
+    const sender = createSender({
+      ctrl, flows, jobId: JOB, manifest: { entries: [{ fileId: 0, size }] }, chunkSize: 4096, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: () => ({ readAt: (o, l) => Promise.resolve(A.subarray(o, o + l)), close: () => {} }), reconcileWaitMs: 50,
+    });
+    const r = await sender.start();
+    expect(r).toEqual({ jobId: JOB, ok: true });
+    expect(frames.some((f) => f && f.t === 'file_hashes_begin')).toBe(false); // fully covered -> no chunk-hash send
+    expect(frames.some((f) => f && f.t === 'file_end' && f.fileId === 0)).toBe(true);
   });
 
   it('stripes a multi-file payload across flows; receiver ends byte-identical', async () => {
