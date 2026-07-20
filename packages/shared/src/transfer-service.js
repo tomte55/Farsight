@@ -774,8 +774,8 @@ export function createTransferService({ store, transferDir, consent, openChannel
     // idempotent worker.close(), so a double-sweep is harmless.
     const joinedHandleCloses = [];
     // F-B6: an attach folds a joined flow into the live receiver — flow 0 is BOTH ctrl
-    // and a bulk flow (mirrors dispatchReceiveFlowJoin), others are bulk-only; retain the
-    // close so teardown sweeps its hidden worker window (Important #2).
+    // and a bulk flow, others are bulk-only; retain the close so teardown sweeps its
+    // hidden worker window (Important #2).
     function attachJoin(handle, flowIndex) {
       if (flowIndex === 0 && typeof handle.channel === 'object') receiver.setCtrl(handle.channel);
       receiver.addFlow(handle.channel, flowIndex);

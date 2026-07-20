@@ -246,31 +246,6 @@ export function assembleSendFlows({
 }
 
 /**
- * RECEIVE rolling-join dispatch: route a late/replacement flow (delivered by the
- * group rendezvous' onFlowJoin once the group has already fired) into the active
- * receiver. `sink` is the receiver's { addFlow, setCtrl } face (null when no
- * receive is active yet — the caller then closes the handle). Returns whether it
- * dispatched.
- *
- * Important #1: flow 0 is BOTH the ctrl channel AND a bulk flow — the sender
- * pushes a sendBulk wrapper for slot 0 (the pool dispatches bulk to it) and the
- * initial receive wires flow 0 as a bulk flow too (createReceiver
- * iterates ALL flows including ordered[0]). `setCtrl` only re-attaches the ctrl
- * handler; it never wires onBulk. So a re-dialed replacement flow 0 must be wired
- * BOTH ways — setCtrl (control plane) AND addFlow(channel, 0) (bulk routing) —
- * or every bulk chunk the sender puts on it lands nowhere (wasted bandwidth each
- * gap pass, and a hard stall to no_confirmation if it is the sole live flow).
- * There is no double-wire: setCtrl doesn't touch onBulk, and addFlow is
- * flow-agnostic (fileId+offset self-addressed bytes).
- */
-export function dispatchReceiveFlowJoin(sink, channel, flowIndex) {
-  if (!sink) return false;
-  if (flowIndex === 0 && typeof sink.setCtrl === 'function') sink.setCtrl(channel);
-  if (typeof sink.addFlow === 'function') sink.addFlow(channel, flowIndex);
-  return true;
-}
-
-/**
  * RECEIVE: fold N already-opened attach handles (one per flow, each
  * `{channel, close, peerAuth, flowIndex?}` — the same shape the single-flow
  * openChannel attach branch already returns, plus a `flowIndex` so this can

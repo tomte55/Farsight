@@ -291,13 +291,13 @@ const groupRendezvous = createGroupRendezvous({
   // Resilient multi-flow rolling-join: once a group has already fired (its
   // receive is under way), a later offer for the same groupId — a re-dialed
   // replacement slot, or a brand-new flowIndex added late — is opened and
-  // delivered here instead of being dropped. Route it into the LIVE receiver:
-  // flowIndex 0 swaps the ctrl channel (setCtrl), any other joins the bulk
-  // router (addFlow). The receiver is keyed by the group's sessionId (== groupId,
-  // set by onGroupReady below) and only present once the receive is ACTIVE — if
-  // it isn't (a join that raced ahead of consent, or arrived after teardown),
-  // there's nothing to route into, so close the orphan handle (the sender's
-  // supervisor re-dials).
+  // delivered here instead of being dropped. The whole attach/buffer/drop
+  // decision is delegated to the service's offerRollingJoin (F-B6): a flow that
+  // raced ahead of consent (the receive isn't ACTIVE yet, only pending) is
+  // BUFFERED and attached once the user accepts — it is NOT dropped. Only a
+  // flow that arrives after the receive has already ENDED (post-teardown) is
+  // closed as an orphan (the sender's supervisor stops re-dialing once its own
+  // transfer settles).
   onFlowJoin: (handle, flowIndex) => {
     const groupId = handle && handle.groupId;
     const outcome = getTransferService().offerRollingJoin(groupId, handle, flowIndex);

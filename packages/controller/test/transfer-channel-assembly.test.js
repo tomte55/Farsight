@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { describe, test, expect, vi } from 'vitest';
-import { assembleSendFlows, dispatchReceiveFlowJoin } from '../src/transfer-channel-assembly.js';
+import { assembleSendFlows } from '../src/transfer-channel-assembly.js';
 import { createTransferChannel } from '@farsight/shared/transfer-channel';
 import { createSendPool } from '@farsight/shared/transfer-send-pool';
 
@@ -294,40 +294,17 @@ describe('assembleSendFlows (supervisor-backed)', () => {
   });
 });
 
-describe('dispatchReceiveFlowJoin (receiver rolling-join dispatch)', () => {
-  test('flowIndex !== 0 routes to receiver.addFlow(channel, flowIndex)', () => {
-    const sink = { addFlow: vi.fn(), setCtrl: vi.fn() };
-    const ch = { onBulk: vi.fn() };
-    dispatchReceiveFlowJoin(sink, ch, 2);
-    expect(sink.addFlow).toHaveBeenCalledWith(ch, 2);
-    expect(sink.setCtrl).not.toHaveBeenCalled();
-  });
-
-  // Important #1: flow 0 is BOTH ctrl AND bulk, so a re-dialed replacement flow 0
-  // must be wired BOTH ways — setCtrl (control plane) AND addFlow(channel, 0)
-  // (bulk routing) — or every bulk chunk on it lands nowhere (stall).
-  test('flowIndex === 0 wires BOTH setCtrl AND addFlow(channel, 0) (ctrl + bulk)', () => {
-    const sink = { addFlow: vi.fn(), setCtrl: vi.fn() };
-    const ch = { onCtrl: vi.fn(), onBulk: vi.fn() };
-    dispatchReceiveFlowJoin(sink, ch, 0);
-    expect(sink.setCtrl).toHaveBeenCalledWith(ch);
-    expect(sink.addFlow).toHaveBeenCalledWith(ch, 0);
-  });
-
-  test('a null sink (no active receive) is a no-op and returns false', () => {
-    expect(dispatchReceiveFlowJoin(null, { onBulk() {} }, 2)).toBe(false);
-  });
-});
-
 describe('main.js: rolling-join receive wiring (text-based — main.js imports electron)', () => {
   // Phase 3b Task 3 (F-B6): onFlowJoin no longer imports/calls
   // getReceiveFlowSink+dispatchReceiveFlowJoin itself -- it delegates the whole
-  // attach/buffer/drop decision to the service's offerRollingJoin. Internally the
-  // service's attachJoin mirrors dispatchReceiveFlowJoin's setCtrl+addFlow logic
-  // inline (transfer-service.js) rather than calling it -- dispatchReceiveFlowJoin
-  // itself remains a real, separately unit-tested function (above) even though
-  // main.js no longer references it. That new wiring's source-contract guard
-  // lives in openchannel-multiflow.test.js (F-B6 test), not here.
+  // attach/buffer/drop decision to the service's offerRollingJoin. The former
+  // controller-side dispatchReceiveFlowJoin helper (and its dedicated unit tests
+  // that used to sit here) is DELETED (R7, follow-up review fix): after this
+  // rewiring it had zero production callers, and packages/shared can't import a
+  // controller helper anyway, so the capability lives solely in the service's
+  // attachJoin now (transfer-service.js) -- one implementation, not two. That new
+  // wiring's source-contract guard lives in openchannel-multiflow.test.js (F-B6
+  // test), not here.
   test('createGroupRendezvous is given an onFlowJoin handler', () => {
     expect(main).toMatch(/onFlowJoin:/);
   });
