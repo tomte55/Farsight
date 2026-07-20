@@ -97,7 +97,16 @@ export function createSender({
   // its own throwaway createSendPool; reusing one changes nothing observable
   // about dispatch (usableFlows() already re-filters the live `flows` array
   // fresh on every call) but gives emitProgress somewhere to read from.
-  const pool = createSendPool({ flows, awaitFlow, limiter });
+  // Task 3 (F-B11 defense-in-depth): the pool's own chunkStallMs backstop
+  // (default 10000) reuses this driver's already-injected setTimer/clearTimer
+  // (same clock as the watchdog/completion timers above, so fake-timer tests
+  // stay deterministic) and surfaces a stall through the SAME onEvent path as
+  // every other sender diagnostic — never a separate logger import (packages/
+  // shared stays runtime-agnostic).
+  const pool = createSendPool({
+    flows, awaitFlow, limiter, setTimer, clearTimer,
+    onStall: (chunk) => onEvent({ type: 'chunk-stall', fileId: chunk.fileId, offset: chunk.offset }),
+  });
 
   const tracker = createCoverageTracker({ manifest });
   // The test manifests (and any minimal caller) may omit totalBytes/totalFiles —
