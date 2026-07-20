@@ -235,6 +235,114 @@ describe('transfer-service multi-flow branch (real disk + jobs-store)', () => {
     expect(recvRec.jobState).toBe('done');
   });
 
+  // Phase 2 Task 8 (F-A2 clean-break): INVESTIGATION FINDING -- this is Case B,
+  // not Case A. Read before touching this test:
+  //   1. createSparsePartFile (transfer-io.js) DOES reuse an existing .part on
+  //      disk (opens 'r+' if present, grows-only -- never truncates/discards).
+  //   2. BUT readPersistedRanges (above) only honors a perFile entry whose
+  //      `ivals` is a real Array -- a legacy single-flow record's perFile
+  //      entries (shape `{fileId, status}`, no `ivals` -- see saveSendRecord's
+  //      perFile above and the retired single-flow receiver driver) fail that
+  //      check and are silently OMITTED from the returned map. So
+  //      persistedRanges for a legacy record is ALREADY {} (empty) for every
+  //      file, with zero extra code.
+  //   3. createReceiveRouter's completion (`f.ranges.isComplete(f.size)`) is
+  //      driven purely by explicitly-tracked writeAt() coverage, never by the
+  //      .part's on-disk size/content -- so an empty initial range forces the
+  //      accept-frame to report the file as 0% covered, the sender resends
+  //      EVERY byte from scratch, and finalize only fires once every byte
+  //      position has been freshly (re)written this session. The stale bytes
+  //      already sitting in the reused .part are therefore always fully
+  //      overwritten before any hash-verified publish -- never read through.
+  // Net effect: the F-A2 hazard (a size-complete read republishing a stale/
+  // zero-filled file) cannot occur for a legacy record with the CURRENT code,
+  // with no discard/legacy-detection logic needed (R2/R7 -- don't build what
+  // isn't broken). This test is a REGRESSION GUARD pinning that safety so a
+  // future change (e.g. "optimize: skip resending if .part size==final size")
+  // can't reintroduce it. Mutation-checked by hand (see task-8-report.md):
+  // temporarily made readPersistedRanges treat a missing-ivals perFile entry
+  // as fully covered ([[0,size]]) -- the assertions below then failed as
+  // expected (no bulk frames sent / delivered bytes stayed the stale content),
+  // proving this test actually exercises the hazard rather than passing
+  // for an unrelated reason.
+  describe('Phase 2 Task 8: legacy single-flow recv record never cross-model resumes (F-A2)', () => {
+    it('a legacy-format interrupted recv record (perFile with no ivals) + a stale sequential .part restarts from zero and delivers the freshly-sent bytes, not the stale ones', async () => {
+      const srcDir = await tmp();
+      const dstDir = await tmp();
+      const sendStore = createJobsStore({ dir: await tmp() });
+      const recvStore = createJobsStore({ dir: await tmp() });
+
+      const CHUNK = 131072;
+      const big = new Uint8Array(CHUNK * 3 + 111).map((_, i) => (i * 41 + 9) & 0xff);
+      await writeFile(join(srcDir, 'big.bin'), big);
+      const entries = [{ fileId: 0, path: 'big.bin', size: big.length, mtime: 1 }];
+      const manifest = { entries, totalBytes: big.length, totalFiles: 1 };
+      const sources = new Map([[0, join(srcDir, 'big.bin')]]);
+
+      const jobId = 'e'.repeat(32);
+
+      // Simulate what a LEGACY (pre-coverage, single-flow-era) interrupted
+      // receive left behind: a .part written the OLD sequential way (here
+      // stood in for by deliberately WRONG stale bytes, distinct from `big`,
+      // so any accidental reuse of them is detectable), and a receive record
+      // whose perFile carries NO `ivals` at all -- exactly
+      // saveSendRecord's `{fileId, status}` shape, not
+      // saveReceiveRecordWithRanges's `{fileId, ivals, status}` shape.
+      const stale = Buffer.alloc(big.length, 0xee);
+      const part = await createSparsePartFile({ destRoot: dstDir, relPath: 'big.bin' });
+      await part.writeAt(0, stale);
+      await part.fsync();
+      await part.close();
+      await recvStore.save({
+        jobId, dir: 'recv', tier: 'adhoc', peer: {}, destRoot: dstDir,
+        manifest,
+        perFile: [{ fileId: 0, status: 'pending' }], // legacy shape: no ivals
+        jobState: 'interrupted', createdAt: Date.now(),
+      });
+
+      const { senderCtrl, receiverCtrl, senderFlows, receiverFlows } = link({ flowCount: 3 });
+      let bulkSendCount = 0;
+      const countingSenderFlows = senderFlows.map((f) => ({
+        isAlive: f.isAlive,
+        sendBulk: (buf) => { bulkSendCount += 1; return f.sendBulk(buf); },
+      }));
+
+      const receiverSvc = createTransferService({
+        store: recvStore, transferDir: dstDir, consent: async () => true,
+        openChannel: async () => ({ ctrl: receiverCtrl, flows: receiverFlows, close: async () => {} }),
+        receiveCloseGraceMs: 0,
+      });
+      const senderSvc = createTransferService({
+        store: sendStore, transferDir: srcDir, consent: async () => true,
+        openChannel: async () => ({ ctrl: senderCtrl, flows: countingSenderFlows, close: async () => {} }),
+      });
+
+      const recvPromise = receiverSvc.startReceive({ rendezvous: 'r-mf-legacy' });
+      await tick(10);
+      const sendResult = await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'device-mf-legacy', flowCount: 3 } });
+      const recvResult = await recvPromise;
+
+      expect(sendResult.ok).toBe(true);
+      expect(recvResult.ok).toBe(true);
+
+      // The delivered file matches the FRESHLY sent bytes -- never the stale
+      // 0xee content that was sitting in the reused .part, and never a
+      // zero-filled/partial file (F-A2's actual failure mode).
+      const delivered = Buffer.from(await readFile(join(dstDir, 'big.bin')));
+      expect(delivered.equals(Buffer.from(big))).toBe(true);
+      expect(delivered.equals(stale)).toBe(false);
+
+      // A legacy record must restart from ZERO, i.e. a full resend -- not a
+      // "gap only" resume the way the modern-coverage resume test above
+      // proves. Every chunk went out; none were skipped as "already covered".
+      const fullTransferChunkCount = Math.ceil(big.length / CHUNK);
+      expect(bulkSendCount).toBe(fullTransferChunkCount);
+
+      const recvRec = (await recvStore.list()).find((j) => j.jobId === jobId);
+      expect(recvRec.jobState).toBe('done');
+    });
+  });
+
   // The actual field bug: a resume where ONE file is already fully received
   // (byte-complete via persisted ranges from a prior interrupted attempt), so
   // the sender's initial pass yields it NO bulk chunks at all (already fully
