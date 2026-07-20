@@ -114,6 +114,13 @@ export async function createSparsePartFile({ destRoot, relPath, size }) {
     partPath,
     finalPath,
     async writeAt(offset, buf) { await fh.write(buf, 0, buf.length, offset); },
+    // Phase 4: read a chunk back for verification (ctrl/bulk-race retro-verify) and
+    // for the finalize-mismatch locate pass. Clamps at EOF like openSourceReader.
+    async readAt(offset, length) {
+      const b = Buffer.allocUnsafe(length);
+      const { bytesRead } = await fh.read(b, 0, length, offset);
+      return new Uint8Array(b.subarray(0, bytesRead));
+    },
     liveDigest() { return null; },
     async fsync() { await fh.sync(); },
     async close() { await fh.close(); },

@@ -67,6 +67,9 @@ export function createReceiver({
   // own doc in transfer-receive-router.js. Injectable so a test can prove the
   // retry/terminal-failure path without waiting through real backoff delays.
   retryDelays, delay,
+  // Phase 4: per-chunk hash function (hex), threaded into the router's
+  // verify-before-add. Undefined -> the router's real-SHA-256 default.
+  hashChunk,
 }) {
   // The ctrl channel is held in a MUTABLE ref (mirrors createSender): a
   // re-dialed slot 0 is handed over via setCtrl, so every ctrl.sendCtrl(...) site
@@ -163,6 +166,10 @@ export function createReceiver({
   const terminalFailedFiles = new Set();
   // Reassembly buffer for a chunked OFFER (offer_begin -> offer_entries* -> offer_end).
   let offerAccum = null;
+  // Phase 4: reassembly buffer for a file's chunk-hash manifest
+  // (file_hashes_begin -> file_hashes_entries* -> file_hashes_end). One at a time —
+  // the sender emits each file's block contiguously on the ordered ctrl channel.
+  let fileHashesAccum = null;
 
   function findEntry(fileId) { return manifest.entries.find((e) => e.fileId === fileId); }
   function pathOf(fileId) { const e = findEntry(fileId); return e ? e.path : undefined; }
@@ -320,6 +327,7 @@ export function createReceiver({
     const partFiles = new Map();
     router = createReceiveRouter({
       manifest: m,
+      hashChunk,
       initialRanges: initialRangesFor(m),
       openPart: async (fileId) => {
         // Pass the final size so the sparse writer can preallocate the .part
@@ -402,6 +410,22 @@ export function createReceiver({
       if (!offerAccum) return;
       const entries = offerAccum.entries; offerAccum = null;
       await beginReceive(entries);
+      return;
+    }
+    if (f.t === 'file_hashes_begin') {
+      if (!router) return;
+      fileHashesAccum = { fileId: f.fileId, chunkBytes: f.chunkBytes, hashes: [] };
+      return;
+    }
+    if (f.t === 'file_hashes_entries') {
+      if (fileHashesAccum && fileHashesAccum.fileId === f.fileId) for (const h of f.hashes) fileHashesAccum.hashes.push(h);
+      return;
+    }
+    if (f.t === 'file_hashes_end') {
+      if (fileHashesAccum && fileHashesAccum.fileId === f.fileId) {
+        const a = fileHashesAccum; fileHashesAccum = null;
+        await router.setChunkHashes(a.fileId, a.chunkBytes, a.hashes);
+      }
       return;
     }
     if (f.t === 'file_end') {

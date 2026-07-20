@@ -72,6 +72,15 @@ describe('createSparsePartFile', () => {
     expect((await stat(p2.partPath)).size).toBe(20); // NOT truncated to 8 — that would destroy received bytes
     await p2.close();
   });
+
+  // Phase 4: read a chunk back (ctrl/bulk-race retro-verify + finalize locate).
+  it('reads back bytes written positionally, clamping at EOF', async () => {
+    const p = await createSparsePartFile({ destRoot: dir, relPath: 'readback.bin', size: 16 });
+    await p.writeAt(4, new Uint8Array([7, 8, 9, 10]));
+    expect([...await p.readAt(4, 4)]).toEqual([7, 8, 9, 10]);
+    expect((await p.readAt(14, 8)).length).toBe(2); // clamps at the 16-byte EOF
+    await p.close();
+  });
 });
 
 describe('finalizeReceivedPath', () => {

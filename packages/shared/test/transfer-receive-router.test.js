@@ -1,11 +1,19 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createReceiveRouter } from '../src/transfer-receive-router.js';
 import { encodeBulkFrame } from '../src/transfer-chunk.js';
+import { createHash } from 'node:crypto';
 
 function sparseFile(size) {
   const buf = new Uint8Array(size);
   return { buf, writeAt: (off, bytes) => { buf.set(bytes, off); return Promise.resolve(); }, close: () => Promise.resolve() };
 }
+
+// A fake sparse .part with readAt (needed by the Phase 4 retro-verify / locate paths).
+function fakePart(size) {
+  const buf = new Uint8Array(size);
+  return { buf, writeAt: (o, b) => { buf.set(b, o); return Promise.resolve(); }, readAt: (o, l) => Promise.resolve(buf.subarray(o, o + Math.min(l, size - o))), close: () => Promise.resolve() };
+}
+const H = (b) => createHash('sha256').update(b).digest('hex');
 
 describe('transfer-receive-router', () => {
   it('reassembles out-of-order chunks by offset and finalizes on completion', async () => {
@@ -310,6 +318,45 @@ describe('transfer-receive-router', () => {
       });
       await expect(router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array(4) }))).resolves.toBeUndefined();
       expect(router.isComplete()).toBe(true); // failed file counts as resolved
+    });
+  });
+
+  describe('Phase 4 — verify-before-add', () => {
+    it('a chunk whose bytes match its manifest hash is covered; a mismatch is left a gap', async () => {
+      const size = 8; const part = fakePart(size);
+      const good = new Uint8Array([1, 2, 3, 4]);
+      const bad = new Uint8Array([9, 9, 9, 9]);
+      const router = createReceiveRouter({
+        manifest: { entries: [{ fileId: 0, size }] },
+        openPart: () => Promise.resolve(part),
+        verifyAndFinalize: () => Promise.resolve({ ok: true }),
+        onFileDone: () => {}, onProgress: () => {},
+      });
+      await router.setChunkHashes(0, 4, [H(good), H(new Uint8Array([5, 6, 7, 8]))]);
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: good })); // matches
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 4, length: 4, payload: bad }));  // MISMATCH
+      expect(router.rangesFor().find((r) => r.fileId === 0).ivals).toEqual([[0, 4]]); // only the verified chunk
+      expect(router.isComplete()).toBe(false); // the bad chunk is a gap -> re-requested
+    });
+
+    it('old-sender fallback: with no chunk hashes, a chunk is covered on write (today behavior)', async () => {
+      const size = 4; const part = fakePart(size);
+      const router = createReceiveRouter({ manifest: { entries: [{ fileId: 0, size }] }, openPart: () => Promise.resolve(part), verifyAndFinalize: () => Promise.resolve({ ok: true }), onFileDone: () => {}, onProgress: () => {} });
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array([1, 2, 3, 4]) }));
+      expect(router.rangesFor().find((r) => r.fileId === 0).ivals).toEqual([[0, 4]]);
+    });
+
+    it('ctrl/bulk race: a chunk arriving before its hash is retro-verified on setChunkHashes and removed if it mismatches', async () => {
+      const size = 8; const part = fakePart(size);
+      const c0 = new Uint8Array([1, 2, 3, 4]);
+      const c1 = new Uint8Array([5, 6, 7, 8]);
+      const router = createReceiveRouter({ manifest: { entries: [{ fileId: 0, size }] }, openPart: () => Promise.resolve(part), verifyAndFinalize: () => Promise.resolve({ ok: true }), onFileDone: () => {}, onProgress: () => {} });
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: c0 })); // both BEFORE any hashes
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 4, length: 4, payload: c1 }));
+      expect(router.rangesFor().find((r) => r.fileId === 0).ivals).toEqual([[0, 8]]); // added optimistically
+      // Hashes arrive; chunk 1's manifest hash does NOT match the written bytes.
+      await router.setChunkHashes(0, 4, [H(c0), H(new Uint8Array([0, 0, 0, 0]))]);
+      expect(router.rangesFor().find((r) => r.fileId === 0).ivals).toEqual([[0, 4]]); // bad chunk retro-removed
     });
   });
 });

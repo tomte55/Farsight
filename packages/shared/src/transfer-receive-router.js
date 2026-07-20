@@ -2,20 +2,35 @@
 // frame is written positionally by offset (chunks may arrive in any order, on any
 // flow) and its range recorded. A file finalizes (verify+fsync+rename) once its
 // ranges cover [0,size) AND its file_end hash has arrived. NO fs/DOM (injected).
-import { decodeBulkFrame } from './transfer-chunk.js';
+import { decodeBulkFrame, TRANSFER_CHUNK_BYTES } from './transfer-chunk.js';
 import { createRangeSet } from './transfer-ranges.js';
+import { createHash } from 'node:crypto';
 
 export function createReceiveRouter({
   manifest, initialRanges = {}, openPart, verifyAndFinalize, onFileDone, onProgress,
+  // Phase 4: per-chunk hash function (hex), injectable (default real SHA-256). Used
+  // to verify each chunk before it is added to coverage, so persisted coverage means
+  // "verified" and a resume can trust it without re-hashing.
+  hashChunk = (bytes) => createHash('sha256').update(bytes).digest('hex'),
   // Per-file I/O failure isolation (e.g. AV locking/quarantining a .part mid-write):
   // a bounded, brief, ONE-TIME retry of the open+write for THIS file before giving
   // up on it. Injectable so a test can prove the retry without real timers/delays.
   retryDelays = [150, 400],
   delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
-  const files = new Map(); // fileId -> { size, ranges, part, hash, finalized, finalizing, failed }
+  const files = new Map(); // fileId -> { size, ranges, part, hash, finalized, finalizing, failed, chunkBytes, chunkHashes, hashesFinal, pendingVerify }
   for (const e of manifest.entries) {
-    files.set(e.fileId, { size: e.size, ranges: createRangeSet(initialRanges[e.fileId] || []), part: null, partPromise: null, hash: null, finalized: false, finalizing: false, failed: false });
+    files.set(e.fileId, { size: e.size, ranges: createRangeSet(initialRanges[e.fileId] || []), part: null, partPromise: null, hash: null, finalized: false, finalizing: false, failed: false,
+      chunkBytes: null, chunkHashes: null, hashesFinal: false, pendingVerify: new Set() });
+  }
+
+  // Ensure a file's .part handle is open (memoized) — for a read-back verify when a
+  // chunk arrived before its hash, or for the finalize locate (Task 6). Mirrors
+  // onBulkFrame's memoized open.
+  async function partOf(f, fileId) {
+    if (!f.partPromise) f.partPromise = openPart(fileId);
+    f.part = await f.partPromise;
+    return f.part;
   }
 
   // Best-effort close of a file's currently-open .part handle before nulling
@@ -29,6 +44,31 @@ export function createReceiveRouter({
     try { await f.part?.close(); } catch { /* best effort */ }
     f.part = null;
     f.partPromise = null;
+  }
+
+  // Phase 4 verify-before-add: coverage MEANS "verified". A chunk enters the
+  // RangeSet only after its bytes match the manifest hash for its grid index. When
+  // hashes aren't known yet (the ctrl/bulk race — file_hashes rides ctrl, bulk rides
+  // the bulk flows, independently ordered — or an old sender that never sends them),
+  // add optimistically and, if hashes may still arrive, remember the chunk so
+  // setChunkHashes can retro-verify it. NEVER folds a running whole-file hash (the
+  // at-least-once contract forbids it — transfer-chunk.js); each chunk hashes alone.
+  function addVerifiedChunk(f, offset, length, payload) {
+    const cb = f.chunkBytes || TRANSFER_CHUNK_BYTES;
+    const aligned = offset % cb === 0;
+    if (f.chunkHashes && aligned) {
+      const idx = offset / cb;
+      const expected = f.chunkHashes[idx];
+      const expectedLen = Math.min(cb, f.size - offset);
+      if (expected !== undefined && length === expectedLen) {
+        if (hashChunk(payload) === expected) f.ranges.add(offset, length);
+        return; // mismatch -> NOT added (stays a gap, re-requested by range_report)
+      }
+    }
+    f.ranges.add(offset, length); // no usable hash yet / off-grid frame: optimistic add
+    // Remember the raw OFFSET (not an index): the real chunk grid is unknown until
+    // file_hashes arrives, so we can't compute a stable index yet.
+    if (!f.hashesFinal) f.pendingVerify.add(offset);
   }
 
   async function maybeFinalize(fileId) {
@@ -111,7 +151,7 @@ export function createReceiveRouter({
         return; // NOT rethrown — the receive must not fail because of one file
       }
 
-      f.ranges.add(d.offset, d.length);
+      addVerifiedChunk(f, d.offset, d.length, d.payload);
       onProgress && onProgress({ fileId: d.fileId, coveredBytes: f.ranges.coveredBytes(), size: f.size });
       await maybeFinalize(d.fileId);
     },
@@ -119,6 +159,32 @@ export function createReceiveRouter({
       const f = files.get(fileId);
       if (!f || f.finalized || f.failed) return;
       f.hash = hash;
+      await maybeFinalize(fileId);
+    },
+    // Phase 4: receive a file's per-chunk hash manifest (reassembled by the
+    // receiver from file_hashes_begin/entries/end). Records the digests so
+    // subsequent bulk frames verify-before-add, and retro-verifies any chunk that
+    // already landed before the hashes did (the ctrl/bulk race) — re-reading it
+    // from the .part and removing it from coverage if it doesn't match.
+    async setChunkHashes(fileId, chunkBytes, hashes) {
+      const f = files.get(fileId);
+      if (!f || f.finalized || f.failed) return;
+      f.chunkBytes = chunkBytes; f.chunkHashes = hashes; f.hashesFinal = true;
+      let changed = false;
+      const pending = [...f.pendingVerify]; f.pendingVerify.clear();
+      if (pending.length) {
+        const part = await partOf(f, fileId);
+        for (const off of pending) {
+          if (off % chunkBytes !== 0) continue; // off-grid frame: can't map to a chunk hash -> leave as-added
+          const idx = off / chunkBytes; const len = Math.min(chunkBytes, f.size - off);
+          if (len <= 0) continue;
+          const expected = hashes[idx];
+          if (expected === undefined) continue; // no hash for this index -> leave as-added
+          const bytes = await part.readAt(off, len);
+          if (hashChunk(bytes) !== expected) { f.ranges.remove(off, len); changed = true; }
+        }
+      }
+      if (changed) onProgress && onProgress({ fileId, coveredBytes: f.ranges.coveredBytes(), size: f.size });
       await maybeFinalize(fileId);
     },
     rangesFor() {

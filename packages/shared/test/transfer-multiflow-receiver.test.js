@@ -2,8 +2,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createReceiver } from '../src/transfer-receiver.js';
 import { encodeBulkFrame } from '../src/transfer-chunk.js';
-import { offerFrame, offerBeginFrame, offerEntriesFrame, offerEndFrame, fileEndFrame, jobDoneFrame, cancelFrame, promptingFrame, parseCtrlFrame } from '../src/transfer-protocol.js';
+import { offerFrame, offerBeginFrame, offerEntriesFrame, offerEndFrame, fileEndFrame, jobDoneFrame, cancelFrame, promptingFrame, parseCtrlFrame, fileHashesBeginFrame, fileHashesEntriesFrame, fileHashesEndFrame } from '../src/transfer-protocol.js';
 import { createCoverageTracker } from '../src/transfer-reconcile.js';
+import { createHash } from 'node:crypto';
+const HH = (b) => createHash('sha256').update(b).digest('hex');
 
 const JOB = 'a'.repeat(32);
 
@@ -195,6 +197,43 @@ describe('createReceiver', () => {
     toReceiver(jobDoneFrame({ jobId: JOB }));
     const r = await done;
     expect(r).toEqual({ jobId: JOB, ok: true });
+  });
+
+  // Phase 4: the receiver reassembles file_hashes begin/entries/end and forwards
+  // them to the router's verify-before-add. A chunk whose bytes DON'T match the
+  // manifest hash must be left a gap (reported uncovered), not accepted as covered.
+  it('reassembles file_hashes and verifies chunks: a mismatching chunk is reported as a gap', async () => {
+    const size = 4;
+    const { ctrl, toReceiver, out } = ctrlPair();
+    const flowCbs = [];
+    const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
+    const fake = fakeClock();
+    const rx = createReceiver({
+      ctrl, flows, jobId: JOB,
+      consent: async () => true,
+      openPart: () => { const b = new Uint8Array(size); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, readAt: (o, l) => Promise.resolve(b.subarray(o, o + l)), close: () => Promise.resolve(), liveDigest: () => null }); },
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      reportIntervalMs: 5000, inactivityMs: 0,
+      setTimer: fake.setTimer, clearTimer: fake.clearTimer,
+    });
+    rx.start().catch(() => {}); // never completes (the only chunk fails verification) — don't leak a rejection
+    toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'v.bin', size, mtime: 0 }], totalBytes: size, totalFiles: 1 }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(out.some((f) => f.t === 'accept')).toBe(true);
+
+    // Announce a chunk hash that will NOT match the bytes we then deliver.
+    const wrong = HH(new Uint8Array([0, 0, 0, 0]));
+    toReceiver(fileHashesBeginFrame({ jobId: JOB, fileId: 0, chunkBytes: 4, totalChunks: 1 }));
+    toReceiver(fileHashesEntriesFrame({ jobId: JOB, fileId: 0, from: 0, hashes: [wrong] }));
+    toReceiver(fileHashesEndFrame({ jobId: JOB, fileId: 0 }));
+    await new Promise((r) => setTimeout(r, 0));
+    flowCbs[0](encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array([1, 2, 3, 4]) }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    fake.tickOnce(); // force a range_report
+    const reports = out.filter((f) => f.t === 'range_report');
+    const latest = reports[reports.length - 1];
+    expect(latest.files.find((f) => f.fileId === 0)).toEqual({ fileId: 0, ivals: [] }); // NOT covered — verification failed
   });
 
   it('declines when consent says no', async () => {
