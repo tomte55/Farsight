@@ -11,7 +11,8 @@
 // initiates it and the user has already consented per-offer.
 import { createHash } from 'node:crypto';
 import { resolveParallelConnections } from './config.js';
-import { createSender, createReceiver } from './transfer-orchestrator.js';
+import { createSender } from './transfer-sender.js';
+import { createReceiver } from './transfer-receiver.js';
 import { createQueue, selectResumable, newJobId } from './transfer-queue.js';
 import { parseCtrlFrame } from './transfer-protocol.js';
 import { walkSource, openSourceReader, createSparsePartFile, finalizeReceivedPath } from './transfer-io.js';

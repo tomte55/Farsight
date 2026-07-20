@@ -4,7 +4,8 @@ import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { createSender, createReceiver } from '../src/transfer-orchestrator.js';
+import { createSender } from '../src/transfer-sender.js';
+import { createReceiver } from '../src/transfer-receiver.js';
 import { createSparsePartFile, openSourceReader, finalizeReceivedFile } from '../src/transfer-io.js';
 
 let srcDir, dstDir;

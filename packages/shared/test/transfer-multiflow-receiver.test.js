@@ -1,6 +1,6 @@
 // packages/shared/test/transfer-multiflow-receiver.test.js
 import { describe, it, expect, vi } from 'vitest';
-import { createReceiver } from '../src/transfer-orchestrator.js';
+import { createReceiver } from '../src/transfer-receiver.js';
 import { encodeBulkFrame } from '../src/transfer-chunk.js';
 import { offerFrame, offerBeginFrame, offerEntriesFrame, offerEndFrame, fileEndFrame, jobDoneFrame, cancelFrame, promptingFrame, parseCtrlFrame } from '../src/transfer-protocol.js';
 import { createCoverageTracker } from '../src/transfer-reconcile.js';

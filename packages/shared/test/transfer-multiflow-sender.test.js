@@ -1,6 +1,7 @@
 // packages/shared/test/transfer-multiflow-sender.test.js
 import { describe, it, expect } from 'vitest';
-import { createSender, createReceiver } from '../src/transfer-orchestrator.js';
+import { createSender } from '../src/transfer-sender.js';
+import { createReceiver } from '../src/transfer-receiver.js';
 import { decodeBulkFrame } from '../src/transfer-chunk.js';
 import { parseCtrlFrame, acceptFrame, rangeReportFrame, completeFrame } from '../src/transfer-protocol.js';
 
