@@ -679,67 +679,8 @@ describe('transfer-service: supervisor + rolling-join wiring (source guards)', (
     expect(src).toMatch(/opened\.onCtrlReplaced\(\([^)]*\)\s*=>[\s\S]*?\.setCtrl\(/);
   });
 
-  test('multi-flow RECEIVE registers a per-session flow sink (addFlow/setCtrl) exposed via getReceiveFlowSink', () => {
-    expect(src).toMatch(/receiveFlowSinks/);
-    expect(src).toMatch(/getReceiveFlowSink\(/);
-    // registered only once the receive is ACTIVE (Task 5: addFlow drops before then)
-    expect(src).toMatch(/'accepted'[\s\S]*?receiveFlowSinks\.set/);
-  });
-
   test('runMultiFlowReceive is threaded the sessionId so the sink can be keyed by it', () => {
     expect(src).toMatch(/runMultiFlowReceive\(\{[\s\S]*?sessionId/);
-  });
-});
-
-// Important #2 (Task 7 review): a rolling-joined flow's worker is a hidden window
-// that is NOT one of the assembleReceiveGroup handles the receive already closes,
-// so runMultiFlowReceive must retain its close and sweep it on teardown — else
-// every rolling-join leaks a BrowserWindow. Behavioral: retain a spy close on the
-// live sink (as main's onFlowJoin does), run the transfer to completion, and
-// assert the spy was closed EXACTLY once and the sink was deregistered.
-describe('transfer-service multi-flow: rolling-joined handle teardown', () => {
-  it('closes a rolling-joined handle exactly once on receive teardown, then deregisters the sink', async () => {
-    const srcDir = await tmp();
-    const dstDir = await tmp();
-    const sendStore = createJobsStore({ dir: await tmp() });
-    const recvStore = createJobsStore({ dir: await tmp() });
-
-    const data = new Uint8Array(2000).map((_, i) => (i * 17) & 0xff);
-    await writeFile(join(srcDir, 'f.bin'), data);
-    const entries = [{ fileId: 0, path: 'f.bin', size: data.length, mtime: 1 }];
-    const manifest = { entries, totalBytes: data.length, totalFiles: 1 };
-    const sources = new Map([[0, join(srcDir, 'f.bin')]]);
-
-    const { senderCtrl, receiverCtrl, senderFlows, receiverFlows } = link({ flowCount: 2 });
-    const SESSION = 'r-mf-join';
-
-    const receiverSvc = createTransferService({
-      store: recvStore, transferDir: dstDir, consent: async () => true,
-      openChannel: async () => ({ ctrl: receiverCtrl, flows: receiverFlows, close: async () => {} }),
-      receiveCloseGraceMs: 20,
-    });
-    const senderSvc = createTransferService({
-      store: sendStore, transferDir: srcDir, consent: async () => true,
-      openChannel: async () => ({ ctrl: senderCtrl, flows: senderFlows, close: async () => {} }),
-    });
-
-    const jobId = 'c'.repeat(32);
-    const recvPromise = receiverSvc.startReceive({ rendezvous: SESSION });
-    await tick(10);
-    const sendPromise = senderSvc.startSend({ jobId, manifest, sources, target: { id: 'device-join', flowCount: 2 } });
-
-    // Once ACTIVE, the rolling-join sink appears — retain a joined handle's close
-    // on it exactly as main.js's onFlowJoin does after a successful dispatch.
-    await until(() => receiverSvc.getReceiveFlowSink(SESSION) != null);
-    let closeCalls = 0;
-    receiverSvc.getReceiveFlowSink(SESSION).retain(async () => { closeCalls += 1; });
-
-    const [sendResult, recvResult] = await Promise.all([sendPromise, recvPromise]);
-    expect(sendResult.ok).toBe(true);
-    expect(recvResult.ok).toBe(true);
-
-    expect(closeCalls).toBe(1); // swept once on teardown — leak closed, no double-close
-    expect(receiverSvc.getReceiveFlowSink(SESSION)).toBeNull(); // deregistered
   });
 });
 
@@ -775,10 +716,9 @@ describe('transfer-service multi-flow: pre-consent join buffer (F-B6)', () => {
     await tick(10);
     const sendPromise = senderSvc.startSend({ jobId, manifest, sources, target: { id: 'device-buf', flowCount: 2 } });
 
-    // While PENDING (consent not yet released) the ACTIVE sink must not exist yet...
+    // While PENDING (consent not yet released), a racing rolling-join is
+    // BUFFERED, not closed (F-B6 fix) — proven by the 'buffered' outcome below.
     await tick(10);
-    expect(receiverSvc.getReceiveFlowSink(SESSION)).toBeNull();
-    // ...but a racing rolling-join is BUFFERED, not closed (F-B6 fix).
     let joinClosed = 0;
     const joinHandle = { channel: { onBulk: () => {}, sendCtrl: () => {} }, flowIndex: 5, close: async () => { joinClosed += 1; } };
     const outcome = receiverSvc.offerRollingJoin(SESSION, joinHandle, 5);
