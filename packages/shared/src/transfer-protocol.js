@@ -60,6 +60,17 @@ export function rangeReportFrame({ jobId, files }) { return JSON.stringify({ t: 
 export function rejectFrame({ jobId, reason = '' }) { return JSON.stringify({ t: 'reject', jobId, reason }); }
 export function fileBeginFrame({ jobId, fileId, offset }) { return JSON.stringify({ t: 'file_begin', jobId, fileId, offset }); }
 export function fileEndFrame({ jobId, fileId, hash }) { return JSON.stringify({ t: 'file_end', jobId, fileId, hash }); }
+// Phase 4: per-file, per-chunk hash manifest, delivered BEFORE that file's bulk so
+// the receiver can verify each chunk live and (on resume) trust its persisted
+// verified coverage without re-hashing. Chunked exactly like the OFFER so no single
+// ft-ctrl frame nears the ~256KB DC limit. OPTIONAL + additive: an old peer that
+// never sends these falls back to whole-file verify; one that can't parse them
+// ignores them (parseCtrlFrame -> null). begin carries chunkBytes (the grid unit,
+// so the receiver maps offset->index) + totalChunks; entries carry a contiguous
+// batch of hex digests starting at chunk index `from`.
+export function fileHashesBeginFrame({ jobId, fileId, chunkBytes, totalChunks }) { return JSON.stringify({ t: 'file_hashes_begin', jobId, fileId, chunkBytes, totalChunks }); }
+export function fileHashesEntriesFrame({ jobId, fileId, from, hashes }) { return JSON.stringify({ t: 'file_hashes_entries', jobId, fileId, from, hashes }); }
+export function fileHashesEndFrame({ jobId, fileId }) { return JSON.stringify({ t: 'file_hashes_end', jobId, fileId }); }
 export function jobDoneFrame({ jobId }) { return JSON.stringify({ t: 'job_done', jobId }); }
 // Receiver -> sender once EVERY file is received, verified and finalized on disk.
 // This is the delivery acknowledgment: the sender must not resolve/close the
@@ -97,6 +108,17 @@ export function parseCtrlFrame(str) {
     case 'offer_end':
       if (!isJobId(o.jobId)) return null;
       return { t: 'offer_end', jobId: o.jobId };
+    case 'file_hashes_begin':
+      if (!isJobId(o.jobId) || !nn(o.fileId) || !(Number.isInteger(o.chunkBytes) && o.chunkBytes > 0) || !nn(o.totalChunks)) return null;
+      return { t: 'file_hashes_begin', jobId: o.jobId, fileId: o.fileId, chunkBytes: o.chunkBytes, totalChunks: o.totalChunks };
+    case 'file_hashes_entries': {
+      if (!isJobId(o.jobId) || !nn(o.fileId) || !nn(o.from) || !Array.isArray(o.hashes)) return null;
+      for (const h of o.hashes) if (!isStr(h)) return null;
+      return { t: 'file_hashes_entries', jobId: o.jobId, fileId: o.fileId, from: o.from, hashes: o.hashes };
+    }
+    case 'file_hashes_end':
+      if (!isJobId(o.jobId) || !nn(o.fileId)) return null;
+      return { t: 'file_hashes_end', jobId: o.jobId, fileId: o.fileId };
     case 'accept': {
       if (!isJobId(o.jobId) || !Array.isArray(o.resume)) return null;
       for (const r of o.resume) { if (!r || !nn(r.fileId) || !nn(r.haveBytes)) return null; }

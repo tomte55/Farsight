@@ -4,6 +4,7 @@ import {
   offerFrame, acceptFrame, rejectFrame, fileBeginFrame, fileEndFrame,
   jobDoneFrame, pauseFrame, resumeFrame, cancelFrame, errorFrame,
   fsReqFrame, fsResFrame, parseCtrlFrame, rangeReportFrame,
+  fileHashesBeginFrame, fileHashesEntriesFrame, fileHashesEndFrame,
 } from '../src/transfer-protocol.js';
 
 // A real jobId (as minted by transfer-queue.js's newJobId(): randomUUID with
@@ -113,5 +114,24 @@ describe('multi-flow protocol additions', () => {
     const f = parseCtrlFrame(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'a', size: 1, mtime: 0 }], totalBytes: 1, totalFiles: 1, flowCount: 8, groupId: 'b'.repeat(32) }));
     expect(f.flowCount).toBe(8);
     expect(f.groupId).toBe('b'.repeat(32));
+  });
+});
+
+describe('file_hashes frames (Phase 4)', () => {
+  const J = 'a'.repeat(32);
+  it('round-trips begin/entries/end', () => {
+    expect(parseCtrlFrame(fileHashesBeginFrame({ jobId: J, fileId: 3, chunkBytes: 131072, totalChunks: 5 })))
+      .toEqual({ t: 'file_hashes_begin', jobId: J, fileId: 3, chunkBytes: 131072, totalChunks: 5 });
+    expect(parseCtrlFrame(fileHashesEntriesFrame({ jobId: J, fileId: 3, from: 2, hashes: ['aa', 'bb'] })))
+      .toEqual({ t: 'file_hashes_entries', jobId: J, fileId: 3, from: 2, hashes: ['aa', 'bb'] });
+    expect(parseCtrlFrame(fileHashesEndFrame({ jobId: J, fileId: 3 })))
+      .toEqual({ t: 'file_hashes_end', jobId: J, fileId: 3 });
+  });
+  it('rejects malformed file_hashes frames', () => {
+    expect(parseCtrlFrame(JSON.stringify({ t: 'file_hashes_begin', jobId: 'short', fileId: 0, chunkBytes: 1, totalChunks: 0 }))).toBe(null);
+    expect(parseCtrlFrame(JSON.stringify({ t: 'file_hashes_begin', jobId: J, fileId: 0, chunkBytes: 0, totalChunks: 1 }))).toBe(null); // chunkBytes must be > 0
+    expect(parseCtrlFrame(JSON.stringify({ t: 'file_hashes_entries', jobId: J, fileId: 0, from: 0, hashes: [1, 2] }))).toBe(null); // hashes must be strings
+    expect(parseCtrlFrame(JSON.stringify({ t: 'file_hashes_entries', jobId: J, fileId: 0, from: -1, hashes: ['aa'] }))).toBe(null);
+    expect(parseCtrlFrame(JSON.stringify({ t: 'file_hashes_end', jobId: J }))).toBe(null); // missing fileId
   });
 });
