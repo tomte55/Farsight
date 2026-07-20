@@ -19,6 +19,7 @@ import { createTokenStore } from './account-token-store.js';
 import { createHeartbeat } from './account-heartbeat.js';
 import { createDeviceKeyStore } from './device-key-store.js';
 import { generateDeviceKeyPair, signMessage, verifyMessage } from './device-keypair.js';
+import { createTtlCache } from './ttl-cache.js';
 
 // Verbose diagnostic logging (see docs/private/superpowers): sign-in state
 // changes only — never the access/refresh token or password. The session (login
@@ -33,6 +34,7 @@ export function createAccountService({
   safeStorage, fs, filePath, deviceKeyFilePath, fetch, now,
   version, intervalMs, setInterval: setI, clearInterval: clearI,
   getSignalingId, log = noopLog(),
+  classifyCacheTtlMs = 30000,
 } = {}) {
   const client = createAccountClient({ baseUrl, fetch });
   const store = createTokenStore({ safeStorage, fs, filePath });
@@ -40,6 +42,28 @@ export function createAccountService({
   // Connect-from-console: this device's keypair store. Falls back to a filePath
   // sibling if a dedicated path isn't given, so older callers keep working.
   const keyStore = createDeviceKeyStore({ safeStorage, fs, filePath: deviceKeyFilePath ?? `${filePath}.key` });
+
+  // Phase 3b-2 (F-B5): the classification lookups (fleet + contacts) are the per-flow
+  // auth.sovexa.org amplification on the transfer handshake's critical path. Cache them
+  // (TTL + in-flight coalescing) so N flows + re-dials make one fetch each, not N.
+  // ONLY classifyPublicKey uses these — the PUBLIC fleet()/contacts()/isAccountPublicKey
+  // stay uncached so the console + control paths see fresh data. Fail-closed: only ok
+  // results are cached, and login/logout invalidate.
+  const clock = now || (() => Date.now());
+  const okOnly = (r) => !!(r && r.ok === true);
+  const devicesCache = createTtlCache({ now: clock, ttlMs: classifyCacheTtlMs, shouldCache: okOnly });
+  const contactsCache = createTtlCache({ now: clock, ttlMs: classifyCacheTtlMs, shouldCache: okOnly });
+  function invalidateClassifyCache() { devicesCache.invalidate(); contactsCache.invalidate(); }
+  async function cachedDevices() {
+    const token = await session.getAccessToken();
+    if (!token) return { ok: false, error: 'not_signed_in' };   // fail-closed OUTSIDE the cache
+    return devicesCache.get(() => client.listDevices({ accessToken: token }));
+  }
+  async function cachedContacts() {
+    const token = await session.getAccessToken();
+    if (!token) return { ok: false, error: 'not_signed_in' };
+    return contactsCache.get(() => client.listContacts({ accessToken: token }));
+  }
 
   let currentSignalingId = null;
   let directiveCb = null; // app-registered handler for management directives (S2.7)
@@ -91,12 +115,12 @@ export function createAccountService({
   // Classify a peer's public key against the owner's own devices (fleet) and
   // accepted contacts. Fail-closed: unknown / signed-out / error → null.
   async function classifyPublicKey(publicKey) {
-    const f = await fleet();
+    const f = await cachedDevices();
     if (f.ok) {
       const devices = (f.data && f.data.devices) || [];
       if (devices.some((d) => d.publicKey && d.publicKey === publicKey)) return 'fleet';
     }
-    const c = await contacts();
+    const c = await cachedContacts();
     if (c.ok) {
       const accepted = (c.data && c.data.accepted) || [];
       if (accepted.some((d) => d.publicKey && d.publicKey === publicKey)) return 'contact';
@@ -129,6 +153,7 @@ export function createAccountService({
     async login(input) {
       const res = await session.login(input);
       if (res.ok) {
+        invalidateClassifyCache(); // a fresh sign-in must never classify against a prior account's cached lists
         log.info('logged in');
         const token = await session.getAccessToken();
         if (token) await ensureUploaded(token);
@@ -149,6 +174,7 @@ export function createAccountService({
         }
       }
       const result = await session.logout();
+      invalidateClassifyCache(); // don't hold a signed-out user's fleet/contacts in memory
       log.info('logged out');
       return result;
     },

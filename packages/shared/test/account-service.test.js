@@ -196,6 +196,80 @@ describe('createAccountService', () => {
   });
 });
 
+describe('classifyPublicKey caching (Phase 3b-2, F-B5)', () => {
+  const baseRoutes = () => ({
+    '/login': { status: 200, body: { accessToken: jwt(), refreshToken: 'r1', deviceId: 'd1' } },
+    '/devices/key': { status: 200, body: {} },
+    '/devices/heartbeat': { status: 200, body: {} },
+    '/devices': { status: 200, body: { devices: [{ id: 'd1', publicKey: 'MINE', online: true }] } },
+    '/contacts': { status: 200, body: { accepted: [{ deviceId: 'd2', publicKey: 'CONTACT' }], incoming: [], outgoing: [] } },
+  });
+  const build = (routes, now = () => 1_700_000_000_000) => {
+    const ff = fakeFetch(routes);
+    const service = createAccountService({
+      baseUrl: 'https://auth.example', safeStorage: fakeSafeStorage, fs: fakeFs(),
+      filePath: '/cfg/token.enc', fetch: ff.impl, now,
+    });
+    const countOf = (suffix) => ff.calls.filter((c) => c.url.endsWith(suffix)).length;
+    return { service, countOf };
+  };
+
+  test('N concurrent classifyPublicKey(sameKey) fetch /devices and /contacts exactly once (coalescing)', async () => {
+    const { service, countOf } = build(baseRoutes());
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+    // A STRANGER key forces BOTH lists to be consulted (fleet miss → contacts miss).
+    const results = await Promise.all(Array.from({ length: 8 }, () => service.classifyPublicKey('STRANGER')));
+    expect(results.every((r) => r === null)).toBe(true);
+    expect(countOf('/devices')).toBe(1);   // was 8 before the cache
+    expect(countOf('/contacts')).toBe(1);  // was 8 before the cache
+  });
+
+  test('a repeat classify within TTL does not re-fetch; caching does not change the answer', async () => {
+    const { service, countOf } = build(baseRoutes());
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+    expect(await service.classifyPublicKey('MINE')).toBe('fleet');     // fetches /devices, caches
+    expect(await service.classifyPublicKey('CONTACT')).toBe('contact');// /devices cache hit, fetches /contacts
+    expect(await service.classifyPublicKey('MINE')).toBe('fleet');     // all cached
+    expect(countOf('/devices')).toBe(1);
+    expect(countOf('/contacts')).toBe(1);
+  });
+
+  test('re-login invalidates the cache so a prior account\'s fleet is not served (fail-closed)', async () => {
+    const routes = baseRoutes();
+    const { service, countOf } = build(routes); // fixed now → TTL never expires; only invalidation can clear
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+    expect(await service.classifyPublicKey('MINE')).toBe('fleet');     // cached: MINE ∈ fleet
+    routes['/devices'].body = { devices: [] };                         // account B's fleet: MINE is gone
+    expect(await service.classifyPublicKey('MINE')).toBe('fleet');     // still cached (proves the cache)
+    await service.login({ email: 'b@b.c', password: 'pw', deviceName: 'ctrl' }); // account switch → invalidate
+    expect(await service.classifyPublicKey('MINE')).toBe(null);        // re-fetched B's fleet → MINE not present
+  });
+
+  test('signed out, classifyPublicKey is null and never fetches (fail-closed short-circuit)', async () => {
+    const { service, countOf } = build({});
+    expect(await service.classifyPublicKey('ANY')).toBe(null);
+    expect(countOf('/devices')).toBe(0);
+    expect(countOf('/contacts')).toBe(0);
+  });
+
+  test('an error /devices result is never cached, so the next classify re-fetches (fail-closed)', async () => {
+    const routes = baseRoutes();
+    let devicesCalls = 0;
+    const ff = fakeFetch(routes);
+    const wrapped = async (url, init) => { if (url.endsWith('/devices')) devicesCalls++; return ff.impl(url, init); };
+    const service = createAccountService({
+      baseUrl: 'https://auth.example', safeStorage: fakeSafeStorage, fs: fakeFs(),
+      filePath: '/cfg/token.enc', fetch: wrapped, now: () => 1_700_000_000_000,
+    });
+    await service.login({ email: 'a@b.c', password: 'pw', deviceName: 'ctrl' });
+    routes['/devices'] = { status: 500, body: { error: 'boom' } };
+    await service.classifyPublicKey('MINE'); // errored fetch — must NOT be cached
+    routes['/devices'] = { status: 200, body: { devices: [{ id: 'd1', publicKey: 'MINE', online: true }] } };
+    expect(await service.classifyPublicKey('MINE')).toBe('fleet'); // proves a re-fetch happened
+    expect(devicesCalls).toBe(2);
+  });
+});
+
 describe('connect-from-console: device keypair lifecycle', () => {
   test('login generates + persists a keypair and uploads the public key', async () => {
     const ff = fakeFetch({

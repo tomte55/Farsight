@@ -143,9 +143,29 @@ failures that hang or vanish instead of surfacing. These are the rules we hold e
      terminal `error:` → `scheduleRedial`), so `fb6` drops a SENDER flow but must do so only AFTER the
      `consent prompt shown` log — injecting earlier let the ~500ms re-dial rejoin the still-forming
      rendezvous as a normal 4/4 join (no buffer path exercised).
-     **Honest deferrals (R9), carried to Phase 3b-2+:** **Phase 3b-2 (auth-inherit) is next** — a
-     non-anchor/re-dialed flow still runs the FULL handshake (password/keypair auth) rather than
-     inheriting the group's already-verified peer identity; pre-consent PC-count reduction (all N flows
+   - **Phase 3b-2 — kill the per-flow auth amplification. DONE (2026-07-20).** The pivot: the map showed
+     the per-flow cost of a linked (own-fleet) multi-flow transfer is NOT the crypto handshake (local
+     Ed25519, sub-ms) but an UNCACHED `auth.sovexa.org` classification lookup (`GET /devices` + `GET
+     /contacts`) that `classifyPublicKey` runs on every flow's critical bulk-gating path — up to ~4× per
+     flow, ~32 GETs per N=8 receive, more on every re-dial. So 3b-2 **caches the classification** instead
+     of the originally-tentative "skip the handshake / inherit identity" gate-surgery (DROPPED — it would
+     have touched the fail-closed gate on BOTH ends + needed version-skew handling + REDUCED per-flow
+     crypto verification, all to save ~2 local round-trips). New `createTtlCache` (`ttl-cache.js`: TTL +
+     in-flight coalescing) fronts `classifyPublicKey`'s internal `fleet()`/`contacts()` fetches
+     (`account-service.js`), so N concurrent flows + re-dials make ONE `/devices` + ONE `/contacts` fetch,
+     not N. **Fail-closed preserved (verified by structure):** signed-out short-circuits OUTSIDE the cache
+     (no fetch, returns null); only `ok:true` cached; login+logout invalidate (an account switch never
+     classifies against a prior fleet). The per-flow crypto handshake, the auth gate, and the wire
+     protocol are UNTOUCHED — every flow is still fully cryptographically verified; the public
+     `fleet()`/`contacts()`/`isAccountPublicKey` stay uncached (console/control freshness). **Evidence:**
+     mutation-checked unit tests — the cache primitive (coalescing/TTL/fail-closed), N-concurrent-classify
+     → one fetch each, account-switch invalidation, error-not-cached; full `npx vitest run` green (206
+     files / 1429 tests). **Honest scope (R9):** the two-process CI harness runs PASSWORD (ad-hoc)
+     transfers, which never touch the linked classify path, so the proof is the unit/integration cache
+     tests (the amplification is an account-service behavior, not a transfer-wire path); the live drop is
+     maintainer-measurable on the own-fleet setup.
+     **Honest deferrals (R9), carried forward — Phase 4 (chunk manifest) is next:** pre-consent PC-count
+     reduction (all N flows
      are dialed + connected before consent, holding N peer connections open during the human decision);
      F-C5 (`getStats()` wired, no consumer); F-B7 (the control-SESSION signaling reconnect in `peer.js`
      still runs its own ICE-restart — a separate path from the transfer worker); a residual F-C4 leak

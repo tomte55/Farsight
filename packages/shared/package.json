@@ -63,7 +63,8 @@
     "./app-log": "./src/app-log.js",
     "./diagnostics-bundle": "./src/diagnostics-bundle.js",
     "./shell-nav": "./src/shell-nav.js",
-    "./status-bar": "./src/status-bar.js"
+    "./status-bar": "./src/status-bar.js",
+    "./ttl-cache": "./src/ttl-cache.js"
   },
   "dependencies": {
     "argon2": "^0.41.1"
