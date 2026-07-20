@@ -24,6 +24,23 @@ export function createRangeSet(intervals = []) {
       if (!(length > 0)) return;
       ivals = normalize([...ivals, [offset, offset + length]]);
     },
+    // Subtract [offset, offset+length) from coverage — the inverse of add().
+    // Phase 4 uses this to PUNCH a hole for a chunk that was covered but is later
+    // found bad (retro-verify race, or a finalize-mismatch locate), so the normal
+    // report->gap->resend loop re-drives only that chunk. Preserves sorted+disjoint
+    // order (subtraction can only shrink/split intervals, never merge), so no
+    // re-normalize is needed.
+    remove(offset, length) {
+      if (!(length > 0)) return;
+      const rs = offset, re = offset + length;
+      const out = [];
+      for (const [s, e] of ivals) {
+        if (e <= rs || s >= re) { out.push([s, e]); continue; } // no overlap: keep
+        if (s < rs) out.push([s, rs]);                          // left remainder
+        if (e > re) out.push([re, e]);                          // right remainder
+      }
+      ivals = out;
+    },
     covers(offset, length) {
       if (length <= 0) return true;
       const end = offset + length;

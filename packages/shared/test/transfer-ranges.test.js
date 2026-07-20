@@ -46,6 +46,33 @@ describe('transfer-ranges', () => {
     expect(r.coveredBytes()).toBe(50);
   });
 
+  it('remove() subtracts an interval: splits, trims edges, and clears full overlap', () => {
+    const mid = createRangeSet([[0, 100]]);
+    mid.remove(40, 20);                 // punch [40,60) out of the middle
+    expect(mid.toJSON()).toEqual([[0, 40], [60, 100]]);
+
+    const edge = createRangeSet([[0, 100]]);
+    edge.remove(0, 30);                 // trim the left edge
+    expect(edge.toJSON()).toEqual([[30, 100]]);
+
+    const whole = createRangeSet([[10, 20]]);
+    whole.remove(0, 1000);              // remove covers it entirely
+    expect(whole.toJSON()).toEqual([]);
+
+    const none = createRangeSet([[0, 10]]);
+    none.remove(50, 5);                 // disjoint -> no-op
+    expect(none.toJSON()).toEqual([[0, 10]]);
+  });
+
+  it('after remove(), gaps() and covers() reflect the hole; length 0 is a no-op', () => {
+    const r = createRangeSet([[0, 100]]);
+    r.remove(40, 20);
+    expect(r.covers(40, 20)).toBe(false);
+    expect(r.gaps(100)).toEqual([{ offset: 40, length: 20 }]);
+    r.remove(0, 0); // length 0 is a no-op
+    expect(r.toJSON()).toEqual([[0, 40], [60, 100]]);
+  });
+
   it('isComplete is true when [0,size) is covered even if extra intervals exist past size', () => {
     const r = createRangeSet([[0, 50], [60, 70]]);
     expect(r.isComplete(50)).toBe(true);   // [0,50) fully covered
