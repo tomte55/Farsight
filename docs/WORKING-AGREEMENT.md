@@ -94,7 +94,7 @@ failures that hang or vanish instead of surfacing. These are the rules we hold e
      minutes on every push). Full `npx vitest run` green (205 files / 1416 tests); baseline
      `two-process-harness.mjs` (no fault injection) re-confirmed byte-identical at N=1 and N=8 — happy
      path not regressed.
-     **Review fix (2026-07-20):** the harness computed byte-identical N/N delivery but only logged it
+     **Review fix 1 (2026-07-20):** the harness computed byte-identical N/N delivery but only logged it
      as INFO — the gate itself never asserted it, so a run could go green on a terminal `interrupted`
      with a dropped file (the exact old 5/6 F-B11 bug), a silent-regression gap. Hardened
      `transfer-fault-e2e.mjs` so a run now FAILS unless the receiver's terminal state is `completed`
@@ -102,6 +102,16 @@ failures that hang or vanish instead of surfacing. These are the rules we hold e
      3/3 for both `fb1` and `fb2` at flowCount=4 under the stronger assertion, and bite-confirmed by
      temporarily forcing `deliveredAll = false`, which flipped the exit code from 0 to 1 with the
      expected failure message (then reverted).
+     **Review fix 2 (2026-07-20):** "byte-identical" from fix 1 was still a lie — `deliveredAll` came
+     from `awaitDelivery()`, which only checks FILENAME presence on disk, never bytes or hash, so a
+     truncated/corrupted/zero-length file under the correct name still passed green. Wired in the
+     already-existing `verifyDelivery()` (sha256 + size compare, the same verifier
+     `two-process-harness.mjs` uses for the happy-path CI gate) as the authoritative check, with the
+     filename count kept only as a cheap pre-check. Re-verified 3/3 for both `fb1` and `fb2` at
+     flowCount=4 under real sha256 verification (no corruption found — the filename-only proxy from fix
+     1 was not hiding a real bug), and bite-confirmed by temporarily corrupting a received file's bytes
+     before verification, which flipped the exit code from 0 to 1 with a `HASH MISMATCH` failure (then
+     reverted).
      **Honest deferrals (R9), carried to Phase 3b+:** F-C5 (`getStats()` wired but no consumer reads
      it — deferred until something needs the numbers); F-B7 (the control-SESSION signaling
      reconnect — `peer.js` still runs its own ICE-restart for the remote-control session, a *separate*

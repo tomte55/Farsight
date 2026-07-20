@@ -17,7 +17,7 @@
 // ============================================================================
 import {
   log, delay, makeAttemptContext, startSignaling, writeStandardPayload,
-  bringUpPair, cdpEval, awaitDelivery, awaitLogLine, mkdir, writeFile, join, sha256, CHUNK,
+  bringUpPair, cdpEval, awaitDelivery, verifyDelivery, awaitLogLine, mkdir, writeFile, join, sha256, CHUNK,
 } from './harness-lib.mjs';
 
 const FLOW_COUNT = Number(process.env.SPIKE_FLOWS) || 4;
@@ -102,12 +102,19 @@ async function runScenario({ label, fault, surfacedRegex }) {
     // NOT a success for these scenarios (the point of Phase 3a recovery is that it
     // COMPLETES the transfer). This used to be logged as INFO only, which let a run
     // go green even with a dropped file — the exact old 5/6 F-B11 bug — so it is
-    // now asserted like the other two contracts.
+    // now asserted like the other two contracts. `received` from awaitDelivery only
+    // proves FILENAME presence — it is a cheap pre-check, NOT the authoritative
+    // pass/fail. The authoritative check is verifyDelivery's sha256 + size compare
+    // (same verifier two-process-harness.mjs uses for the CI happy-path gate) —
+    // a truncated/corrupted/zero-length file under the right name must FAIL here.
     const received = await awaitDelivery(recvDownloads, expected, 3000);
     const deliveredAll = received.size === expected.size;
-    log(`delivery: ${received.size}/${expected.size} files ${deliveredAll ? '(full recovery)' : '(INCOMPLETE)'}`);
+    log(`delivery (filename pre-check): ${received.size}/${expected.size} files ${deliveredAll ? '(all names present)' : '(INCOMPLETE)'}`);
+    const verifyFailures = await verifyDelivery(received, expected);
+    log(`delivery (byte-identical verify): ${verifyFailures.length === 0 ? 'ALL OK' : `${verifyFailures.length} mismatch(es)`}`);
     if (terminal && terminalState !== 'completed') failures.push(`${label} REGRESSION: receiver's terminal state was '${terminalState}', not 'completed' — recovery must COMPLETE delivery, not just stop loud (the old F-B11 stall)`);
-    if (!deliveredAll) failures.push(`${label} REGRESSION: delivery incomplete (${received.size}/${expected.size} files byte-identical) — the old 5/6 F-B11 dropped-file bug`);
+    if (!deliveredAll) failures.push(`${label} REGRESSION: delivery incomplete (${received.size}/${expected.size} files present) — the old 5/6 F-B11 dropped-file bug`);
+    for (const f of verifyFailures) failures.push(`${label} REGRESSION: byte-identical verify failed — ${f}`);
 
     return { pass: failures.length === 0, failures };
   } finally {
