@@ -125,8 +125,8 @@ describe('main.js: SEND assembly wiring (text-based — main.js imports electron
     expect(main).toMatch(/import\s*\{\s*createGroupRendezvous\s*\}\s*from\s*['"]@farsight\/shared\/transfer-group-rendezvous['"]/);
   });
 
-  test('openChannel routes flowCount>1 SEND through assembleSendFlows with a minted groupId', () => {
-    expect(main).toMatch(/flowCount\s*>\s*1/);
+  test('openChannel routes every initiate SEND (flowCount>=1, one path) through assembleSendFlows with a minted groupId', () => {
+    expect(main).toMatch(/flowCount\s*>=\s*1/);
     expect(main).toMatch(/const groupId = newJobId\(\);/);
     expect(main).toMatch(/assembleSendFlows\(\{/);
   });
@@ -138,7 +138,9 @@ describe('main.js: SEND assembly wiring (text-based — main.js imports electron
 
   test('onGroupReady assembles the bundle and calls startReceive, then cancels the group (no map leak)', () => {
     expect(main).toMatch(/onGroupReady:\s*\(\{\s*groupId,\s*flowCount,\s*flows\s*\}\)\s*=>/);
-    expect(main).toMatch(/flowCount\s*>\s*1\s*\?\s*assembleReceiveGroup\(flows\)\s*:\s*flows\[0\]/);
+    // Phase 2 (one path): every receive builds the bundle via assembleReceiveGroup,
+    // no flowCount>1 ternary/flows[0] shortcut anymore.
+    expect(main).toMatch(/const bundle = assembleReceiveGroup\(flows\);/);
     // Tightened (Plan 3 Task 4 review): a bare substring match on
     // `groupRendezvous.cancel(groupId)` passes even if the call were hoisted
     // out of the .finally(...) and run unconditionally (before startReceive
@@ -165,21 +167,14 @@ describe('main.js: SEND assembly wiring (text-based — main.js imports electron
     expect(main).toMatch(/pendingGroupReceives\.delete\(sessionId\)/);
   });
 
-  test('the flowCount<=1 SEND path still returns the existing {channel,close,onRendezvousError,peerAuth} shape', () => {
-    // Tightened (Plan 3 Task 4 review): `worker.onSessionState` /
-    // `onRendezvousError` / `startsWith('error:')` / `channel: worker.channel,`
-    // ALSO appear verbatim in openAttachFlow (the RECEIVE/attach branch above),
-    // so those four substrings alone can't distinguish "the single-flow SEND
-    // branch was deleted" from "only the attach branch remains". Anchor on
-    // text that exists ONLY in this branch: the bare `signalingUrl` local
-    // (attach/multi-flow both call `currentSignalingUrl()` inline instead)
-    // feeding the initiator startRendezvous call with no groupId/flowIndex/
-    // flowCount fields, and a return object that ends right after `peerAuth,`
-    // (openAttachFlow's return has `linked`/`flowIndex` fields after peerAuth).
-    expect(main).toMatch(/const signalingUrl = currentSignalingUrl\(\);/);
-    expect(main).toMatch(/worker\.startRendezvous\(\{\s*\n\s*role: 'initiator',\s*\n\s*signalingUrl,\s*\n\s*targetId: target\?\.id,\s*\n\s*password: target\?\.password,/);
-    expect(main).toMatch(/onRendezvousError:\s*\(cb\)\s*=>\s*\{\s*rendezvousErrorCb\s*=\s*cb;\s*\},\s*\n\s*peerAuth,\s*\n\s*\};/);
-  });
+  // Phase 2 Task 1 (one path): the single-worker SEND branch (flowCount<=1,
+  // returning {channel,close,onRendezvousError,peerAuth} straight off one
+  // worker) is DELETED — every initiate send now routes through
+  // assembleSendFlows above, including flowCount:1 (a 1-slot supervisor). The
+  // test that pinned that branch's exact source shape is removed with it
+  // (tested dead code is worse than no code — CLAUDE.md R7); the replacement
+  // coverage is the multi-flow assembly tests in this file plus
+  // transfer-channel-assembly.test.js / transfer-flow-supervisor.test.js.
 });
 
 describe('transfer-worker.js / worker.js: groupId/flowIndex/flowCount threaded onto CONNECT + ATTACH', () => {

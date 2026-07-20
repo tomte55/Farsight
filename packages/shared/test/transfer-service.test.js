@@ -2255,9 +2255,23 @@ test('a send with target.flowCount=0 (or negative) falls back to single-flow, no
   });
   await svc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'sig-zero', flowCount: 0 } });
   expect(sendOpenArgs).toBeTruthy();
-  // Single-flow openArgs never carries a flowCount key at all (see runSend's
-  // `flowCount > 1 ? { ..., flowCount } : { role: 'initiate', target }`).
-  expect(sendOpenArgs.flowCount).toBeUndefined();
+  // Phase 2 (one path): flowCount is ALWAYS present in openArgs now (resolved
+  // to 1 here) so main routes every send -- including N=1 -- through the
+  // single coverage path (assembleSendFlows), never the old single-worker
+  // fork. See the dedicated "one path" test below for the pinned contract.
+  expect(sendOpenArgs.flowCount).toBe(1);
+});
+
+test('a flowCount:1 send passes flowCount:1 to openChannel (one path — no single-flow omission)', async () => {
+  const { manifest, sources } = await oneFileSource();
+  const seenOpenArgs = [];
+  const svc = createTransferService({
+    store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
+    openChannel: async (args) => { seenOpenArgs.push(args); return { channel: deadChannel(), close: async () => {} }; },
+    rendezvousTimeoutMs: 60,
+  });
+  await svc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'peer', flowCount: 1 } });
+  expect(seenOpenArgs[0].flowCount).toBe(1); // was undefined pre-fix (openArgs omitted flowCount when <=1)
 });
 
 describe('jobStateForCompletion (F-A4: done must not hide an undelivered file)', () => {

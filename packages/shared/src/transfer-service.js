@@ -380,11 +380,10 @@ export function createTransferService({ store, transferDir, consent, openChannel
     let approvalTimer = null;
     const disarmApprovalTimer = () => { if (approvalTimer) { clearTimeout(approvalTimer); approvalTimer = null; } };
     try {
-      // Plan 3 Task 3: flowCount>1 (per-target override, else the service
-      // default) drives the multi-flow branch below via a multi-flow openChannel
-      // call; flowCount<=1 is the existing call/path, byte-for-byte unchanged.
       const flowCount = resolveFlowCount(target && target.flowCount, serviceFlowCount);
-      const openArgs = flowCount > 1 ? { role: 'initiate', target, flowCount } : { role: 'initiate', target };
+      // Phase 2 (one path): always pass flowCount so main routes EVERY initiate
+      // (including N=1) through assembleSendFlows — the single coverage path.
+      const openArgs = { role: 'initiate', target, flowCount };
       const opened = await openChannel(openArgs);
       ({ close, onRendezvousError } = opened);
       if (pendingSends.has(jobId)) {
