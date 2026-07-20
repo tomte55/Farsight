@@ -70,6 +70,9 @@ export function createReceiver({
   // Phase 4: per-chunk hash function (hex), threaded into the router's
   // verify-before-add. Undefined -> the router's real-SHA-256 default.
   hashChunk,
+  // Phase 4: bounded rounds of finalize-mismatch locate+re-drive before a hashed
+  // file that still won't verify is declared terminal (loud) — never an infinite loop.
+  locateMaxAttempts = 3,
 }) {
   // The ctrl channel is held in a MUTABLE ref (mirrors createSender): a
   // re-dialed slot 0 is handed over via setCtrl, so every ctrl.sendCtrl(...) site
@@ -164,6 +167,8 @@ export function createReceiver({
   // covered (reportFiles(), below) so the paired sender's coverage tracker
   // converges instead of re-sending into the same failure forever.
   const terminalFailedFiles = new Set();
+  // Phase 4: per-file count of finalize-mismatch locate rounds (bounds the repair).
+  const locateAttempts = new Map();
   // Reassembly buffer for a chunked OFFER (offer_begin -> offer_entries* -> offer_end).
   let offerAccum = null;
   // Phase 4: reassembly buffer for a file's chunk-hash manifest
@@ -337,7 +342,7 @@ export function createReceiver({
         return p;
       },
       verifyAndFinalize: ({ fileId, expectedHash }) => verifyAndFinalize({ ...findEntry(fileId), expectedHash, partFile: partFiles.get(fileId) }),
-      onFileDone: ({ fileId, ok: fileOk, terminal }) => {
+      onFileDone: async ({ fileId, ok: fileOk, terminal }) => {
         if (fileOk) {
           finalizedFiles.add(fileId);
         } else if (terminal) {
@@ -349,7 +354,21 @@ export function createReceiver({
           // reportFiles() purposes.
           terminalFailedFiles.add(fileId);
         } else {
-          router.resetFile(fileId); verifyingEmitted = false; // verify-mismatch: real retry cycle — allow re-surfacing
+          // Whole-file verify mismatch. Phase 4: with per-chunk hashes, LOCATE the bad
+          // chunks and re-drive ONLY those (punch them out of coverage -> the gap-drive
+          // loop re-sends exactly them); without hashes, fall back to a whole-file retry
+          // (today's behavior). Bounded: after locateMaxAttempts fruitless rounds, or a
+          // hashed file that verifies chunk-by-chunk yet still fails whole-file, declare
+          // it terminal (loud) rather than looping forever.
+          const n = (locateAttempts.get(fileId) || 0) + 1; locateAttempts.set(fileId, n);
+          const { removed, hadHashes } = await router.locateAndPunch(fileId);
+          if (!hadHashes) {
+            await router.resetFile(fileId); verifyingEmitted = false; // old sender: whole-file retry
+          } else if (removed > 0 && n <= locateMaxAttempts) {
+            verifyingEmitted = false; // punched gaps -> sender re-drives only those
+          } else {
+            terminalFailedFiles.add(fileId); router.markFailed(fileId); // unrepairable / cap hit -> loud terminal
+          }
         }
         onEvent({ type: fileOk ? 'file-done' : 'file-failed', fileId, ...(terminal ? { reason: 'io_error' } : {}) });
         maybeComplete();

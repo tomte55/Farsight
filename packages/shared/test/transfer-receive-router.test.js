@@ -358,5 +358,30 @@ describe('transfer-receive-router', () => {
       await router.setChunkHashes(0, 4, [H(c0), H(new Uint8Array([0, 0, 0, 0]))]);
       expect(router.rangesFor().find((r) => r.fileId === 0).ivals).toEqual([[0, 4]]); // bad chunk retro-removed
     });
+
+    it('locateAndPunch removes ONLY the chunks whose on-disk bytes mismatch their hash', async () => {
+      const size = 12; const part = fakePart(size);
+      const c0 = new Uint8Array([1, 1, 1, 1]);
+      const c1 = new Uint8Array([2, 2, 2, 2]);
+      const c2 = new Uint8Array([3, 3, 3, 3]);
+      const router = createReceiveRouter({ manifest: { entries: [{ fileId: 0, size }] }, openPart: () => Promise.resolve(part), verifyAndFinalize: () => Promise.resolve({ ok: true }), onFileDone: () => {}, onProgress: () => {} });
+      await router.setChunkHashes(0, 4, [H(c0), H(c1), H(c2)]);
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: c0 }));
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 4, length: 4, payload: c1 }));
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 8, length: 4, payload: c2 }));
+      // No file_end hash arrives, so the file is fully covered but not finalized.
+      part.buf.set(new Uint8Array([9, 9, 9, 9]), 4); // corrupt chunk 1 on disk (post-verification corruption)
+      const { removed, hadHashes } = await router.locateAndPunch(0);
+      expect(hadHashes).toBe(true);
+      expect(removed).toBe(1);
+      expect(router.rangesFor().find((r) => r.fileId === 0).ivals).toEqual([[0, 4], [8, 12]]); // only chunk 1 punched
+    });
+
+    it('locateAndPunch on a file with no chunk hashes reports hadHashes:false (caller falls back to resetFile)', async () => {
+      const part = fakePart(4);
+      const router = createReceiveRouter({ manifest: { entries: [{ fileId: 0, size: 4 }] }, openPart: () => Promise.resolve(part), verifyAndFinalize: () => Promise.resolve({ ok: true }), onFileDone: () => {}, onProgress: () => {} });
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: 0, length: 4, payload: new Uint8Array([1, 2, 3, 4]) }));
+      expect(await router.locateAndPunch(0)).toEqual({ removed: 0, hadHashes: false });
+    });
   });
 });

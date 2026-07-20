@@ -88,13 +88,15 @@ export function createReceiveRouter({
     }
     if (r && r.ok) {
       f.finalized = true;
-      onFileDone && onFileDone({ fileId, ok: true });
+      if (onFileDone) await onFileDone({ fileId, ok: true });
     } else {
       // Verification FAILED: the bytes are all present but wrong. Do NOT mark the file
       // finalized (so isComplete() correctly stays false and does not report success on a
       // corrupt file); clear finalizing so a Plan-2 re-fetch can re-verify. Surface ok:false.
+      // AWAITED so the receiver's locate (Phase 4) runs INSIDE this serialized turn —
+      // f.ranges must not be mutated by a concurrent onBulkFrame during the read-back.
       f.finalizing = false;
-      onFileDone && onFileDone({ fileId, ok: false });
+      if (onFileDone) await onFileDone({ fileId, ok: false });
     }
   }
 
@@ -147,7 +149,7 @@ export function createReceiveRouter({
       if (lastErr) {
         f.failed = true;
         await closeAndClearPart(f);
-        onFileDone && onFileDone({ fileId: d.fileId, ok: false, terminal: true });
+        if (onFileDone) await onFileDone({ fileId: d.fileId, ok: false, terminal: true });
         return; // NOT rethrown — the receive must not fail because of one file
       }
 
@@ -228,6 +230,39 @@ export function createReceiveRouter({
       f.hash = null;
       f.finalizing = false;
       f.ranges = createRangeSet();
+    },
+    // Phase 4: post-verification corruption repair. On a whole-file verify mismatch,
+    // hash every chunk of the .part against the manifest and remove (punch a gap in)
+    // each that no longer matches — so the normal report->gap->resend loop re-drives
+    // ONLY the bad chunks, not the whole file (the pre-Phase-4 resetFile). Returns how
+    // many chunks were punched + whether we had hashes at all (no hashes -> the caller
+    // falls back to resetFile). maybeFinalize closed the .part before verifying, so
+    // reopen it for the read-back.
+    async locateAndPunch(fileId) {
+      const f = files.get(fileId);
+      if (!f || f.finalized || f.failed) return { removed: 0, hadHashes: false };
+      if (!f.chunkHashes) return { removed: 0, hadHashes: false };
+      f.finalizing = false;
+      f.part = null; f.partPromise = null; // force a fresh open (verify closed the handle)
+      const cb = f.chunkBytes || TRANSFER_CHUNK_BYTES;
+      const part = await partOf(f, fileId);
+      let removed = 0;
+      for (let idx = 0; idx < f.chunkHashes.length; idx += 1) {
+        const off = idx * cb; const len = Math.min(cb, f.size - off);
+        if (len <= 0) continue;
+        const bytes = await part.readAt(off, len);
+        if (hashChunk(bytes) !== f.chunkHashes[idx]) { f.ranges.remove(off, len); removed += 1; }
+      }
+      return { removed, hadHashes: true };
+    },
+    // Phase 4: mark a file terminally failed (a hashed file that couldn't be repaired
+    // within the locate cap) so isComplete() counts it as resolved and the receive
+    // completes-with-errors rather than looping. Mirrors the router's own I/O-terminal path.
+    markFailed(fileId) {
+      const f = files.get(fileId);
+      if (!f) return;
+      f.failed = true;
+      if (f.part) { f.part.close().catch(() => {}); f.part = null; f.partPromise = null; }
     },
     // Fd-leak fix: release every file's open .part handle when a multi-flow
     // receive settles WITHOUT every file finalizing (canceled/stalled/errored)
