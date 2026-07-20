@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createChunkProducer } from '../src/transfer-producer.js';
 import { createRangeSet } from '../src/transfer-ranges.js';
+import { TRANSFER_CHUNK_BYTES } from '../src/transfer-chunk.js';
 
 function slicerOver(bytes) {
   return (offset, length) => Promise.resolve(bytes.subarray(offset, offset + length));
@@ -26,6 +27,16 @@ describe('transfer-producer', () => {
     for await (const c of p.produce({ fileId: 0, size: 30 }, covered)) out.push(c.offset);
     expect(out).toEqual([10, 20]);        // only the uncovered chunks are sent
     expect(hashed.length).toBe(30);       // but the whole file was hashed
+  });
+
+  it('defaults chunkSize to the shared TRANSFER_CHUNK_BYTES grid constant, and hashUpdate is optional', async () => {
+    expect(TRANSFER_CHUNK_BYTES).toBe(131072);
+    const size = TRANSFER_CHUNK_BYTES + 1; // exactly 2 grid chunks
+    const src = new Uint8Array(size);
+    const chunks = [];
+    const p = createChunkProducer({ readChunk: slicerOver(src) }); // no chunkSize, no hashUpdate
+    for await (const c of p.produce({ fileId: 0, size }, createRangeSet())) chunks.push(c.length);
+    expect(chunks).toEqual([TRANSFER_CHUNK_BYTES, 1]);
   });
 
   it('throws immediately for a non-positive chunkSize instead of infinite-looping', () => {

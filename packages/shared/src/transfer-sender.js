@@ -8,6 +8,7 @@ import {
   fileEndFrame, jobDoneFrame, cancelFrame, parseCtrlFrame,
 } from './transfer-protocol.js';
 import { createHash } from 'node:crypto';
+import { TRANSFER_CHUNK_BYTES } from './transfer-chunk.js';
 import { createChunkProducer } from './transfer-producer.js';
 import { createSendPool } from './transfer-send-pool.js';
 import { createCoverageTracker } from './transfer-reconcile.js';
@@ -23,7 +24,7 @@ import { batchEntriesBySize, serializer } from './transfer-orchestrator-shared.j
 // until the receiver's `complete` ack lands (same discipline the single-flow
 // sender driver used before it was removed — Phase 2 Task 3).
 export function createSender({
-  ctrl: ctrl0, flows, jobId, manifest, chunkSize = 131072, flowCount, groupId,
+  ctrl: ctrl0, flows, jobId, manifest, chunkSize = TRANSFER_CHUNK_BYTES, flowCount, groupId,
   readerFor, newHash = () => createHash('sha256'),
   // Resilient multi-flow: the supervisor's starvation waiter. The send pool
   // awaits it (instead of throwing no_live_flows) when it has a chunk to send
