@@ -2,7 +2,7 @@
 // SP3 (spec §6) MAIN-ONLY streamed-to-disk transfer io. Uses node:fs/crypto/path
 // like updater.js/device-keypair.js — NEVER imported by a sandboxed renderer.
 // Consumes the pure transfer-manifest.js for path safety.
-import { stat, readdir, open, mkdir, rename, utimes, rm } from 'node:fs/promises';
+import { stat, readdir, open, mkdir, rename, utimes } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { resolve, join, sep, basename, dirname } from 'node:path';
@@ -80,7 +80,13 @@ export async function finalizeReceivedPath({ destRoot, relPath, expectedHash, mt
     try { await stat(finalPath); return { ok: true }; } catch (e) { if (e && e.code === 'ENOENT') return { ok: false }; throw e; }
   }
   const actual = await hashFile(partPath);
-  if (actual !== expectedHash) { await rm(partPath, { force: true }); return { ok: false }; }
+  // Phase 4: on a whole-file mismatch, KEEP the .part — the receiver's chunk-locate
+  // reads it back to punch only the bad chunks (re-driving just those), and the
+  // old-sender resetFile path overwrites it. Deleting it (the pre-Phase-4 behavior)
+  // destroyed the data locate needs, forcing a whole-file re-download (found live by
+  // the fb7 real-wire harness: locate reopened a fresh zero-filled .part -> punched
+  // all 201 chunks). Left intact, it's just the normal resume artifact.
+  if (actual !== expectedHash) { return { ok: false }; }
   await rename(partPath, finalPath);
   const secs = mtime / 1000;
   await utimes(finalPath, secs, secs);

@@ -18,6 +18,11 @@
 //   fb6  — F-B6 (Phase 3b): a flow that re-dials INTO a held consent window is
 //          BUFFERED (a `rolling-join buffered` log line) and attached on accept,
 //          then completes N/N — pre-3b it was dropped as an orphan.
+//   fb7  — F-B7 (Phase 4): corrupt already-verified chunks of a receive .part on
+//          disk mid-transfer. The whole-file finalize hash catches the mismatch;
+//          the receiver LOCATES the bad chunks and re-drives ONLY those (not the
+//          whole file), then completes byte-identical. Asserts a verify mismatch
+//          was detected (recv ev=file-failed) then recv ev=completed + N/N.
 //
 // Env: SPIKE_FLOWS (default 4), SPIKE_WAIT_MS (default 90000), SPIKE_SCENARIO.
 // ============================================================================
@@ -25,6 +30,23 @@ import {
   log, delay, makeAttemptContext, startSignaling, writeStandardPayload,
   bringUpPair, armConsentHold, cdpEval, awaitDelivery, verifyDelivery, awaitLogLine, mkdir, writeFile, join, sha256, CHUNK,
 } from './harness-lib.mjs';
+import { open as fsOpen, readdir as fsReaddir } from 'node:fs/promises';
+
+// Recursively find a <name> file under root (the receiver's in-flight .part).
+async function findPartFile(root, name) {
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try { entries = await fsReaddir(dir, { withFileTypes: true }); } catch { continue; }
+    for (const d of entries) {
+      const p = join(dir, d.name);
+      if (d.isDirectory()) stack.push(p);
+      else if (d.name === name) return p;
+    }
+  }
+  return null;
+}
 
 const FLOW_COUNT = Number(process.env.SPIKE_FLOWS) || 4;
 const WAIT_MS = Number(process.env.SPIKE_WAIT_MS) || 90000;
@@ -239,6 +261,76 @@ async function runFB6() {
   } finally { await delay(500); await cleanupAll(); await delay(300); }
 }
 
+// F-B7 (Phase 4, chunk manifest): corrupt already-written, already-VERIFIED chunks
+// of a receive .part ON DISK mid-transfer. Live per-chunk verify passed them (they
+// were clean on the wire), so they sit corrupt until the whole-file finalize hash
+// catches the mismatch -> the receiver LOCATES the bad chunks (hash each vs the
+// file_hashes manifest), punches ONLY those out of coverage, and the gap-drive loop
+// re-sends ONLY them. Asserts: a verify mismatch was detected (recv ev=file-failed),
+// then byte-identical N/N + recv ev=completed. The harness corrupts the .part
+// directly (libuv opens files with permissive Windows share flags) — no app hook.
+async function runFB7() {
+  const { cleanups, cleanupAll, tmp } = makeAttemptContext();
+  try {
+    const signalingUrl = await startSignaling(cleanups);
+    const { srcDir, expected } = await writeFaultPayload(await tmp('fault-src-'));
+    log(`F-B7: payload ${expected.size} files; flowCount=${FLOW_COUNT}`);
+    const { sendWs, hostId, hostPw, recvDownloads, sendChild, recvChild } =
+      await bringUpPair({ signalingUrl, cleanups, tmp, extraEnv: { FARSIGHT_TEST_HOOKS: '1' } });
+
+    const sendRes = await cdpEval(sendWs, `window.farsightIpc.transferSend(${JSON.stringify({ target: { id: hostId, password: hostPw, flowCount: FLOW_COUNT }, paths: [srcDir] })})`);
+    if (!sendRes || sendRes.error) throw new Error('transfer:send failed: ' + JSON.stringify(sendRes));
+
+    // Wait until bytes are flowing, then let the early chunks land on disk.
+    await awaitLogLine(sendChild, /send ev=progress/, 20000);
+    await delay(700);
+    const partPath = await findPartFile(recvDownloads, 'huge.bin.part');
+    if (!partPath) throw new Error('F-B7: huge.bin.part not found under recvDownloads (transfer finalized already? make the payload bigger / corrupt sooner)');
+    // Corrupt a SPREAD of chunks: the already-received ones stick (covered, not
+    // re-requested until locate); ones not yet received get overwritten clean by
+    // the real chunk. At least the early ones are on disk here -> a finalize mismatch.
+    const corruptChunks = [5, 40, 80, 120];
+    const fh = await fsOpen(partPath, 'r+');
+    try { for (const idx of corruptChunks) await fh.write(Buffer.alloc(4096, 0xEE), 0, 4096, idx * CHUNK); }
+    finally { await fh.close(); }
+    log(`F-B7 corrupted chunks ${corruptChunks.join(',')} of ${partPath}`);
+
+    const failures = [];
+    // (1) A finalize mismatch must be DETECTED and the locate path must run: the
+    // receiver emits file-failed on a verify mismatch before repairing. Absent ->
+    // the corruption didn't land in time (tune delay/payload); a false green otherwise.
+    const repaired = await awaitLogLine(recvChild, /ev=file-failed/, WAIT_MS);
+    log('F-B7 verify mismatch detected (locate ran):', repaired ? 'YES' : 'NO');
+    if (!repaired) failures.push('F-B7: no "ev=file-failed" on the receiver — corruption not detected (locate never ran; tune timing/payload)');
+    // (2) Repair must COMPLETE byte-identical.
+    const terminal = await awaitLogLine(recvChild, /recv ev=(completed|interrupted|failed|canceled)/, WAIT_MS);
+    const terminalState = terminal ? (terminal.match(/recv ev=(completed|interrupted|failed|canceled)/) || [])[1] : null;
+    log('F-B7 receiver terminal:', terminal ? terminalState : 'NONE (HANG!)');
+    if (!terminal) failures.push('F-B7 HANG: no terminal state within timeout');
+    if (terminal && terminalState !== 'completed') failures.push(`F-B7: terminal '${terminalState}', not 'completed' — locate/repair did not complete delivery`);
+    const received = await awaitDelivery(recvDownloads, expected, 5000);
+    const verifyFailures = await verifyDelivery(received, expected);
+    if (received.size !== expected.size) failures.push(`F-B7: delivery incomplete ${received.size}/${expected.size}`);
+    for (const f of verifyFailures) failures.push(`F-B7: byte verify failed — ${f}`);
+    // (3) CHUNK-GRANULAR proof: the repair must re-send only a handful of chunks, NOT
+    // re-download the whole ~208-chunk huge.bin. Sum the final per-initiator-worker
+    // bulkOut (chunks sent). A clean run of this payload is ~208; a whole-file
+    // resetFile re-download of huge.bin would add ~200 -> ~400+. Threshold 300 fails
+    // that regression while leaving generous slack for the handful of repaired chunks.
+    // (Without this, a resetFile regression would still complete byte-identical and
+    // pass — this is what pins the Phase-4 value on the real wire.)
+    const perWorker = new Map();
+    for (const line of sendChild.lines) {
+      const m = line.match(/"workerId":"([^"]+)"[^}]*"role":"initiator"[^}]*"bulkOut":(\d+)/);
+      if (m) perWorker.set(m[1], Math.max(perWorker.get(m[1]) || 0, Number(m[2])));
+    }
+    const totalChunksSent = [...perWorker.values()].reduce((a, b) => a + b, 0);
+    log(`F-B7 total chunks sent across flows: ${totalChunksSent} (clean baseline ~208; whole-file re-download ~400+)`);
+    if (totalChunksSent > 300) failures.push(`F-B7: re-sent too much (${totalChunksSent} chunks) — looks like a whole-file re-download, not chunk-granular repair`);
+    return { pass: failures.length === 0, failures };
+  } finally { await delay(500); await cleanupAll(); await delay(300); }
+}
+
 async function main() {
   const scenarios = {
     // F-B1: the transfer signaling socket reports its own failure.
@@ -258,6 +350,8 @@ async function main() {
     fb5: () => runScenario({ label: 'F-B5', fault: { cmd: 'dropFlowSocket', side: 'receive', flowIndex: 0 }, surfacedRegex: /conn:error:signaling_(error|dropped|closed|timeout)/ }),
     // F-B6 (Phase 3b): a flow that races a HELD consent window is buffered, not dropped.
     fb6: runFB6,
+    // F-B7 (Phase 4): corrupt on-disk chunks -> finalize mismatch -> locate + re-drive only bad chunks.
+    fb7: runFB7,
     // F-A7: sender user-cancel → receiver 'canceled', not lingering 'interrupted'.
     fa7: runFA7,
   };

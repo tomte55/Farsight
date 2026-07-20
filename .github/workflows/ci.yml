@@ -121,3 +121,16 @@ jobs:
         env:
           SPIKE_SCENARIO: 'fb6'
           SPIKE_FLOWS: '4'
+      # Phase 4 chunk-manifest gate (Task 8, F-B7). Corrupts already-verified chunks
+      # of a receive .part on disk mid-transfer: the whole-file finalize hash catches
+      # the mismatch, the receiver LOCATES the bad chunks and re-drives ONLY those
+      # (not the whole file), then completes byte-identical. Asserts a verify mismatch
+      # was detected (recv ev=file-failed) then recv ev=completed + N/N (verifyDelivery
+      # sha256) — proving on-disk corruption is repaired chunk-granularly, not by a
+      # whole-file re-download.
+      - name: Real-wire fault-injection harness (corrupt chunks then repair, F-B7)
+        run: node packages/controller/test/harness-spike/transfer-fault-e2e.mjs
+        timeout-minutes: 5
+        env:
+          SPIKE_SCENARIO: 'fb7'
+          SPIKE_FLOWS: '4'

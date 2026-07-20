@@ -96,7 +96,7 @@ describe('finalizeReceivedPath', () => {
     expect(new Uint8Array(await readFile(join(dir, 'a.bin')))).toEqual(content);
   });
 
-  it('hash mismatch removes the .part and returns not-ok', async () => {
+  it('hash mismatch returns not-ok and KEEPS the .part (Phase 4: chunk-locate repairs it in place)', async () => {
     const content = new Uint8Array([9, 9, 9]);
     const p = await createSparsePartFile({ destRoot: dir, relPath: 'b.bin' });
     await p.writeAt(0, content);
@@ -105,7 +105,10 @@ describe('finalizeReceivedPath', () => {
     const r = await finalizeReceivedPath({ destRoot: dir, relPath: 'b.bin', expectedHash: 'deadbeef', mtime: 1_700_000_000_000 });
     expect(r.ok).toBe(false);
     const finalPath = confineDestPath(dir, 'b.bin');
-    await expect(stat(`${finalPath}.part`)).rejects.toThrow();
+    // The .part must survive so the receiver's locate can read it back and re-drive
+    // only the bad chunks (deleting it forced a whole-file re-download — the fb7 bug).
+    expect((await stat(`${finalPath}.part`)).size).toBeGreaterThanOrEqual(3);
+    await expect(stat(finalPath)).rejects.toThrow(); // and it was NOT published
   });
 
   it('no .part but the final already exists (already-finalized resume case) returns ok without re-hashing', async () => {
