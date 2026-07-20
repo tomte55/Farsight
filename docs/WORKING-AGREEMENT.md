@@ -148,7 +148,10 @@ failures that hang or vanish instead of surfacing. These are the rules we hold e
      inheriting the group's already-verified peer identity; pre-consent PC-count reduction (all N flows
      are dialed + connected before consent, holding N peer connections open during the human decision);
      F-C5 (`getStats()` wired, no consumer); F-B7 (the control-SESSION signaling reconnect in `peer.js`
-     still runs its own ICE-restart — a separate path from the transfer worker).
+     still runs its own ICE-restart — a separate path from the transfer worker); a residual F-C4 leak
+     window in `runMultiFlowReceive` (a throw in `readPersistedRanges`/`createReceiver` between the jobId
+     race and the try/finally leaks the `receivePending` entry + any buffered handle — mirrors a
+     pre-existing unguarded `close()` there, low-probability, ~6-line fix that also closes the older leak).
 4. **Chunk manifest** — per-chunk hashing, cheap resume, within-transfer dedup, on a solid base.
 
 Evidence + rationale: `docs/private/superpowers/audits/2026-07-19-transfer-reliability-deep-dive.md`.

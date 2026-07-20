@@ -175,7 +175,11 @@ source of truth for done/progress/resume; (R9) honest status, deferrals written 
   the ~500ms re-dial rejoin the still-forming rendezvous as a normal join, bypassing the buffer path).
   **Deferred (R9):** **Phase 3b-2 (auth-inherit) is next** — a non-anchor/re-dialed flow still runs the
   FULL handshake instead of inheriting the group's verified peer identity; pre-consent PC-count
-  reduction (all N flows connect before consent); plus the still-open F-C5 and F-B7 above.
+  reduction (all N flows connect before consent); a residual F-C4 leak window in `runMultiFlowReceive`
+  — between the jobId race and the `activeReceives` try/finally, a throw in `readPersistedRanges`/
+  `createReceiver` leaks the `receivePending` entry + any buffered handle (mirrors a PRE-EXISTING
+  unguarded `close()` in the same region; low-probability, ~6-line fix that also closes the older leak);
+  plus the still-open F-C5 and F-B7 above.
 - **Two GATED, outward-facing actions** require explicit user approval per homelab ops rules: the
   signaling deploy (public subdomain) and opening coturn firewall ports.
 - **Logging: connection modules run in the RENDERER**, not main — they log via the `log:renderer`
