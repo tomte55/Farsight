@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { createTtlCache } from '../src/ttl-cache.js';
 
 describe('createTtlCache', () => {
