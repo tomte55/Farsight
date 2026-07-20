@@ -76,35 +76,7 @@ test('walkSource recurses a directory with posix relative paths under the dir na
 
 // createPartFile/sendFile (single-flow-only) were removed in Phase 2 Task 6 (F-C1/C2
 // dead code) along with hasFreeSpace/freeSpaceBytes/publishFullyReceivedFile.
-// finalizeReceivedFile survives (it's still exercised as a verifyAndFinalize strategy
-// by the multi-flow receiver in transfer-io-sparse.test.js and
-// transfer-multiflow-service-loopback.test.js) — paired here with the coverage path's
-// createSparsePartFile instead of the deleted createPartFile.
-import { createSparsePartFile, finalizeReceivedFile } from '../src/transfer-io.js';
-import { statSync, readFileSync, existsSync } from 'node:fs';
-
-test('finalizeReceivedFile verifies via completion read, renames .part and restores mtime', async () => {
-  const root = tmp();
-  const pf = await createSparsePartFile({ destRoot: root, relPath: 'ok/file.bin' });
-  const data = Buffer.from('payload-bytes-1234');
-  await pf.writeAt(0, data); await pf.fsync(); await pf.close();
-  const expected = createHash('sha256').update(data).digest('hex');
-  const mtime = 1_700_000_000_000; // ms
-  const r = await finalizeReceivedFile({ partFile: pf, expectedHash: expected, mtime });
-  expect(r.ok).toBe(true);
-  expect(existsSync(pf.partPath)).toBe(false);
-  expect(existsSync(pf.finalPath)).toBe(true);
-  expect(readFileSync(pf.finalPath)).toEqual(data);
-  // mtime restored (seconds granularity is enough to assert)
-  expect(Math.round(statSync(pf.finalPath).mtimeMs / 1000)).toBe(Math.round(mtime / 1000));
-});
-
-test('finalizeReceivedFile discards the .part on a hash mismatch', async () => {
-  const root = tmp();
-  const pf = await createSparsePartFile({ destRoot: root, relPath: 'bad.bin' });
-  await pf.writeAt(0, Buffer.from('corrupted')); await pf.close();
-  const r = await finalizeReceivedFile({ partFile: pf, expectedHash: 'deadbeef', mtime: 1 });
-  expect(r.ok).toBe(false);
-  expect(existsSync(pf.partPath)).toBe(false);
-  expect(existsSync(pf.finalPath)).toBe(false);
-});
+// The by-handle finalize function was itself removed as tested-dead production code
+// (F-E2 follow-up): production and the multi-flow receiver both finalize by PATH via
+// finalizeReceivedPath (see transfer-io-sparse.test.js's `finalizeReceivedPath` suite
+// for verify/rename/mtime/mismatch coverage).

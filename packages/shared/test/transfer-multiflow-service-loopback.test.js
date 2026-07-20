@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createSender } from '../src/transfer-sender.js';
 import { createReceiver } from '../src/transfer-receiver.js';
-import { createSparsePartFile, openSourceReader, finalizeReceivedFile } from '../src/transfer-io.js';
+import { createSparsePartFile, openSourceReader, finalizeReceivedPath } from '../src/transfer-io.js';
 
 let srcDir, dstDir;
 beforeEach(async () => { srcDir = await mkdtemp(join(tmpdir(), 'mf-src-')); dstDir = await mkdtemp(join(tmpdir(), 'mf-dst-')); });
@@ -58,7 +58,9 @@ describe('multi-flow service loopback (real disk)', () => {
       ctrl: receiverCtrl, flows: receiverFlows, jobId: JOB,
       consent: async () => true,
       openPart: (relPath) => createSparsePartFile({ destRoot: dstDir, relPath }),
-      verifyAndFinalize: ({ fileId, expectedHash, partFile }) => finalizeReceivedFile({ partFile, expectedHash, mtime: entries.find((e) => e.fileId === fileId).mtime }),
+      // Same seam production wires in transfer-service.js: finalize by PATH
+      // (no open handle required) via finalizeReceivedPath.
+      verifyAndFinalize: ({ path, expectedHash, mtime }) => finalizeReceivedPath({ destRoot: dstDir, relPath: path, expectedHash, mtime }),
       reportIntervalMs: 40,
     });
     const sender = createSender({

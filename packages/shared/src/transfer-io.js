@@ -66,21 +66,6 @@ export async function walkSource(roots) {
   return { entries, sources };
 }
 
-// Verify the received file's whole-file hash, then atomically publish it.
-// Live digest when available (continuous run); otherwise a single completion
-// read (spec §6.4). Mismatch discards the .part so the file re-requests from 0.
-export async function finalizeReceivedFile({ partFile, expectedHash, mtime }) {
-  const actual = partFile.liveDigest() ?? (await hashFile(partFile.partPath));
-  if (actual !== expectedHash) {
-    await rm(partFile.partPath, { force: true });
-    return { ok: false };
-  }
-  await rename(partFile.partPath, partFile.finalPath);
-  const secs = mtime / 1000;
-  await utimes(partFile.finalPath, secs, secs);
-  return { ok: true };
-}
-
 // Finalize a received file by PATH (no open handle) — for the multi-flow receiver,
 // where a resumed/already-complete file may have no open partFile. Reads the .part
 // fresh (no held fd → safe rename on Windows), verifies, publishes. Idempotent across
@@ -106,7 +91,7 @@ export async function finalizeReceivedPath({ destRoot, relPath, expectedHash, mt
 // of order on many flows and are written at their byte offset, so the .part is
 // sparse and its size is NOT the resume offset (received-ranges are; see the
 // orchestrator). liveDigest() is always null — an out-of-order file can only be
-// verified by a completion read at finalize. Shape matches finalizeReceivedFile.
+// verified by a completion read at finalize (see finalizeReceivedPath).
 export async function createSparsePartFile({ destRoot, relPath, size }) {
   const finalPath = confineDestPath(destRoot, relPath);
   const partPath = `${finalPath}.part`;

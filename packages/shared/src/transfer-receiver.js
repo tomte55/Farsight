@@ -310,12 +310,13 @@ export function createReceiver({
     onEvent({ type: 'accepted', manifest: m });
     // Memoize each file's open partFile by fileId: the router closes its own
     // `f.part` handle before calling verifyAndFinalize (so it can't hand us the
-    // handle directly), but the REAL finalizeReceivedFile({ partFile, ... }) needs
-    // it (for partPath/finalPath/liveDigest — a closed handle object still
-    // provides all three, since liveDigest() for the sparse writer is always
-    // null and just triggers a completion hashFile read). Recorded on every
-    // openPart call (including a post-resetFile reopen), so the map entry is
-    // always the CURRENT part for that fileId.
+    // handle directly), but a by-handle verifyAndFinalize strategy would still
+    // need it (for partPath/finalPath — a closed handle object still provides
+    // both). Production's verifyAndFinalize (finalizeReceivedPath, transfer-io.js)
+    // finalizes by PATH and ignores this field, but it's still threaded through
+    // for any strategy that wants it. Recorded on every openPart call (including
+    // a post-resetFile reopen), so the map entry is always the CURRENT part for
+    // that fileId.
     const partFiles = new Map();
     router = createReceiveRouter({
       manifest: m,

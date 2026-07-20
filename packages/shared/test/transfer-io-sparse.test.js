@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, readFile, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createSparsePartFile, openSourceReader, finalizeReceivedFile, finalizeReceivedPath, confineDestPath } from '../src/transfer-io.js';
+import { createSparsePartFile, openSourceReader, finalizeReceivedPath, confineDestPath } from '../src/transfer-io.js';
 import { createHash } from 'node:crypto';
 
 // A passthrough mock of node:fs/promises' `stat` that lets a couple of
@@ -71,17 +71,6 @@ describe('createSparsePartFile', () => {
     const p2 = await createSparsePartFile({ destRoot: dir, relPath: 'grow.bin', size: 8 });
     expect((await stat(p2.partPath)).size).toBe(20); // NOT truncated to 8 — that would destroy received bytes
     await p2.close();
-  });
-
-  it('is compatible with finalizeReceivedFile (completion-read verify + rename)', async () => {
-    const content = new Uint8Array([10, 20, 30, 40, 50]);
-    const p = await createSparsePartFile({ destRoot: dir, relPath: 'f.bin' });
-    await p.writeAt(0, content);
-    await p.fsync();
-    const hash = createHash('sha256').update(content).digest('hex');
-    const r = await finalizeReceivedFile({ partFile: p, expectedHash: hash, mtime: 1_700_000_000_000 });
-    expect(r.ok).toBe(true);
-    expect(new Uint8Array(await readFile(p.finalPath))).toEqual(content);
   });
 });
 
