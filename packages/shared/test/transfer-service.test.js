@@ -12,6 +12,7 @@ import { buildManifest as buildManifestReal } from '@farsight/shared/transfer-ma
 import { createJobsStore } from '@farsight/shared/jobs-store';
 import { newJobId } from '@farsight/shared/transfer-queue';
 import { offerFrame, parseCtrlFrame, cancelFrame } from '@farsight/shared/transfer-protocol';
+import { BULK_HEADER_BYTES } from '@farsight/shared/transfer-chunk';
 
 const dirs = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), 'ftsvc-')); dirs.push(d); return d; }
@@ -39,7 +40,15 @@ function loopback() {
     const side = {
       ctrlCb: null, bulkCb: null, peer: null,
       sendCtrl(s) { queueMicrotask(() => side.peer.ctrlCb && side.peer.ctrlCb(s)); },
-      sendBulk(b) { const buf = Buffer.from(b); return new Promise((r) => queueMicrotask(() => { side.peer.bulkCb && side.peer.bulkCb(buf); r(); })); },
+      // Deliver the payload AS-IS (no Buffer.from() coercion): single-flow's
+      // createReceiver does its own `Buffer.from(buf)` on arrival (works from
+      // either an ArrayBuffer or a Buffer), but multi-flow's decodeBulkFrame
+      // (transfer-chunk.js) requires a genuine `buf instanceof ArrayBuffer` --
+      // pre-coercing to a Node Buffer here made decodeBulkFrame silently
+      // return null for every chunk (Phase 2: this fixture is now also used
+      // as a multi-flow coverage-bundle flow via single(), not just
+      // single-flow's channel).
+      sendBulk(b) { return new Promise((r) => queueMicrotask(() => { side.peer.bulkCb && side.peer.bulkCb(b); r(); })); },
       onCtrl(cb) { side.ctrlCb = cb; }, onBulk(cb) { side.bulkCb = cb; },
     };
     return side;
@@ -47,6 +56,23 @@ function loopback() {
 }
 
 const memStore = () => ({ saved: [], async save(j) { this.saved.push(JSON.parse(JSON.stringify(j))); }, async load() { return null; }, async list() { return this.saved; } });
+
+// Phase 2 (one path): createTransferService's openChannel now ALWAYS resolves
+// the multi-flow coverage bundle ({ctrl, flows}), even at flowCount:1 — real
+// main.js emits it unconditionally (transfer-service.js no longer has a
+// single-flow fallback arm). Wrap a single-channel test double (which already
+// implements both onCtrl/sendCtrl AND onBulk/sendBulk, exactly like a real
+// flow-0 ctrl channel does) as a 1-element coverage bundle so these fixtures
+// exercise createMultiFlowSender/createMultiFlowReceiver the same way
+// production does, evaluating the channel expression exactly once. The send
+// pool's usableFlows() (transfer-send-pool.js) calls f.isAlive() on every
+// flow -- absent on these plain test doubles (real flow objects get it from
+// the flow supervisor) -- so stamp a static `() => true` on before handing it
+// out as a flow, same as the multiflow suite's own `link()` fixture does.
+function single(channel) {
+  if (typeof channel.isAlive !== 'function') channel.isAlive = () => true;
+  return { ctrl: channel, flows: [channel] };
+}
 
 // A loopback that mimics a real WebRTC data channel's max message size: a ctrl
 // frame larger than maxBytes is DROPPED (as the real send() throws + kills the
@@ -114,12 +140,12 @@ test('loopback send -> receive through the service layer lands files byte-identi
 
   const receiverSvc = createTransferService({
     store: recvStore, transferDir: dest, consent: async () => true,
-    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideB), close: async () => {} }),
     receiveCloseGraceMs: 0,
   });
   const senderSvc = createTransferService({
     store: sendStore, transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideA), close: async () => {} }),
   });
 
   const jobId = newJobId();
@@ -151,7 +177,7 @@ test('loopback send -> receive through the service layer lands files byte-identi
 // injected) into the single-flow createSender it constructs -- proved here
 // end to end, through the real loopback send/receive path, with an injected
 // fake limiter whose take() records the byte counts it was asked to pace.
-test('Plan 3 Task 6: an injected rateLimiter is threaded into the single-flow send path -- take() paces every chunk sent', async () => {
+test('Plan 3 Task 6: an injected rateLimiter is threaded into the send path -- take() paces every chunk sent', async () => {
   const srcRoot = tmp();
   const src = join(srcRoot, 'payload');
   mkdirSync(src, { recursive: true });
@@ -174,12 +200,12 @@ test('Plan 3 Task 6: an injected rateLimiter is threaded into the single-flow se
 
   const receiverSvc = createTransferService({
     store: recvStore, transferDir: dest, consent: async () => true,
-    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideB), close: async () => {} }),
     receiveCloseGraceMs: 0,
   });
   const senderSvc = createTransferService({
     store: sendStore, transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideA), close: async () => {} }),
     rateLimiter,
   });
 
@@ -193,7 +219,11 @@ test('Plan 3 Task 6: an injected rateLimiter is threaded into the single-flow se
   expect(readFileSync(join(dest, ...manifest.entries[0].path.split('/')))).toEqual(data); // bytes on disk are unaffected
 
   expect(takenCalls.length).toBeGreaterThan(0);
-  expect(takenCalls.reduce((a, b) => a + b, 0)).toBe(data.length); // take() paced every byte sent
+  // Phase 2 (one path): the limiter now paces the multi-flow send pool
+  // (transfer-send-pool.js), which takes() the ENCODED frame's byteLength --
+  // payload + the self-addressing BULK_HEADER_BYTES header (transfer-chunk.js)
+  // -- not just the raw payload the old single-flow path metered.
+  expect(takenCalls.reduce((a, b) => a + b, 0)).toBe(data.length + BULK_HEADER_BYTES * takenCalls.length); //take() paced every byte sent
 });
 
 test('transferDir may be a function, resolved per receive (not captured at construction)', async () => {
@@ -204,7 +234,7 @@ test('transferDir may be a function, resolved per receive (not captured at const
   let current = destA;
   const recvSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: () => current, consent: async () => true,
-    openChannel: async () => ({ channel: recvSide, close: async () => {} }),
+    openChannel: async () => ({ ...single(recvSide), close: async () => {} }),
     receiveCloseGraceMs: 0,
   });
 
@@ -219,7 +249,7 @@ test('transferDir may be a function, resolved per receive (not captured at const
     recvSide = sideB;
     const sendSvc = createTransferService({
       store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-      openChannel: async () => ({ channel: sideA, close: async () => {} }),
+      openChannel: async () => ({ ...single(sideA), close: async () => {} }),
     });
     const recvPromise = recvSvc.startReceive({ rendezvous: 'r' });
     const sendResult = await sendSvc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'd', password: 'p' } });
@@ -253,13 +283,13 @@ test('a receive surfaces the manifest on accept so the UI can label it before an
   const recvEvents = [];
   const receiverSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: dest, consent: async () => true,
-    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideB), close: async () => {} }),
     onEvent: (ev) => recvEvents.push(ev),
     receiveCloseGraceMs: 0,
   });
   const senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideA), close: async () => {} }),
   });
 
   const recvPromise = receiverSvc.startReceive({ rendezvous: 'r1' });
@@ -283,7 +313,7 @@ test('F-A7: cancelling an active send emits a `cancel` frame to the receiver BEF
   };
   const svc = createTransferService({
     store: memStore(), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel, close: async () => { seq.push('__close__'); } }),
+    openChannel: async () => ({ ...single(channel), close: async () => { seq.push('__close__'); } }),
     cancelFlushMs: 0, // no real wait in the test — we assert ORDER, not duration
   });
   const jobId = newJobId();
@@ -318,13 +348,13 @@ test('F-A7: a sender USER-cancel makes the receiver record `canceled`, not a res
   const recvStore = createJobsStore({ dir: tmp() });
   const receiverSvc = createTransferService({
     store: recvStore, transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideB), close: async () => {} }),
     receiveCloseGraceMs: 0,
   });
   const sendEvents = [];
   const senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideA), close: async () => {} }),
     onEvent: (ev) => sendEvents.push(ev),
     cancelFlushMs: 0,
   });
@@ -353,12 +383,12 @@ test('SP3 P4: an own-fleet (linked) send passes target.linked to openChannel and
 
   const receiverSvc = createTransferService({
     store: recvStore, transferDir: dest, consent: async () => true,
-    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideB), close: async () => {} }),
     receiveCloseGraceMs: 0,
   });
   const senderSvc = createTransferService({
     store: sendStore, transferDir: tmp(), consent: async () => true,
-    openChannel: async (args) => { sendOpenArgs = args; return { channel: sideA, close: async () => {} }; },
+    openChannel: async (args) => { sendOpenArgs = args; return { ...single(sideA), close: async () => {} }; },
   });
 
   const jobId = newJobId();
@@ -380,7 +410,7 @@ test('a contact send records tier:contact and still passes linked:true to openCh
   let sendOpenArgs;
   const svc = createTransferService({
     store: sendStore, transferDir: tmp(), consent: async () => true,
-    openChannel: async (args) => { sendOpenArgs = args; return { channel: deadChannel(), close: async () => {} }; },
+    openChannel: async (args) => { sendOpenArgs = args; return { ...single(deadChannel()), close: async () => {} }; },
     getFleet: async () => [],
     rendezvousTimeoutMs: 60,
   });
@@ -409,12 +439,12 @@ test('SP3 P4: an own-fleet (linked) receive auto-accepts — no consent prompt (
     // SP3 Task 6: auto-accept is driven by peerAuth's resolved tier, not the
     // blanket `linked` flag — model the handshake having verified this peer
     // as an own-fleet device.
-    openChannel: async () => ({ channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'fleet' }) }),
+    openChannel: async () => ({ ...single(sideB), close: async () => {}, peerAuth: Promise.resolve({ tier: 'fleet' }) }),
     receiveCloseGraceMs: 0,
   });
   const senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideA), close: async () => {} }),
   });
 
   const recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 'own', linked: true } });
@@ -443,12 +473,12 @@ test('SP3 P5 Task 6: consent branches on the verified peer tier — fleet auto-a
     const receiverSvc = createTransferService({
       store: createJobsStore({ dir: tmp() }), transferDir: dest,
       consent: async () => { consentCalled = true; return true; },
-      openChannel: async () => ({ channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier }) }),
+      openChannel: async () => ({ ...single(sideB), close: async () => {}, peerAuth: Promise.resolve({ tier }) }),
       receiveCloseGraceMs: 0,
     });
     const senderSvc = createTransferService({
       store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-      openChannel: async () => ({ channel: sideA, close: async () => {} }),
+      openChannel: async () => ({ ...single(sideA), close: async () => {} }),
     });
 
     // linked:true for every case (a contact can still ride the own-fleet-only
@@ -491,7 +521,7 @@ test('SECURITY: REPLAY AFTER COMPLETION — a contact re-offering a FINISHED job
       const { sideA, sideB } = loopback();
       // Each receive gets a fresh channel pair, as a real re-establish does.
       lastSenderSide = sideA;
-      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
+      return { ...single(sideB), close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
     },
     receiveCloseGraceMs: 0,
   });
@@ -503,7 +533,7 @@ test('SECURITY: REPLAY AFTER COMPLETION — a contact re-offering a FINISHED job
   let recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } });
   let senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+    openChannel: async () => ({ ...single(lastSenderSide), close: async () => {} }),
   });
   await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true, contact: true } });
   await recvPromise;
@@ -515,7 +545,7 @@ test('SECURITY: REPLAY AFTER COMPLETION — a contact re-offering a FINISHED job
   recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } });
   senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+    openChannel: async () => ({ ...single(lastSenderSide), close: async () => {} }),
   });
   await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true, contact: true } });
   await recvPromise;
@@ -542,7 +572,7 @@ test('SECURITY: happy path — a contact resuming a genuinely UNFINISHED job wit
     openChannel: async () => {
       const { sideA, sideB } = loopback();
       lastSenderSide = sideA;
-      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
+      return { ...single(sideB), close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
     },
     receiveCloseGraceMs: 0,
   });
@@ -595,7 +625,7 @@ test('SECURITY (ESCALATION — reviewer demo): a contact re-offering the SAME jo
     openChannel: async () => {
       const { sideA, sideB } = loopback();
       lastSenderSide = sideA;
-      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
+      return { ...single(sideB), close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
     },
     receiveCloseGraceMs: 0,
   });
@@ -652,7 +682,7 @@ test('SECURITY: ACCEPT-THEN-CANCEL — a canceled job re-offered under the same 
     openChannel: async () => {
       const { sideA, sideB } = loopback();
       lastSenderSide = sideA;
-      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
+      return { ...single(sideB), close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact', publicKey: 'PK-DAD' }) };
     },
     receiveCloseGraceMs: 0,
   });
@@ -712,7 +742,7 @@ test('SECURITY: a VERIFIED key whose classify returned tier:null is never rememb
       lastSenderSide = sideA;
       // tier:null WITH a real verified key — the classify call itself failed
       // transiently, even though the handshake proved this key.
-      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: null, publicKey: 'PK-DAD' }) };
+      return { ...single(sideB), close: async () => {}, peerAuth: Promise.resolve({ tier: null, publicKey: 'PK-DAD' }) };
     },
     receiveCloseGraceMs: 0,
   });
@@ -756,7 +786,7 @@ test('SECURITY: a DIFFERENT contact cannot reuse an accepted jobId to skip the p
     openChannel: async () => {
       const { sideA, sideB } = loopback();
       lastSenderSide = sideA;
-      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve(peerAuthToUse) };
+      return { ...single(sideB), close: async () => {}, peerAuth: Promise.resolve(peerAuthToUse) };
     },
     receiveCloseGraceMs: 0,
   });
@@ -767,7 +797,7 @@ test('SECURITY: a DIFFERENT contact cannot reuse an accepted jobId to skip the p
   let recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } });
   let senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+    openChannel: async () => ({ ...single(lastSenderSide), close: async () => {} }),
   });
   await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true, contact: true } });
   await recvPromise;
@@ -778,7 +808,7 @@ test('SECURITY: a DIFFERENT contact cannot reuse an accepted jobId to skip the p
   recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } });
   senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+    openChannel: async () => ({ ...single(lastSenderSide), close: async () => {} }),
   });
   await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true, contact: true } });
   await recvPromise;
@@ -798,7 +828,7 @@ test('SECURITY: an ad-hoc/unverified peer is always prompted, even for a repeate
     openChannel: async () => {
       const { sideA, sideB } = loopback();
       lastSenderSide = sideA;
-      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: null }) };
+      return { ...single(sideB), close: async () => {}, peerAuth: Promise.resolve({ tier: null }) };
     },
     receiveCloseGraceMs: 0,
   });
@@ -808,7 +838,7 @@ test('SECURITY: an ad-hoc/unverified peer is always prompted, even for a repeate
   let recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } });
   let senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+    openChannel: async () => ({ ...single(lastSenderSide), close: async () => {} }),
   });
   await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
   await recvPromise;
@@ -818,7 +848,7 @@ test('SECURITY: an ad-hoc/unverified peer is always prompted, even for a repeate
   recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } });
   senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+    openChannel: async () => ({ ...single(lastSenderSide), close: async () => {} }),
   });
   await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
   await recvPromise;
@@ -838,7 +868,7 @@ test('own-fleet still auto-accepts and never prompts', async () => {
     openChannel: async () => {
       const { sideA, sideB } = loopback();
       lastSenderSide = sideA;
-      return { channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'fleet' }) };
+      return { ...single(sideB), close: async () => {}, peerAuth: Promise.resolve({ tier: 'fleet' }) };
     },
     receiveCloseGraceMs: 0,
   });
@@ -848,7 +878,7 @@ test('own-fleet still auto-accepts and never prompts', async () => {
   let recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's1', linked: true } });
   let senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+    openChannel: async () => ({ ...single(lastSenderSide), close: async () => {} }),
   });
   await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
   await recvPromise;
@@ -857,7 +887,7 @@ test('own-fleet still auto-accepts and never prompts', async () => {
   recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's2', linked: true } });
   senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: lastSenderSide, close: async () => {} }),
+    openChannel: async () => ({ ...single(lastSenderSide), close: async () => {} }),
   });
   await senderSvc.startSend({ jobId, manifest, sources, target: { id: 'dev', linked: true } });
   await recvPromise;
@@ -879,13 +909,13 @@ test('review fix: a peerAuth that never resolves (classifyPublicKey stuck) times
     store: createJobsStore({ dir: tmp() }), transferDir: dest,
     consent: async () => { consentCalled = true; return true; },
     // Never resolves — models a stuck/offline classifyPublicKey call.
-    openChannel: async () => ({ channel: sideB, close: async () => {}, peerAuth: new Promise(() => {}) }),
+    openChannel: async () => ({ ...single(sideB), close: async () => {}, peerAuth: new Promise(() => {}) }),
     receiveCloseGraceMs: 0,
     consentClassifyTimeoutMs: 20,
   });
   const senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideA), close: async () => {} }),
   });
 
   const recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's', linked: true } });
@@ -906,12 +936,12 @@ test('SP3 P4: startReceive threads the verified peer tier into the persisted rec
   const recvStore = createJobsStore({ dir: tmp() });
   const receiverSvc = createTransferService({
     store: recvStore, transferDir: dest, consent: async () => true,
-    openChannel: async () => ({ channel: sideB, close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact' }) }),
+    openChannel: async () => ({ ...single(sideB), close: async () => {}, peerAuth: Promise.resolve({ tier: 'contact' }) }),
     receiveCloseGraceMs: 0,
   });
   const senderSvc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideA), close: async () => {} }),
   });
   const recvPromise = receiverSvc.startReceive({ rendezvous: { sessionId: 's', linked: true } });
   await senderSvc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'dev', linked: true } });
@@ -939,11 +969,11 @@ test('SP3 P4: the resume watcher re-walks sourceRoots and re-sends an interrupte
     getFleet: async () => [{ deviceId: 'dev-1', signalingId: 'sig-CURRENT', online: true }],
     openChannel: async () => {
       attempt += 1;
-      if (attempt === 1) return { channel: deadChannel(), close: async () => {} }; // 1st: drop
+      if (attempt === 1) return { ...single(deadChannel()), close: async () => {} }; // 1st: drop
       const { sideA, sideB } = loopback(); // 2nd: live channel + a receiver
-      const rxSvc = createTransferService({ store: recvStore, transferDir: dest, consent: async () => true, openChannel: async () => ({ channel: sideB, close: async () => {} }), receiveCloseGraceMs: 0 });
+      const rxSvc = createTransferService({ store: recvStore, transferDir: dest, consent: async () => true, openChannel: async () => ({ ...single(sideB), close: async () => {} }), receiveCloseGraceMs: 0 });
       liveReceiver = rxSvc.startReceive({ rendezvous: { sessionId: 's', linked: true } });
-      return { channel: sideA, close: async () => {} };
+      return { ...single(sideA), close: async () => {} };
     },
   });
   svc.startResumeWatcher();
@@ -986,7 +1016,7 @@ test('SP3 P4: the resume watcher preserves contact:true when re-sending an inter
     store: sendStore, transferDir: tmp(), consent: async () => true, rendezvousTimeoutMs: 60,
     // The fleet reports the contact device online at its CURRENT signalingId.
     getFleet: async () => [{ deviceId: 'devC', signalingId: 'sig-NEW', online: true }],
-    openChannel: async (args) => { capturedTarget = args.target; return { channel: deadChannel(), close: async () => {} }; },
+    openChannel: async (args) => { capturedTarget = args.target; return { ...single(deadChannel()), close: async () => {} }; },
   });
   svc.startResumeWatcher();
 
@@ -1027,7 +1057,7 @@ test('SP3 P4: the resume watcher preserves the original flowCount when re-sendin
   const svc = createTransferService({
     store: sendStore, transferDir: tmp(), consent: async () => true, rendezvousTimeoutMs: 60,
     getFleet: async () => [{ deviceId: 'dev-mf', signalingId: 'sig-NEW', online: true }],
-    openChannel: async (args) => { capturedArgs = args; return { channel: deadChannel(), close: async () => {} }; },
+    openChannel: async (args) => { capturedArgs = args; return { ...single(deadChannel()), close: async () => {} }; },
   });
   svc.startResumeWatcher();
 
@@ -1046,7 +1076,7 @@ test('SP3 P4: a recoverable own-fleet drop records interrupted; a terminal reaso
   const { manifest, sources } = await oneFileSource();
   const store = createJobsStore({ dir: tmp() });
   const svc = createTransferService({ store, transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: deadChannel(), close: async () => {} }), rendezvousTimeoutMs: 60 });
+    openChannel: async () => ({ ...single(deadChannel()), close: async () => {} }), rendezvousTimeoutMs: 60 });
   const jobId = newJobId();
   const res = await svc.startSend({ jobId, manifest, sources, target: { id: 'sig', deviceId: 'dev', linked: true }, sourceRoots: ['/r'] });
   expect(res.ok).toBe(false);
@@ -1056,7 +1086,7 @@ test('SP3 P4: a recoverable own-fleet drop records interrupted; a terminal reaso
   // Ad-hoc (no deviceId, not linked) → the same recoverable failure stays terminal 'error'.
   const store2 = createJobsStore({ dir: tmp() });
   const svc2 = createTransferService({ store: store2, transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: deadChannel(), close: async () => {} }), rendezvousTimeoutMs: 60 });
+    openChannel: async () => ({ ...single(deadChannel()), close: async () => {} }), rendezvousTimeoutMs: 60 });
   const jobId2 = newJobId();
   await svc2.startSend({ jobId: jobId2, manifest, sources, target: { id: 'sig', password: 'pw' } });
   expect((await store2.list()).find((j) => j.jobId === jobId2).jobState).toBe('error');
@@ -1066,8 +1096,8 @@ test('SP3 P4: a send record persists sourceRoots + peer.deviceId (for across-res
   const { manifest, sources } = await oneFileSource();
   const store = createJobsStore({ dir: tmp() });
   const { sideA, sideB } = loopback();
-  const rx = createTransferService({ store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true, openChannel: async () => ({ channel: sideB, close: async () => {} }), receiveCloseGraceMs: 0 });
-  const tx = createTransferService({ store, transferDir: tmp(), consent: async () => true, openChannel: async () => ({ channel: sideA, close: async () => {} }) });
+  const rx = createTransferService({ store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true, openChannel: async () => ({ ...single(sideB), close: async () => {} }), receiveCloseGraceMs: 0 });
+  const tx = createTransferService({ store, transferDir: tmp(), consent: async () => true, openChannel: async () => ({ ...single(sideA), close: async () => {} }) });
   const jobId = newJobId();
   const rp = rx.startReceive({ rendezvous: { sessionId: 's', linked: true } });
   await tx.startSend({ jobId, manifest, sources, target: { id: 'sig-1', deviceId: 'dev-1', linked: true }, sourceRoots: ['/src/root'] });
@@ -1082,7 +1112,7 @@ test('SP3 P4: startReceive threads the own-fleet linked flag into openChannel', 
   let recvOpenArgs = null;
   const svc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async (args) => { recvOpenArgs = args; return { channel: deadChannel(), close: async () => {} }; },
+    openChannel: async (args) => { recvOpenArgs = args; return { ...single(deadChannel()), close: async () => {} }; },
     rendezvousTimeoutMs: 0,
   });
   // startReceive never resolves here (deadChannel), so don't await it; just let
@@ -1141,7 +1171,7 @@ test('a send that is never accepted fails after the rendezvous timeout and surfa
   const events = [];
   const svc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: deadChannel(), close: async () => {} }),
+    openChannel: async () => ({ ...single(deadChannel()), close: async () => {} }),
     onEvent: (ev) => events.push(ev),
     rendezvousTimeoutMs: 80,
   });
@@ -1158,7 +1188,7 @@ test('a rendezvous error from the channel (e.g. bad_password) fails the send wit
   const svc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
     openChannel: async () => ({
-      channel: deadChannel(), close: async () => {},
+      ...single(deadChannel()), close: async () => {},
       onRendezvousError: (cb) => { fireError = cb; },
     }),
     onEvent: (ev) => events.push(ev),
@@ -1222,7 +1252,7 @@ test('a fleet send failing with host_offline persists jobState:"interrupted" (re
   const svc = createTransferService({
     store: sendStore, transferDir: tmp(), consent: async () => true,
     openChannel: async () => ({
-      channel: deadChannel(), close: async () => {},
+      ...single(deadChannel()), close: async () => {},
       onRendezvousError: (cb) => { fireError = cb; },
     }),
     rendezvousTimeoutMs: 60000, // long — the error path must fire well before this
@@ -1254,7 +1284,7 @@ test('a prompting frame cancels the approval timeout — a slow human decision i
   };
   const svc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel, close: async () => {} }),
+    openChannel: async () => ({ ...single(channel), close: async () => {} }),
     onEvent: (ev) => events.push(ev), rendezvousTimeoutMs: 50,
   });
   let settled = null;
@@ -1280,9 +1310,22 @@ test('serial queue: two enqueued sends never have more than one active channel a
     const { sideA, sideB } = loopback();
     const dest = tmp();
     dests[target] = dest;
-    const rx = createReceiver({ channel: sideB, destRoot: dest, store: memStore(), consent: async () => true });
-    rxDone.push(rx.start()); // driven independently of the service under test; awaited below
-    return { channel: sideA, close: async () => { activeCount--; } };
+    // Phase 2 (one path): the service under test always sends through
+    // createMultiFlowSender now, so the hand-driven peer on the other end of
+    // this loopback must speak the same multi-flow wire protocol (self-
+    // addressed bulk frames) -- a bare single-flow createReceiver() here would
+    // misinterpret the per-chunk header as file bytes. Drive it through a
+    // second createTransferService (same high-level API the rest of this file
+    // uses), not a hand-rolled createMultiFlowReceiver (its openPart/
+    // verifyAndFinalize/persistRanges wiring is exactly what transfer-
+    // service.js's runMultiFlowReceive already builds).
+    const rxSvc = createTransferService({
+      store: createJobsStore({ dir: tmp() }), transferDir: dest, consent: async () => true,
+      openChannel: async () => ({ ...single(sideB), close: async () => {} }),
+      receiveCloseGraceMs: 0,
+    });
+    rxDone.push(rxSvc.startReceive({ rendezvous: String(target) })); // driven independently of the service under test; awaited below
+    return { ...single(sideA), close: async () => { activeCount--; } };
   }
 
   const svc = createTransferService({
@@ -1340,7 +1383,7 @@ test('api.reorder moves a waiting send and queueOrder reflects it; active head p
       // No receiver ever accepts, so whichever job is active just hangs in
       // sender.start() — exactly like the "cancel() on a waiting send" test
       // above — leaving the other two genuinely queued behind it.
-      return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} };
+      return { ...single({ sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }), close: async () => {} };
     },
   });
 
@@ -1402,7 +1445,7 @@ test('cancel() on the active send closes its channel and marks the record cancel
       return {
         // A channel nobody drives further (no receiver ACKs the OFFER) — the
         // send is genuinely stuck "active" until canceled.
-        channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} },
+        ...single({ sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }),
         close: async () => { closed = true; },
       };
     },
@@ -1444,7 +1487,7 @@ test('cancel() on an in-flight (not-yet-accepted) send emits a canceled event so
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
     // A channel nobody drives further — the send is genuinely stuck "awaiting
     // approval / active" until we cancel it.
-    openChannel: async () => { opened = true; return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} }; },
+    openChannel: async () => { opened = true; return { ...single({ sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }), close: async () => {} }; },
     onEvent: (ev) => events.push(ev),
   });
   const jobId = newJobId();
@@ -1476,7 +1519,7 @@ test('cancel() on a waiting (not-yet-active) send removes it from the queue with
       opens.push(target);
       // Job A's channel never progresses (no receiver), so job B stays queued
       // behind it until we cancel B directly out of the queue.
-      return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} };
+      return { ...single({ sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }), close: async () => {} };
     },
   });
 
@@ -1543,7 +1586,7 @@ test('pause() tears down the active send, persists paused, advances the queue to
       // just sits "active" until we pause it, exactly like the cancel()
       // tests' pattern above.
       return {
-        channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} },
+        ...single({ sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }),
         close: async () => { if (target.id === 'A') closedA = true; },
       };
     },
@@ -1591,7 +1634,7 @@ test('after pause(), the resume watcher does not auto-resume the paused job (lis
     getFleet: async () => [{ deviceId: 'dev-1', signalingId: 'sig-CURRENT', online: true }],
     openChannel: async () => {
       openCount += 1;
-      return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} };
+      return { ...single({ sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }), close: async () => {} };
     },
   });
   svc.startResumeWatcher();
@@ -1642,7 +1685,7 @@ test('CRITICAL: runSend catch does not reclassify a pause-induced rejection — 
   };
   const svc = createTransferService({
     store: trackedStore, transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel, close: async () => {} }),
+    openChannel: async () => ({ ...single(channel), close: async () => {} }),
   });
 
   const jobId = newJobId();
@@ -1692,17 +1735,17 @@ test('resume() re-establishes a same-session paused send: re-walks sources, emit
       attempt += 1;
       if (attempt === 1) {
         // Never-progressing channel — the send just sits "active" until paused.
-        return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} };
+        return { ...single({ sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }), close: async () => {} };
       }
       // resume()'s re-established send: a real loopback + receiver.
       const { sideA, sideB } = loopback();
       const rxSvc = createTransferService({
         store: recvStore, transferDir: dest, consent: async () => true,
-        openChannel: async () => ({ channel: sideB, close: async () => {} }),
+        openChannel: async () => ({ ...single(sideB), close: async () => {} }),
         receiveCloseGraceMs: 0,
       });
       liveReceiver = rxSvc.startReceive({ rendezvous: { sessionId: 's', linked: true } });
-      return { channel: sideA, close: async () => {} };
+      return { ...single(sideA), close: async () => {} };
     },
   });
 
@@ -1823,16 +1866,16 @@ test('REGRESSION: pause() disarms the orphaned send\'s approval timer so a same-
         if (attempt === 1) {
           // Never-accepted — attempt-1's own approvalTimer stays armed unless
           // pause() disarms it.
-          return { channel: { sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }, close: async () => {} };
+          return { ...single({ sendCtrl() {}, async sendBulk() {}, onCtrl() {}, onBulk() {} }), close: async () => {} };
         }
         const { sideA, sideB } = loopback();
         const rxSvc = createTransferService({
           store: recvStore, transferDir: dest, consent: async () => true,
-          openChannel: async () => ({ channel: sideB, close: async () => {} }),
+          openChannel: async () => ({ ...single(sideB), close: async () => {} }),
           receiveCloseGraceMs: 0,
         });
         liveReceiver = rxSvc.startReceive({ rendezvous: { sessionId: 's', linked: true } });
-        return { channel: sideA, close: async () => {} };
+        return { ...single(sideA), close: async () => {} };
       },
     });
 
@@ -1894,10 +1937,10 @@ test('REGRESSION: cancel() clears activeAbort so a later pause() of the NEXT que
       opens.push(target.id);
       if (target.id === 'sig-A') {
         openedA = true;
-        return { channel: deadChannel(), close: async () => {} }; // never accepted
+        return { ...single(deadChannel()), close: async () => {} }; // never accepted
       }
       await openBGate; // sig-B: held open deliberately
-      return { channel: deadChannel(), close: async () => {} };
+      return { ...single(deadChannel()), close: async () => {} };
     },
   });
 
@@ -1949,11 +1992,11 @@ test('receiver declining consent resolves ok:false with no file written, and set
   const receiverSvc = createTransferService({
     store: recvStore, transferDir: dest, consent: async () => false,
     receiveCloseGraceMs: 0,
-    openChannel: async () => ({ channel: sideB, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideB), close: async () => {} }),
   });
   const senderSvc = createTransferService({
     store: sendStore, transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: sideA, close: async () => {} }),
+    openChannel: async () => ({ ...single(sideA), close: async () => {} }),
   });
 
   const srcRoot = tmp();
@@ -2008,7 +2051,7 @@ test('SP3 P4: cancel aborts a LIVE receive, not just the store record', async ()
   };
   const svc = createTransferService({
     store: recvStore, transferDir: dest, consent: async () => true,
-    openChannel: async () => ({ channel, close: async () => {} }),
+    openChannel: async () => ({ ...single(channel), close: async () => {} }),
     receiveCloseGraceMs: 0,
   });
   const jobId = newJobId();
@@ -2027,7 +2070,7 @@ test('SP3 P4: cancel aborts a LIVE receive, not just the store record', async ()
 test('SP3 P4: cancel on an unknown jobId still falls back to the store-only branch', async () => {
   const svc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: loopback().sideA, close: async () => {} }),
+    openChannel: async () => ({ ...single(loopback().sideA), close: async () => {} }),
   });
   expect(await svc.cancel('never-existed')).toEqual({ ok: false });
 });
@@ -2052,7 +2095,7 @@ test('BUGFIX: a send is persisted as active BEFORE it settles, with the right di
   // truly never settles on its own).
   const svc = createTransferService({
     store, transferDir: tmp(), consent: async () => true,
-    openChannel: async () => ({ channel: deadChannel(), close: async () => {} }),
+    openChannel: async () => ({ ...single(deadChannel()), close: async () => {} }),
     rendezvousTimeoutMs: 0,
   });
   const jobId = newJobId();
@@ -2144,7 +2187,7 @@ test('after recoverStaleJobs(), the resume watcher picks up the swept fleet reco
     store: sendStore, transferDir: tmp(), consent: async () => true, rendezvousTimeoutMs: 60,
     // The fleet reports the device online at its CURRENT signalingId.
     getFleet: async () => [{ deviceId: 'dev-1', signalingId: 'sig-CURRENT', online: true }],
-    openChannel: async (args) => { capturedTarget = args.target; return { channel: deadChannel(), close: async () => {} }; },
+    openChannel: async (args) => { capturedTarget = args.target; return { ...single(deadChannel()), close: async () => {} }; },
   });
 
   await svc.recoverStaleJobs();
@@ -2167,7 +2210,7 @@ test('recoverStaleJobs() sweeps crashed RECEIVE records too, to a terminal-hones
   await store.save({ ...base, jobId: 'b'.repeat(32), dir: 'recv', tier: 'adhoc', jobState: 'active' });
   await store.save({ ...base, jobId: 'c'.repeat(32), dir: 'recv', tier: 'adhoc', jobState: 'done' });
 
-  const svc = createTransferService({ store, transferDir: dir, consent: async () => true, openChannel: async () => ({ channel: { sendCtrl() {}, onCtrl() {}, onBulk() {} }, close: async () => {} }) });
+  const svc = createTransferService({ store, transferDir: dir, consent: async () => true, openChannel: async () => ({ ...single({ sendCtrl() {}, onCtrl() {}, onBulk() {} }), close: async () => {} }) });
   await svc.recoverStaleJobs();
 
   expect((await store.load('a'.repeat(32))).jobState).toBe('interrupted'); // fleet → resumable
@@ -2197,7 +2240,7 @@ test('removeJob refuses while a send is still in flight (must cancel first)', as
   // A send that never resolves (dead channel + long rendezvous) stays in pendingSends.
   const svc = createTransferService({
     store, transferDir: tmp(), consent: async () => true, rendezvousTimeoutMs: 5000,
-    openChannel: async () => ({ channel: deadChannel(), close: async () => {} }),
+    openChannel: async () => ({ ...single(deadChannel()), close: async () => {} }),
   });
   const jobId = 'dddddddddddddddddddddddddddddddd';
   svc.startSend({ jobId, manifest, sources, target: { id: 'sig-x', password: 'pw' } }).catch(() => {});
@@ -2237,7 +2280,7 @@ test('a send with target.flowCount=1000 opens at most 32 flows (openChannel neve
   let sendOpenArgs = null;
   const svc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async (args) => { sendOpenArgs = args; return { channel: deadChannel(), close: async () => {} }; },
+    openChannel: async (args) => { sendOpenArgs = args; return { ...single(deadChannel()), close: async () => {} }; },
     rendezvousTimeoutMs: 60,
   });
   await svc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'sig-over', flowCount: 1000 } });
@@ -2250,7 +2293,7 @@ test('a send with target.flowCount=0 (or negative) falls back to single-flow, no
   let sendOpenArgs = null;
   const svc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async (args) => { sendOpenArgs = args; return { channel: deadChannel(), close: async () => {} }; },
+    openChannel: async (args) => { sendOpenArgs = args; return { ...single(deadChannel()), close: async () => {} }; },
     rendezvousTimeoutMs: 60,
   });
   await svc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'sig-zero', flowCount: 0 } });
@@ -2267,7 +2310,7 @@ test('a flowCount:1 send passes flowCount:1 to openChannel (one path — no sing
   const seenOpenArgs = [];
   const svc = createTransferService({
     store: createJobsStore({ dir: tmp() }), transferDir: tmp(), consent: async () => true,
-    openChannel: async (args) => { seenOpenArgs.push(args); return { channel: deadChannel(), close: async () => {} }; },
+    openChannel: async (args) => { seenOpenArgs.push(args); return { ...single(deadChannel()), close: async () => {} }; },
     rendezvousTimeoutMs: 60,
   });
   await svc.startSend({ jobId: newJobId(), manifest, sources, target: { id: 'peer', flowCount: 1 } });
