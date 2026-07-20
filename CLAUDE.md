@@ -173,13 +173,27 @@ source of truth for done/progress/resume; (R9) honest status, deferrals written 
   fault registry is PER-PROCESS — a `side:'receive'` fault dispatches on the RECEIVER's renderer, and
   `fb6` must inject its SENDER-flow drop only AFTER the `consent prompt shown` log (an earlier drop lets
   the ~500ms re-dial rejoin the still-forming rendezvous as a normal join, bypassing the buffer path).
-  **Deferred (R9):** **Phase 3b-2 (auth-inherit) is next** — a non-anchor/re-dialed flow still runs the
-  FULL handshake instead of inheriting the group's verified peer identity; pre-consent PC-count
-  reduction (all N flows connect before consent); a residual F-C4 leak window in `runMultiFlowReceive`
+  **Deferred (R9):** pre-consent PC-count reduction (all N flows connect before consent); a residual F-C4 leak window in `runMultiFlowReceive`
   — between the jobId race and the `activeReceives` try/finally, a throw in `readPersistedRanges`/
   `createReceiver` leaks the `receivePending` entry + any buffered handle (mirrors a PRE-EXISTING
   unguarded `close()` in the same region; low-probability, ~6-line fix that also closes the older leak);
   plus the still-open F-C5 and F-B7 above.
+- **The per-flow fleet/contacts classification is CACHED to kill the auth amplification (Phase 3b-2,
+  2026-07-20).** A linked (own-fleet) multi-flow transfer's per-flow cost is NOT the crypto handshake
+  (local Ed25519, sub-ms) but an UNCACHED `auth.sovexa.org` lookup — `classifyPublicKey` →
+  `fleet()` (`GET /devices`) + `contacts()` (`GET /contacts`) — on every flow's critical bulk-gating
+  path (up to ~4× per flow, more on re-dial). `createTtlCache` (`ttl-cache.js`: 30s TTL + **in-flight
+  coalescing** — concurrent flows share one fetch, the load-bearing part) fronts `classifyPublicKey`'s
+  internal fetches in `account-service.js`, so N flows + re-dials make one `/devices` + one `/contacts`
+  round, not N. **Fail-closed by structure:** the signed-out token short-circuit is OUTSIDE the cache
+  (no fetch → null); only `ok:true` is cached; login+logout `invalidate()` (an account switch never
+  classifies against a prior fleet). The crypto handshake / auth gate / wire protocol are UNTOUCHED —
+  every flow is still fully verified — and the PUBLIC `fleet()`/`contacts()`/`isAccountPublicKey` stay
+  UNCACHED (console + control-session freshness). This **superseded** the tentative 3b "skip the
+  handshake / inherit identity" plan (dropped: it would have touched the fail-closed gate on both ends +
+  version skew + reduced per-flow verification, to save ~2 local round-trips). Proof is unit/integration
+  (the CI two-process harness runs password, not linked, transfers — R9); the live drop is fleet-setup
+  measurable.
 - **Two GATED, outward-facing actions** require explicit user approval per homelab ops rules: the
   signaling deploy (public subdomain) and opening coturn firewall ports.
 - **Logging: connection modules run in the RENDERER**, not main — they log via the `log:renderer`
