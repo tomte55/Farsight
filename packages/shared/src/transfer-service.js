@@ -275,6 +275,11 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // is ACTIVE ('accepted') — Task 5: addFlow is a no-op before the router exists,
   // so registering earlier would silently drop the join. Removed on teardown.
   const receiveFlowSinks = new Map(); // sessionId -> { addFlow, setCtrl }
+  // F-B6: flows that arrive BEFORE a receive is accepted are held here (not dropped)
+  // until 'accepted' drains them into the receiver, or teardown closes them. One
+  // owner (the service), keyed by sessionId (== groupId). Complements receiveFlowSinks
+  // (the ACTIVE sink); a receive is 'pending' here from runMultiFlowReceive start.
+  const receivePending = new Map();
 
   // Contact consents already granted, keyed by VERIFIED-peer-key + jobId, valued
   // by the fingerprint of the manifest the human actually approved. An
@@ -768,6 +773,15 @@ export function createTransferService({ store, transferDir, consent, openChannel
     // app alive / single-instance lock — CLAUDE.md). Each retained close is the
     // idempotent worker.close(), so a double-sweep is harmless.
     const joinedHandleCloses = [];
+    // F-B6: an attach folds a joined flow into the live receiver — flow 0 is BOTH ctrl
+    // and a bulk flow (mirrors dispatchReceiveFlowJoin), others are bulk-only; retain the
+    // close so teardown sweeps its hidden worker window (Important #2).
+    function attachJoin(handle, flowIndex) {
+      if (flowIndex === 0 && typeof handle.channel === 'object') receiver.setCtrl(handle.channel);
+      receiver.addFlow(handle.channel, flowIndex);
+      if (typeof handle.close === 'function') joinedHandleCloses.push(handle.close);
+    }
+    if (sessionId) receivePending.set(sessionId, { buffer: [], attach: null });
     let currentJobId = null;
     let currentManifest = null;
     let offerAccum = null;
@@ -827,6 +841,12 @@ export function createTransferService({ store, transferDir, consent, openChannel
       await Promise.all(joinedHandleCloses.splice(0).map((c) => {
         try { return Promise.resolve(c()).catch(() => {}); } catch { return undefined; }
       }));
+      if (sessionId) {
+        const pend = receivePending.get(sessionId); receivePending.delete(sessionId);
+        if (pend) await Promise.all(pend.buffer.splice(0).map(({ handle }) => {
+          try { return Promise.resolve(handle.close?.()).catch(() => {}); } catch { return undefined; }
+        }));
+      }
       throw err;
     } finally {
       if (jobIdTimer) clearTimer(jobIdTimer);
@@ -887,6 +907,13 @@ export function createTransferService({ store, transferDir, consent, openChannel
             // receive's teardown sweep closes its hidden worker window too.
             retain: (closeFn) => { if (typeof closeFn === 'function') joinedHandleCloses.push(closeFn); },
           });
+          if (sessionId) {
+            const pend = receivePending.get(sessionId);
+            if (pend) {
+              pend.attach = (h, i) => attachJoin(h, i);
+              for (const { handle, flowIndex } of pend.buffer.splice(0)) pend.attach(handle, flowIndex);
+            }
+          }
         }
         if (ev.type === 'file-failed' && ev.reason === 'io_error') failedFileIds.add(ev.fileId);
         emit(jobId, 'recv', ev);
@@ -932,7 +959,13 @@ export function createTransferService({ store, transferDir, consent, openChannel
       activeReceives.delete(jobId);
       // Deregister the sink BEFORE the grace/close so no further rolling-join can
       // race in against a receiver that's tearing down.
-      if (sessionId) receiveFlowSinks.delete(sessionId);
+      if (sessionId) {
+        receiveFlowSinks.delete(sessionId);
+        const pend = receivePending.get(sessionId); receivePending.delete(sessionId);
+        if (pend) await Promise.all(pend.buffer.splice(0).map(({ handle }) => {
+          try { return Promise.resolve(handle.close?.()).catch(() => {}); } catch { return undefined; }
+        }));
+      }
       // Same completion-ack grace as the single-flow path (see startReceive).
       if (receiveCloseGraceMs > 0) { try { await delay(receiveCloseGraceMs); } catch { /* ignore */ } }
       try { await close(); } catch { /* ignore close errors */ }
@@ -990,6 +1023,20 @@ export function createTransferService({ store, transferDir, consent, openChannel
     // then closes the orphan handle — the sender re-dials).
     getReceiveFlowSink(sessionId) {
       return receiveFlowSinks.get(sessionId) || null;
+    },
+
+    // F-B6: main's onFlowJoin routes a late/replacement flow here. Active receive →
+    // attach now; PENDING (pre-accept) → BUFFER (held, not dropped); ended/unknown →
+    // close the orphan (the one correct drop). Returns the outcome so main logs it LOUD.
+    offerRollingJoin(sessionId, handle, flowIndex) {
+      const pend = sessionId && receivePending.get(sessionId);
+      if (pend) {
+        if (pend.attach) { pend.attach(handle, flowIndex); return 'attached'; }
+        pend.buffer.push({ handle, flowIndex });
+        return 'buffered';
+      }
+      if (handle && typeof handle.close === 'function') { Promise.resolve(handle.close()).catch(() => {}); }
+      return 'dropped';
     },
 
     async listJobs() {

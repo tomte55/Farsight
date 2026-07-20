@@ -743,6 +743,63 @@ describe('transfer-service multi-flow: rolling-joined handle teardown', () => {
   });
 });
 
+describe('transfer-service multi-flow: pre-consent join buffer (F-B6)', () => {
+  it('buffers a flow offered before accept, attaches it on accept, and never drops it', async () => {
+    const srcDir = await tmp(); const dstDir = await tmp();
+    const sendStore = createJobsStore({ dir: await tmp() });
+    const recvStore = createJobsStore({ dir: await tmp() });
+    const data = new Uint8Array(4000).map((_, i) => (i * 31) & 0xff);
+    await writeFile(join(srcDir, 'f.bin'), data);
+    const entries = [{ fileId: 0, path: 'f.bin', size: data.length, mtime: 1 }];
+    const manifest = { entries, totalBytes: data.length, totalFiles: 1 };
+    const sources = new Map([[0, join(srcDir, 'f.bin')]]);
+
+    const { senderCtrl, receiverCtrl, senderFlows, receiverFlows } = link({ flowCount: 2 });
+    const SESSION = 'r-buf-join';
+
+    // A consent we control: block until we release it, so the receive sits PENDING.
+    let releaseConsent; const consentGate = new Promise((r) => { releaseConsent = r; });
+    const receiverSvc = createTransferService({
+      store: recvStore, transferDir: dstDir,
+      consent: async () => { await consentGate; return true; },
+      openChannel: async () => ({ ctrl: receiverCtrl, flows: receiverFlows, close: async () => {} }),
+      receiveCloseGraceMs: 20,
+    });
+    const senderSvc = createTransferService({
+      store: sendStore, transferDir: srcDir, consent: async () => true,
+      openChannel: async () => ({ ctrl: senderCtrl, flows: senderFlows, close: async () => {} }),
+    });
+
+    const jobId = 'd'.repeat(32);
+    const recvPromise = receiverSvc.startReceive({ rendezvous: SESSION });
+    await tick(10);
+    const sendPromise = senderSvc.startSend({ jobId, manifest, sources, target: { id: 'device-buf', flowCount: 2 } });
+
+    // While PENDING (consent not yet released) the ACTIVE sink must not exist yet...
+    await tick(10);
+    expect(receiverSvc.getReceiveFlowSink(SESSION)).toBeNull();
+    // ...but a racing rolling-join is BUFFERED, not closed (F-B6 fix).
+    let joinClosed = 0;
+    const joinHandle = { channel: { onBulk: () => {}, sendCtrl: () => {} }, flowIndex: 5, close: async () => { joinClosed += 1; } };
+    const outcome = receiverSvc.offerRollingJoin(SESSION, joinHandle, 5);
+    expect(outcome).toBe('buffered');
+    expect(joinClosed).toBe(0); // held, NOT dropped
+
+    releaseConsent(); // human accepts → drain buffer, transfer runs
+    const [sendResult, recvResult] = await Promise.all([sendPromise, recvPromise]);
+    expect(sendResult.ok).toBe(true);
+    expect(recvResult.ok).toBe(true);
+    expect(joinClosed).toBe(1); // the buffered handle was retained + swept on teardown (no leak)
+
+    // After teardown, a further offer is the ONE correct drop.
+    let lateClosed = 0;
+    const late = { channel: {}, flowIndex: 6, close: async () => { lateClosed += 1; } };
+    expect(receiverSvc.offerRollingJoin(SESSION, late, 6)).toBe('dropped');
+    await tick(5);
+    expect(lateClosed).toBe(1);
+  });
+});
+
 // Final-review Important #2: transfer-service.js:891 computes
 // jobStateForCompletion({ accepted, ok: result.ok }) at the multi-flow RECEIVE
 // completion site, but until now nothing drove a real multi-flow receive to
