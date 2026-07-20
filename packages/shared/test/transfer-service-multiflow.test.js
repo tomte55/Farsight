@@ -116,7 +116,7 @@ describe('transfer-service multi-flow branch (real disk + jobs-store)', () => {
   });
 
   // Plan 3 Task 6: createTransferService threads its ONE rate limiter into the
-  // multi-flow createMultiFlowSender it constructs (via createSendPool's choke
+  // multi-flow createSender it constructs (via createSendPool's choke
   // point) -- proved end to end here through the real multi-flow loopback: an
   // injected fake limiter's take() is asked to pace chunks dispatched across
   // MULTIPLE flows, confirming it's the SAME shared instance seeing all of
@@ -429,7 +429,7 @@ describe('transfer-service multi-flow branch: close() teardown on every settle p
 
     const jobId = newJobId();
     const entries = [{ fileId: 0, path: 'y.bin', size: 16, mtime: 1 }];
-    // createMultiFlowReceiver's abort() REJECTS (unlike the single-flow
+    // createReceiver's abort() REJECTS (unlike the single-flow
     // receiver's resolve-with-'canceled') — mirror transfer-service.test.js's
     // own SP3 P4 fixture, which catches it down to the reason string.
     const recvPromise = svc.startReceive({ rendezvous: { sessionId: 'r-mf-close-3' } }).catch((e) => e.message);
@@ -450,7 +450,7 @@ describe('transfer-service multi-flow branch: close() teardown on every settle p
     // NOTE (discovered while writing this test, out of scope for Task 5):
     // unlike the removed single-flow receiver driver, which persisted an
     // 'active' record immediately on accept (transfer-orchestrator.js's saveRecord('active')),
-    // createMultiFlowReceiver only persists via the periodic persistRanges tick
+    // createReceiver only persists via the periodic persistRanges tick
     // (default reportIntervalMs=3000) — so canceling a multi-flow receive THIS
     // early (before the first tick) leaves no jobs-store record to flip to
     // 'canceled' at all (cancel()'s store.load(jobId) finds nothing). The
@@ -464,7 +464,7 @@ describe('transfer-service multi-flow branch: close() teardown on every settle p
 
 // Review fix: runSend used to hardcode `result = { jobId, ok: true }` right
 // after `await sender.start()`, ignoring whatever the promise actually
-// resolved with. createMultiFlowSender's start() CAN resolve { jobId,
+// resolved with. createSender's start() CAN resolve { jobId,
 // ok:false } — the receiver's own 'complete' ctrl frame carries ok:false when
 // it finished reconciling but one file terminally failed (per-file I/O
 // isolation) — so the old code persisted/reported a false "fully succeeded"
@@ -554,16 +554,16 @@ describe('transfer-service: runSend honors the resolved ok (not hardcoded true)'
 describe('transfer-service: supervisor + rolling-join wiring (source guards)', () => {
   const src = readFileSync(new URL('../src/transfer-service.js', import.meta.url), 'utf8');
 
-  test('multi-flow SEND threads the bundle\'s awaitFlow into createMultiFlowSender (→ its send pool)', () => {
-    expect(src).toMatch(/createMultiFlowSender\(\{[\s\S]*?awaitFlow:\s*opened\.awaitFlow/);
+  test('multi-flow SEND threads the bundle\'s awaitFlow into createSender (→ its send pool)', () => {
+    expect(src).toMatch(/createSender\(\{[\s\S]*?awaitFlow:\s*opened\.awaitFlow/);
   });
 
   // Task 9: per-flow health (flowsLive/flowsTotal/redials) in the aggregate
-  // progress event. flowsLive/flowsTotal are derived inside createMultiFlowSender
+  // progress event. flowsLive/flowsTotal are derived inside createSender
   // itself (from the pool + the flowCount already threaded here); redials needs
   // the supervisor's counter threaded in from the opened bundle.
-  test('multi-flow SEND threads the bundle\'s redialCount into createMultiFlowSender (→ progress.redials)', () => {
-    expect(src).toMatch(/createMultiFlowSender\(\{[\s\S]*?redialCount:\s*opened\.redialCount/);
+  test('multi-flow SEND threads the bundle\'s redialCount into createSender (→ progress.redials)', () => {
+    expect(src).toMatch(/createSender\(\{[\s\S]*?redialCount:\s*opened\.redialCount/);
   });
 
   test('multi-flow SEND wires the bundle\'s onCtrlReplaced to the sender\'s setCtrl (slot-0 ctrl swap)', () => {

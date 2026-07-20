@@ -62,7 +62,7 @@ const memStore = () => ({ saved: [], async save(j) { this.saved.push(JSON.parse(
 // single-flow fallback arm). Wrap a single-channel test double (which already
 // implements both onCtrl/sendCtrl AND onBulk/sendBulk, exactly like a real
 // flow-0 ctrl channel does) as a 1-element coverage bundle so these fixtures
-// exercise createMultiFlowSender/createMultiFlowReceiver the same way
+// exercise createSender/createReceiver the same way
 // production does, evaluating the channel expression exactly once. The send
 // pool's usableFlows() (transfer-send-pool.js) calls f.isAlive() on every
 // flow -- absent on these plain test doubles (real flow objects get it from
@@ -1231,12 +1231,12 @@ test('serial queue: two enqueued sends never have more than one active channel a
     const dest = tmp();
     dests[target] = dest;
     // Phase 2 (one path): the service under test always sends through
-    // createMultiFlowSender now, so the hand-driven peer on the other end of
+    // createSender now, so the hand-driven peer on the other end of
     // this loopback must speak the same multi-flow wire protocol (self-
     // addressed bulk frames) -- a bare single-flow receiver driver (removed)
     // here would misinterpret the per-chunk header as file bytes. Drive it through a
     // second createTransferService (same high-level API the rest of this file
-    // uses), not a hand-rolled createMultiFlowReceiver (its openPart/
+    // uses), not a hand-rolled createReceiver (its openPart/
     // verifyAndFinalize/persistRanges wiring is exactly what transfer-
     // service.js's runMultiFlowReceive already builds).
     const rxSvc = createTransferService({

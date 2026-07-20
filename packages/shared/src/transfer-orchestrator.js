@@ -48,7 +48,7 @@ function serializer(onErr) {
 // tracker says every byte is covered, and even then the driver doesn't resolve
 // until the receiver's `complete` ack lands (same discipline the single-flow
 // sender driver used before it was removed — Phase 2 Task 3).
-export function createMultiFlowSender({
+export function createSender({
   ctrl: ctrl0, flows, jobId, manifest, chunkSize = 131072, flowCount, groupId,
   readerFor, newHash = () => createHash('sha256'),
   // Resilient multi-flow: the supervisor's starvation waiter. The send pool
@@ -64,7 +64,7 @@ export function createMultiFlowSender({
   reconcileWaitMs = 3000,
   // Sender-side inactivity/stall watchdog for a GENUINE WEDGE — bytes should be
   // moving (a flow is alive) but no receiver range_report has arrived within the
-  // bound. Mirrors createMultiFlowReceiver's ~25s inactivity watchdog: armed at
+  // bound. Mirrors createReceiver's ~25s inactivity watchdog: armed at
   // accept (pump start), reset on every inbound range_report (the receiver's
   // liveness signal — time-driven ~reportIntervalMs in a healthy transfer, so
   // steady progress can't false-trip it), and disarmed at `all-sent` (the
@@ -304,7 +304,7 @@ export function createMultiFlowSender({
         // `cancel` frame settles this driver directly (see the ctrl handler
         // below), but router.rangesFor() omits finalized files from every
         // report (fixed on the receiver side too — see reportFiles() in
-        // createMultiFlowReceiver), so tracker.isComplete() alone is not
+        // createReceiver), so tracker.isComplete() alone is not
         // guaranteed reachable against every receiver implementation. Without
         // this check the loop would keep re-reading/re-sending the whole
         // payload every reconcileWaitMs forever, even after the transfer has
@@ -437,7 +437,7 @@ export function createMultiFlowSender({
   };
 }
 
-// Multi-flow receiver: pairs with createMultiFlowSender. Reuses the removed
+// Multi-flow receiver: pairs with createSender. Reuses the removed
 // single-flow receiver driver's OFFER reassembly (offer / offer_begin->
 // offer_entries*->offer_end) and its settled/abort discipline, but routes bulk
 // bytes through Plan 1's createReceiveRouter (positional writeAt + per-file
@@ -449,7 +449,7 @@ export function createMultiFlowSender({
 // the removed single-flow receiver driver, where it was learned from the wire
 // OFFER — so every ctrl frame here (including the OFFER itself) is filtered by
 // jobId match.
-export function createMultiFlowReceiver({
+export function createReceiver({
   ctrl: ctrl0, flows, jobId, consent,
   // Accepted for forward interface compatibility with the paired sender's
   // constructor shape; this control flow only ever builds the manifest from the
@@ -491,7 +491,7 @@ export function createMultiFlowReceiver({
   // retry/terminal-failure path without waiting through real backoff delays.
   retryDelays, delay,
 }) {
-  // The ctrl channel is held in a MUTABLE ref (mirrors createMultiFlowSender): a
+  // The ctrl channel is held in a MUTABLE ref (mirrors createSender): a
   // re-dialed slot 0 is handed over via setCtrl, so every ctrl.sendCtrl(...) site
   // (accept, range_report, complete, reject, cancel) uses the live channel and the
   // inbound handler re-attaches to it. See setCtrl / attachCtrl below.
@@ -571,7 +571,7 @@ export function createMultiFlowReceiver({
   let router = null;
   let jobDoneSeen = false; // noted for observability; completion is driven by router.isComplete(), not this flag
   // Files the router has fully finalized (verified+fsync'd+renamed). Per receive
-  // (this whole createMultiFlowReceiver instance handles exactly one receive —
+  // (this whole createReceiver instance handles exactly one receive —
   // beginReceive is guarded against re-entry — so a fresh Set at construction is
   // already "per receive").
   const finalizedFiles = new Set();
@@ -647,7 +647,7 @@ export function createMultiFlowReceiver({
 
   // router.rangesFor() OMITS finalized files entirely (transfer-receive-router.js)
   // — once a file finalizes it simply vanishes from every subsequent report. The
-  // paired createMultiFlowSender's coverage tracker only REPLACES coverage for
+  // paired createSender's coverage tracker only REPLACES coverage for
   // files present in a report (never clears missing ones), so a finalized file's
   // last-known coverage freezes at whatever partial state it had before
   // finalizing — the sender's tracker.isComplete() then never converges, and its
@@ -669,7 +669,7 @@ export function createMultiFlowReceiver({
   }
 
   // Sends the receiver's current per-file coverage so the paired
-  // createMultiFlowSender's reconciliation loop can see what's still missing.
+  // createSender's reconciliation loop can see what's still missing.
   // Reports are byte-bounded via batchReportFiles — it measures actual
   // serialized bytes and emits one range_report ft-ctrl frame PER BATCH, so no
   // single frame can exceed the ~256KB data-channel message limit (the same
@@ -862,7 +862,7 @@ export function createMultiFlowReceiver({
       attachCtrl(newChannel);
     },
     // Mirrors the removed single-flow receiver driver's abort: tell the sender to stop, then fail. The
-    // paired createMultiFlowSender already honors an inbound `cancel` frame.
+    // paired createSender already honors an inbound `cancel` frame.
     abort(reason = 'aborted') {
       if (settled) return;
       try { ctrl.sendCtrl(cancelFrame(jobId)); } catch { /* best effort */ }
