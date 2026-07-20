@@ -782,6 +782,67 @@ describe('transfer-flow-supervisor', () => {
     expect(createWorker.all.length).toBe(2);  // normal backoff[0]
   });
 
+  // Review follow-up (Phase 3a Task 4, F-B8): slot.rateLimited is a ONE-SHOT
+  // flag — consumed (cleared) by the scheduleRedial call that used it for the
+  // wider cooldown. A SUBSEQUENT terminal on the same slot (for a different
+  // reason) must NOT see another 30s cooldown; it must fall back to normal
+  // backoff. Without the clear, a slot that ever hit rate_limited once would
+  // cool down at 30s forever.
+  it('rate_limited cooldown is one-shot: the NEXT terminal on that slot uses normal backoff', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], rateLimitedCooldownMs: 30000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    createWorker.latestFor(0).emit('error:rate_limited');
+    clock.advance(30000);                       // cooldown consumed → re-dial #2
+    expect(createWorker.all.length).toBe(2);
+    createWorker.latestFor(0).emit('error:ice'); // a DIFFERENT terminal on the new worker
+    clock.advance(500);                         // must re-dial on normal backoff[0], NOT another 30s
+    expect(createWorker.all.length).toBe(3);
+  });
+
+  // Supplementary to the test above (added after mutation-checking it — see
+  // task-4-report.md "Review fix (coverage)"): deleting scheduleRedial's
+  // `slot.rateLimited = false` does NOT fail the test above, because
+  // handleState's terminal branch (`slot.rateLimited = (state ===
+  // 'error:rate_limited')`) already re-derives the flag fresh from EVERY
+  // direct terminal state before scheduleRedial ever reads it — so two
+  // consecutive direct terminal emits are protected regardless of
+  // scheduleRedial's own clear. The clear's only observable effect is on the
+  // 'disconnected' → grace-timeout → goTerminal escalation (this file's
+  // 'disconnected' branch, ~line 314), which calls goTerminal directly and
+  // so bypasses that handleState re-derivation. This test exercises THAT path
+  // and genuinely mutation-kills a deleted `slot.rateLimited = false`.
+  it('rate_limited cooldown one-shot (disconnected/grace path): a later grace-timeout terminal on that slot uses normal backoff, not another cooldown', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], rateLimitedCooldownMs: 30000, disconnectedGraceMs: 4000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    createWorker.latestFor(0).emit('error:rate_limited');
+    clock.advance(30000);                       // cooldown consumed → re-dial #2
+    expect(createWorker.all.length).toBe(2);
+
+    const w2 = createWorker.latestFor(0);
+    w2.emit('connected');                       // resets attempt; does NOT touch rateLimited
+    w2.emit('disconnected');                    // arms the grace timer
+    clock.advance(4000);                        // grace expires → goTerminal called DIRECTLY,
+                                                  // bypassing handleState's terminal-branch reset
+    clock.advance(499);
+    expect(createWorker.all.length).toBe(2);     // not yet re-dialed
+    clock.advance(1);                            // t+500 total since grace fired → normal backoff[0]
+    expect(createWorker.all.length).toBe(3);     // re-dialed on NORMAL backoff, not another 30s cooldown
+  });
+
+  // Review follow-up (Phase 3a Task 4, F-B8): the rate_limited cooldown is
+  // PER-SLOT — one slot hitting it must not change another slot's re-dial
+  // timing.
+  it('a rate_limited slot does not change another slot re-dial timing (per-slot cooldown)', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 2, staggerMs: 250, backoff: [500], rateLimitedCooldownMs: 30000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    clock.advance(250);                          // slot 1 dials
+    createWorker.latestFor(0).emit('error:rate_limited'); // slot 0 cooldown
+    createWorker.latestFor(1).emit('error:ice');          // slot 1 normal terminal
+    clock.advance(500);                          // slot 1 must re-dial on backoff[0]
+    const slot1Workers = createWorker.all.filter((w) => w.slotIndex === 1);
+    expect(slot1Workers.length).toBe(2);         // slot 1 re-dialed on normal backoff, unaffected by slot 0
+  });
+
   it('stop(): cancels pending re-dial timers and closes live workers; no re-dials afterward', () => {
     const { clock, createWorker, args } = baseArgs({ flowCount: 2, backoff: [500] });
     const sup = createFlowSupervisor(args);
