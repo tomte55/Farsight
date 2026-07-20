@@ -174,4 +174,29 @@ describe('transfer-send-pool', () => {
     const all = flows.flatMap((f) => f.sent).map((c) => c.offset).sort((a, b) => a - b);
     expect(all).toEqual([...Array(12)].map((_, i) => i * 4));
   });
+
+  // Task 3 (F-B11 defense-in-depth): a dispatched chunk whose sendBulk promise
+  // NEVER settles (a 'connected'-but-wedged flow, a lost credit, any future
+  // cause) must not block run() forever. A per-chunk stall timer (chunkStallMs)
+  // is a backstop independent of WHY the promise is stuck -- it treats a timeout
+  // exactly like a sendBulk rejection: the flow is retired for the run and the
+  // chunk requeues onto a survivor.
+  it('a dispatched chunk that never settles is reassigned after chunkStallMs; run() completes (F-B11 backstop)', async () => {
+    let now = 0; const timers = [];
+    const setTimer = (fn, ms) => { const id = { fn, at: now + ms }; timers.push(id); return id; };
+    const clearTimer = (id) => { const i = timers.indexOf(id); if (i !== -1) timers.splice(i, 1); };
+    const advance = (ms) => { now += ms; for (const t of [...timers].sort((a, b) => a.at - b.at)) if (t.at <= now) { clearTimer(t); t.fn(); } };
+
+    const stuck = { isAlive: () => true, sendBulk: () => new Promise(() => {}) }; // never settles
+    const good = { isAlive: () => true, sendBulk: () => Promise.resolve() };
+    const pool = createSendPool({ flows: [stuck, good], encodeFrame: (c) => c, chunkStallMs: 10000, setTimer, clearTimer });
+    const run = pool.run((async function* () { yield 'c0'; yield 'c1'; })());
+    // Let dispatch happen (same convention as this file's other tests: a real
+    // setTimeout(0) macrotask flushes every pending microtask first, which a
+    // bare `await Promise.resolve()` does not reliably do for an async
+    // generator's multi-tick next() resolution), then trip the stall timer.
+    await new Promise((r) => setTimeout(r, 0));
+    advance(10000);
+    await expect(run).resolves.toBeUndefined(); // completes -- the stuck flow's chunk went to `good`
+  });
 });

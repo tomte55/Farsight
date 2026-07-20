@@ -255,26 +255,13 @@ function createOffererChannels() {
   wireDataChannel(pc.createDataChannel('auth', { ordered: true }));
 }
 
-// Debounced single ICE-restart on a persistent drop — same P-6 rationale as
-// peer.js (WebRTC flaps disconnected->connected under transient loss).
-// Only the initiator re-offers; the attacher waits for the re-offer.
-function wireConnectionState(isInitiator) {
-  let iceRestartTimer = null;
-  const clearIceRestart = () => { if (iceRestartTimer) { clearTimeout(iceRestartTimer); iceRestartTimer = null; } };
+// Phase 3a Task 2 (F-B4): the worker is a pure state reporter — recovery
+// (grace window + re-dial) is owned solely by the flow supervisor now, which
+// consumes this reportState() as its only signal. Do not add a second
+// autonomous recovery mechanism here.
+function wireConnectionState() {
   pc.addEventListener('connectionstatechange', () => {
     reportState(pc.connectionState);
-    const recoverable = (s) => s === 'disconnected' || s === 'failed';
-    if (!recoverable(pc.connectionState)) { clearIceRestart(); return; }
-    if (!isInitiator || iceRestartTimer) return;
-    iceRestartTimer = setTimeout(async () => {
-      iceRestartTimer = null;
-      if (!recoverable(pc.connectionState)) return; // recovered during the grace window
-      try {
-        const offer = await pc.createOffer({ iceRestart: true });
-        await pc.setLocalDescription(offer);
-        signal.send(MSG.OFFER, { sdp: offer.sdp });
-      } catch { /* guarded */ }
-    }, 2500);
   });
 }
 
@@ -308,7 +295,7 @@ window.farsightTransfer.onStartRendezvous(async (params) => {
       pc = new RTCPeerConnection({ iceServers: m.iceServers || [] });
       pc.addEventListener('icecandidate', (e) => { if (e.candidate) signal.send(MSG.CANDIDATE, { candidate: e.candidate }); });
       pc.addEventListener('datachannel', (e) => wireDataChannel(e.channel));
-      wireConnectionState(isInitiator);
+      wireConnectionState();
       if (isInitiator) {
         createOffererChannels();
         const offer = await pc.createOffer();

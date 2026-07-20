@@ -166,7 +166,7 @@ describe('transfer-flow-supervisor', () => {
     }
   });
 
-  it('disconnected is TRANSIENT: never re-dials (worker self-heals via ICE-restart)', () => {
+  it('disconnected is transient WITHIN the grace window: not-alive immediately, but re-dial waits for the grace timer', () => {
     const { clock, createWorker, args } = baseArgs({ flowCount: 1 });
     const sup = createFlowSupervisor(args);
     sup.start();
@@ -175,8 +175,89 @@ describe('transfer-flow-supervisor', () => {
 
     createWorker.latestFor(0).emit('disconnected');
     expect(sup.liveCount()).toBe(0); // marked not-alive...
-    clock.advance(100000);
-    expect(createWorker.all.length).toBe(1); // ...but NO re-dial scheduled
+    clock.advance(3999); // just under the default 4000ms disconnectedGraceMs
+    expect(createWorker.all.length).toBe(1); // ...but no re-dial YET — bounded by Task 1's grace
+  });
+
+  it('disconnected → reconnects before grace ⇒ no re-dial, no fail (F-B4 self-heal)', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, disconnectedGraceMs: 4000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('connected');
+    w0.emit('disconnected');
+    clock.advance(3000);          // < grace
+    w0.emit('connected');         // self-healed in place
+    clock.advance(5000);          // past where the grace WOULD have fired
+    expect(args.onFlowDown).not.toHaveBeenCalled();
+    expect(w0.close).not.toHaveBeenCalled();
+    expect(createWorker.all.length).toBe(1);   // no re-dial
+    expect(sup.liveCount()).toBe(1);
+  });
+
+  it('disconnected → grace elapses ⇒ closeWorker + onFlowDown(0) once + one re-dial', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, disconnectedGraceMs: 4000, backoff: [500] });
+    const sup = createFlowSupervisor(args); sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('connected');
+    w0.emit('disconnected');
+    clock.advance(4000);          // grace fires → terminal
+    expect(w0.close).toHaveBeenCalledTimes(1);
+    expect(args.onFlowDown).toHaveBeenCalledWith(0);
+    expect(args.onFlowDown).toHaveBeenCalledTimes(1);
+    clock.advance(500);           // backoff[0]
+    expect(createWorker.all.length).toBe(2);          // exactly one re-dial
+    expect(createWorker.latestFor(0)).not.toBe(w0);
+  });
+
+  it('failed DURING the grace ⇒ immediate terminal, grace canceled (no double escalation)', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, disconnectedGraceMs: 4000, backoff: [500] });
+    const sup = createFlowSupervisor(args); sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('connected');
+    w0.emit('disconnected');
+    clock.advance(1000);
+    w0.emit('failed');            // terminal before the grace
+    expect(args.onFlowDown).toHaveBeenCalledTimes(1);
+    clock.advance(500);           // one re-dial
+    expect(createWorker.all.length).toBe(2);
+    clock.advance(10000);         // the stale grace deadline passes — must NOT re-escalate
+    expect(args.onFlowDown).toHaveBeenCalledTimes(1);
+    expect(createWorker.all.length).toBe(2);
+  });
+
+  // Review follow-up (Fix 1): the `if (slot.graceTimer == null)` re-arm guard
+  // in the 'disconnected' branch was previously untested. A repeat
+  // 'disconnected' while a grace is already pending must NOT arm a second
+  // timer — only ONE escalation (close + onFlowDown + re-dial) may happen.
+  it('a repeat disconnected while a grace is pending does NOT arm a second timer (single escalation)', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, disconnectedGraceMs: 4000, backoff: [500] });
+    const sup = createFlowSupervisor(args); sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('connected');
+    w0.emit('disconnected');
+    w0.emit('disconnected');       // repeat while grace pending — must NOT arm a 2nd timer
+    clock.advance(4000);           // grace fires ONCE
+    expect(args.onFlowDown).toHaveBeenCalledTimes(1);
+    expect(w0.close).toHaveBeenCalledTimes(1);
+    clock.advance(500);
+    expect(createWorker.all.length).toBe(2);   // exactly one re-dial, not two
+  });
+
+  // Review follow-up (Fix 2): the grace-callback staleness guard
+  // (`if (!active || slot.worker !== worker) return;`) is DEFENSIVE — it
+  // protects against a real-setTimeout race (the grace macrotask already
+  // dispatched when stop() or a re-dial clears it) that this synchronous fake
+  // clock cannot reproduce, since clearTimer() here removes the timer entry
+  // outright rather than racing an already-fired callback. This test at least
+  // pins the clear-on-stop path that feeds that guard's intent.
+  it('stop() cancels a pending grace (no escalation after stop)', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, disconnectedGraceMs: 4000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('connected'); w0.emit('disconnected');
+    sup.stop();
+    clock.advance(10000);
+    expect(args.onFlowDown).not.toHaveBeenCalled();  // grace was cleared by stop()
   });
 
   // Per-slot cap applies ONLY when a flow is LIVE (not a total outage): a slot
@@ -434,9 +515,13 @@ describe('transfer-flow-supervisor', () => {
     clock.advance(500);
     expect(sup.redialCount()).toBe(2); // a second real re-dial, different slot
 
-    // A transient 'disconnected' never re-dials — must not bump the counter.
+    // A transient 'disconnected' that self-heals within the grace window must
+    // not bump the counter (Task 1: a disconnect that never recovers WOULD
+    // eventually escalate to a real re-dial after disconnectedGraceMs — this
+    // reconnects well inside the default 4000ms grace, so it never does).
     createWorker.latestFor(0).emit('connected');
     createWorker.latestFor(0).emit('disconnected');
+    createWorker.latestFor(0).emit('connected'); // self-heal within grace
     clock.advance(100000);
     expect(sup.redialCount()).toBe(2); // unchanged
   });
@@ -671,6 +756,91 @@ describe('transfer-flow-supervisor', () => {
     const w0b = slot0Workers[1];
     expect(w0b).not.toBe(w0);
     expect(w0b.close).not.toHaveBeenCalled(); // the fresh worker is untouched
+  });
+
+  // Phase 3a Task 4 (F-B8): a rate_limited terminal must not hammer the
+  // signaling server's per-IP connect budget on the normal short backoff — it
+  // re-dials on a much WIDER, per-slot cooldown instead. Per-slot only: other
+  // slots are unaffected (not asserted here directly — see the supervisor's
+  // per-slot `slot.rateLimited` flag — but this pins the delay used for the
+  // rate-limited slot itself).
+  it('error:rate_limited terminal re-dials on the wider cooldown, not backoff', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], rateLimitedCooldownMs: 30000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    createWorker.latestFor(0).emit('error:rate_limited');
+    clock.advance(500);                       // normal backoff would re-dial here
+    expect(createWorker.all.length).toBe(1);  // it did NOT
+    clock.advance(29500);                     // t=30000, the cooldown
+    expect(createWorker.all.length).toBe(2);  // re-dialed on the cooldown
+  });
+
+  it('a non-rate-limited terminal still uses the normal backoff', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], rateLimitedCooldownMs: 30000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    createWorker.latestFor(0).emit('error:ice');
+    clock.advance(500);
+    expect(createWorker.all.length).toBe(2);  // normal backoff[0]
+  });
+
+  // Review follow-up (Phase 3a Task 4, F-B8): slot.rateLimited is a ONE-SHOT
+  // flag — consumed (cleared) by the scheduleRedial call that used it for the
+  // wider cooldown. A SUBSEQUENT terminal on the same slot (for a different
+  // reason) must NOT see another 30s cooldown; it must fall back to normal
+  // backoff. Without the clear, a slot that ever hit rate_limited once would
+  // cool down at 30s forever.
+  it('rate_limited cooldown is one-shot: the NEXT terminal on that slot uses normal backoff', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], rateLimitedCooldownMs: 30000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    createWorker.latestFor(0).emit('error:rate_limited');
+    clock.advance(30000);                       // cooldown consumed → re-dial #2
+    expect(createWorker.all.length).toBe(2);
+    createWorker.latestFor(0).emit('error:ice'); // a DIFFERENT terminal on the new worker
+    clock.advance(500);                         // must re-dial on normal backoff[0], NOT another 30s
+    expect(createWorker.all.length).toBe(3);
+  });
+
+  // Supplementary to the test above (added after mutation-checking it — see
+  // task-4-report.md "Review fix (coverage)"): deleting scheduleRedial's
+  // `slot.rateLimited = false` does NOT fail the test above, because
+  // handleState's terminal branch (`slot.rateLimited = (state ===
+  // 'error:rate_limited')`) already re-derives the flag fresh from EVERY
+  // direct terminal state before scheduleRedial ever reads it — so two
+  // consecutive direct terminal emits are protected regardless of
+  // scheduleRedial's own clear. The clear's only observable effect is on the
+  // 'disconnected' → grace-timeout → goTerminal escalation (this file's
+  // 'disconnected' branch, ~line 314), which calls goTerminal directly and
+  // so bypasses that handleState re-derivation. This test exercises THAT path
+  // and genuinely mutation-kills a deleted `slot.rateLimited = false`.
+  it('rate_limited cooldown one-shot (disconnected/grace path): a later grace-timeout terminal on that slot uses normal backoff, not another cooldown', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], rateLimitedCooldownMs: 30000, disconnectedGraceMs: 4000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    createWorker.latestFor(0).emit('error:rate_limited');
+    clock.advance(30000);                       // cooldown consumed → re-dial #2
+    expect(createWorker.all.length).toBe(2);
+
+    const w2 = createWorker.latestFor(0);
+    w2.emit('connected');                       // resets attempt; does NOT touch rateLimited
+    w2.emit('disconnected');                    // arms the grace timer
+    clock.advance(4000);                        // grace expires → goTerminal called DIRECTLY,
+                                                  // bypassing handleState's terminal-branch reset
+    clock.advance(499);
+    expect(createWorker.all.length).toBe(2);     // not yet re-dialed
+    clock.advance(1);                            // t+500 total since grace fired → normal backoff[0]
+    expect(createWorker.all.length).toBe(3);     // re-dialed on NORMAL backoff, not another 30s cooldown
+  });
+
+  // Review follow-up (Phase 3a Task 4, F-B8): the rate_limited cooldown is
+  // PER-SLOT — one slot hitting it must not change another slot's re-dial
+  // timing.
+  it('a rate_limited slot does not change another slot re-dial timing (per-slot cooldown)', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 2, staggerMs: 250, backoff: [500], rateLimitedCooldownMs: 30000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    clock.advance(250);                          // slot 1 dials
+    createWorker.latestFor(0).emit('error:rate_limited'); // slot 0 cooldown
+    createWorker.latestFor(1).emit('error:ice');          // slot 1 normal terminal
+    clock.advance(500);                          // slot 1 must re-dial on backoff[0]
+    const slot1Workers = createWorker.all.filter((w) => w.slotIndex === 1);
+    expect(slot1Workers.length).toBe(2);         // slot 1 re-dialed on normal backoff, unaffected by slot 0
   });
 
   it('stop(): cancels pending re-dial timers and closes live workers; no re-dials afterward', () => {

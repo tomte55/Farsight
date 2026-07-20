@@ -132,10 +132,31 @@ source of truth for done/progress/resume; (R9) honest status, deferrals written 
   **Test transfers with a real 2-machine / MULTI-chunk / MANY-file E2E** — localhost + one-chunk +
   few-file transfers hide teardown-races, routing bugs, AND the frame-size limit. The real-wire CI
   gate (`.github/workflows/ci.yml`) runs the headless two-process harness at both **N=1** (single-flow
-  self-test) and **N=8** (F-B10 multi-flow regression guard) — both exercise the SAME sender/receiver
+  self-test) and **4-flow** (F-B10 multi-flow regression guard) — both exercise the SAME sender/receiver
   code path. Worker/main emit diagnostics to the app log (`[ft-worker]` heartbeat with ctrl/bulk
   counters + `[transfer]` lifecycle); the `[ft-worker]` counters (`ctrlOut`/`ctrlIn`, `dc-error`) are
   what pinpoint these from field logs.
+- **Transfer flow-death recovery is SUPERVISOR-OWNED (Phase 3a, 2026-07-20).** A dropped flow is
+  bounded by a `disconnectedGraceMs` (4000ms, mutation-checked) grace timer in
+  `transfer-flow-supervisor.js` before the supervisor escalates to a re-dial — the worker no longer
+  runs an autonomous ICE-restart (deleted, grep-proven zero remaining callers), so there is exactly
+  ONE place a dead flow gets recovered, never two racing paths. `transfer-send-pool.js` also has a
+  mutation-checked per-chunk `chunkStallMs` (10000ms) backstop so a single stranded dispatched-chunk
+  promise can never block completion, and a `rate_limited` slot re-dials on its own wider
+  `rateLimitedCooldownMs` (30000ms) instead of the normal per-attempt backoff. This closed F-B11: the
+  fault-injection harness's flow-death scenarios (`transfer-fault-e2e.mjs` — `fb1` drops a live
+  flow's signaling socket, `fb2` crashes its worker renderer) used to stall to 5/6 files ~⅔ of the
+  time; real-wire re-runs (5x each, `SPIKE_NO_RETRY=1`) now deliver byte-identical N/N every time —
+  `fb1`@4-flow 5/5, `fb1`@8-flow 5/5, `fb2`@4-flow 5/5 — with the fault still surfaced loudly
+  (`conn:error:signaling_*` / `worker-gone:crashed`) rather than swallowed. `fb1`/`fb2` at
+  flowCount=4 are a required CI gate alongside the N=1 + 4-flow baseline harness. The gate itself
+  ASSERTS byte-identical N/N delivery + a `completed` terminal state (a review-fix hardening,
+  2026-07-20 — it used to only log delivery as INFO, so a gate run could pass green on a dropped
+  file; re-verified 3/3 each for `fb1`/`fb2` under the stronger check, and bite-confirmed by
+  temporarily forcing the check to fail, which flipped the exit code). **Deferred (R9):** F-C5
+  (`getStats()` wired, no consumer reads it yet); F-B7 (the control-SESSION signaling reconnect in
+  `peer.js` still runs its own ICE-restart — a separate code path from the transfer worker, untouched
+  by this phase); flow-count auto-scaling (still a fixed default).
 - **Two GATED, outward-facing actions** require explicit user approval per homelab ops rules: the
   signaling deploy (public subdomain) and opening coturn firewall ports.
 - **Logging: connection modules run in the RENDERER**, not main — they log via the `log:renderer`

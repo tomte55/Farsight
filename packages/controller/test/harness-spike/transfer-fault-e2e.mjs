@@ -17,7 +17,7 @@
 // ============================================================================
 import {
   log, delay, makeAttemptContext, startSignaling, writeStandardPayload,
-  bringUpPair, cdpEval, awaitDelivery, awaitLogLine, mkdir, writeFile, join, sha256, CHUNK,
+  bringUpPair, cdpEval, awaitDelivery, verifyDelivery, awaitLogLine, mkdir, writeFile, join, sha256, CHUNK,
 } from './harness-lib.mjs';
 
 const FLOW_COUNT = Number(process.env.SPIKE_FLOWS) || 4;
@@ -51,11 +51,14 @@ async function injectUntilLands(sendWs, fault, { tries = 200, everyMs = 20 } = {
 }
 
 // A fault scenario: inject `fault` on flow 1 mid-transfer, then assert the
-// finding's LOUD + BOUNDED contract — the fault is SURFACED in the sender log
-// (`surfacedRegex`) and the transfer reaches a terminal outcome within timeout,
-// NEVER a silent zombie. Full byte-identical delivery is reported as INFO (an
-// incomplete recovery of an in-flight LARGE file after a flow death is the
-// Phase-2 multi-flow RESUPPLY gap F-B11, not a miss of the fault under test).
+// finding's LOUD + BOUNDED + COMPLETE contract — the fault is SURFACED in the
+// sender log (`surfacedRegex`), the transfer reaches a terminal outcome within
+// timeout (NEVER a silent zombie), AND recovery actually COMPLETES delivery:
+// the receiver's terminal state must be 'completed' and every file must land
+// byte-identical. A terminal 'interrupted'/'failed'/'canceled' after a fault,
+// or a byte-identical shortfall, is a FAILURE for these scenarios — the whole
+// point of flow-death recovery (Phase 3a, F-B11) is that it completes the
+// transfer, not merely that it stops loud instead of hanging silently.
 async function runScenario({ label, fault, surfacedRegex }) {
   const { cleanups, cleanupAll, tmp } = makeAttemptContext();
   try {
@@ -90,13 +93,28 @@ async function runScenario({ label, fault, surfacedRegex }) {
 
     // (2) BOUNDED: the RECEIVER reaches a terminal outcome within timeout — never a hang.
     const terminal = await awaitLogLine(recvChild, /recv ev=(completed|interrupted|failed|canceled)/, WAIT_MS);
-    log('receiver terminal outcome:', terminal ? terminal.replace(/.*recv ev=/, 'recv ev=').slice(0, 40) : 'NONE (HANG!)');
+    const terminalState = terminal ? (terminal.match(/recv ev=(completed|interrupted|failed|canceled)/) || [])[1] : null;
+    log('receiver terminal outcome:', terminal ? terminalState : 'NONE (HANG!)');
     if (!terminal) failures.push(`${label} HANG: the transfer never reached a terminal state within timeout (zombie)`);
 
-    // Info only: full recovery vs the Phase-2 resupply gap (F-B11).
+    // (3) COMPLETE: recovery must actually deliver byte-identical N/N — a terminal
+    // 'interrupted'/'failed'/'canceled' after a fault, or a delivery shortfall, is
+    // NOT a success for these scenarios (the point of Phase 3a recovery is that it
+    // COMPLETES the transfer). This used to be logged as INFO only, which let a run
+    // go green even with a dropped file — the exact old 5/6 F-B11 bug — so it is
+    // now asserted like the other two contracts. `received` from awaitDelivery only
+    // proves FILENAME presence — it is a cheap pre-check, NOT the authoritative
+    // pass/fail. The authoritative check is verifyDelivery's sha256 + size compare
+    // (same verifier two-process-harness.mjs uses for the CI happy-path gate) —
+    // a truncated/corrupted/zero-length file under the right name must FAIL here.
     const received = await awaitDelivery(recvDownloads, expected, 3000);
     const deliveredAll = received.size === expected.size;
-    log(`delivery: ${received.size}/${expected.size} files ${deliveredAll ? '(full recovery)' : '(INCOMPLETE — Phase-2 resupply gap F-B11; failed loud above, not a miss of the fault under test)'}`);
+    log(`delivery (filename pre-check): ${received.size}/${expected.size} files ${deliveredAll ? '(all names present)' : '(INCOMPLETE)'}`);
+    const verifyFailures = await verifyDelivery(received, expected);
+    log(`delivery (byte-identical verify): ${verifyFailures.length === 0 ? 'ALL OK' : `${verifyFailures.length} mismatch(es)`}`);
+    if (terminal && terminalState !== 'completed') failures.push(`${label} REGRESSION: receiver's terminal state was '${terminalState}', not 'completed' — recovery must COMPLETE delivery, not just stop loud (the old F-B11 stall)`);
+    if (!deliveredAll) failures.push(`${label} REGRESSION: delivery incomplete (${received.size}/${expected.size} files present) — the old 5/6 F-B11 dropped-file bug`);
+    for (const f of verifyFailures) failures.push(`${label} REGRESSION: byte-identical verify failed — ${f}`);
 
     return { pass: failures.length === 0, failures };
   } finally {
@@ -158,7 +176,7 @@ async function main() {
   if (!run) { console.error('unknown SPIKE_SCENARIO: ' + SCENARIO); process.exit(2); }
   try {
     const { pass, failures } = await run();
-    if (pass) { console.log(`\n=== FAULT-E2E ${SCENARIO}: PASS — the injected fault was surfaced LOUD and the transfer reached a bounded terminal outcome (never a zombie) ===`); process.exit(0); }
+    if (pass) { console.log(`\n=== FAULT-E2E ${SCENARIO}: PASS — the injected fault was surfaced LOUD, the transfer reached a bounded terminal outcome (never a zombie), AND delivery completed byte-identical N/N ===`); process.exit(0); }
     console.error(`\n=== FAULT-E2E ${SCENARIO}: FAIL ===`);
     for (const f of failures) console.error('  - ' + f);
     process.exit(1);
