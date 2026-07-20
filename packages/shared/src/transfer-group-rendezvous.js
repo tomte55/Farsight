@@ -29,6 +29,7 @@ export function createGroupRendezvous({
   openFlow,
   onGroupReady,
   joinWindowMs = 8000,
+  anchorWaitMs = 20000,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   onFlowJoin,
@@ -62,11 +63,19 @@ export function createGroupRendezvous({
 
     let group = groups.get(groupId);
     if (!group) {
-      group = { flowCount, flows: new Map(), timer: null, fired: false };
+      group = { flowCount, flows: new Map(), timer: null, fired: false, awaitingAnchor: false };
       groups.set(groupId, group);
       group.timer = setTimer(() => {
         group.timer = null;
-        fireReady(groupId, group);
+        if (group.flows.has(0)) { fireReady(groupId, group); return; } // anchor present → fire (partial OK)
+        // No anchor yet: do NOT abort. Extend a bounded grace for flow 0 to (re-)dial —
+        // the sender's supervisor re-dials terminal slots (Phase 3a). If it never comes,
+        // fire an anchorless group; assembleReceiveGroup returns null → main aborts CLEAN + LOUD.
+        group.awaitingAnchor = true;
+        group.timer = setTimer(() => {
+          group.timer = null;
+          fireReady(groupId, group);
+        }, anchorWaitMs);
       }, joinWindowMs);
     }
 
@@ -86,7 +95,8 @@ export function createGroupRendezvous({
     const handle = openFlow({ sessionId, flowIndex, groupId, linked });
     group.flows.set(flowIndex, handle);
 
-    if (group.flows.size >= group.flowCount) {
+    const hasAnchor = group.flows.has(0);
+    if (hasAnchor && (group.awaitingAnchor || group.flows.size >= group.flowCount)) {
       fireReady(groupId, group);
     }
   }
