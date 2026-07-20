@@ -166,7 +166,7 @@ describe('transfer-flow-supervisor', () => {
     }
   });
 
-  it('disconnected is TRANSIENT: never re-dials (worker self-heals via ICE-restart)', () => {
+  it('disconnected is transient WITHIN the grace window: not-alive immediately, but re-dial waits for the grace timer', () => {
     const { clock, createWorker, args } = baseArgs({ flowCount: 1 });
     const sup = createFlowSupervisor(args);
     sup.start();
@@ -175,8 +175,54 @@ describe('transfer-flow-supervisor', () => {
 
     createWorker.latestFor(0).emit('disconnected');
     expect(sup.liveCount()).toBe(0); // marked not-alive...
-    clock.advance(100000);
-    expect(createWorker.all.length).toBe(1); // ...but NO re-dial scheduled
+    clock.advance(3999); // just under the default 4000ms disconnectedGraceMs
+    expect(createWorker.all.length).toBe(1); // ...but no re-dial YET — bounded by Task 1's grace
+  });
+
+  it('disconnected → reconnects before grace ⇒ no re-dial, no fail (F-B4 self-heal)', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, disconnectedGraceMs: 4000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('connected');
+    w0.emit('disconnected');
+    clock.advance(3000);          // < grace
+    w0.emit('connected');         // self-healed in place
+    clock.advance(5000);          // past where the grace WOULD have fired
+    expect(args.onFlowDown).not.toHaveBeenCalled();
+    expect(w0.close).not.toHaveBeenCalled();
+    expect(createWorker.all.length).toBe(1);   // no re-dial
+    expect(sup.liveCount()).toBe(1);
+  });
+
+  it('disconnected → grace elapses ⇒ closeWorker + onFlowDown(0) once + one re-dial', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, disconnectedGraceMs: 4000, backoff: [500] });
+    const sup = createFlowSupervisor(args); sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('connected');
+    w0.emit('disconnected');
+    clock.advance(4000);          // grace fires → terminal
+    expect(w0.close).toHaveBeenCalledTimes(1);
+    expect(args.onFlowDown).toHaveBeenCalledWith(0);
+    expect(args.onFlowDown).toHaveBeenCalledTimes(1);
+    clock.advance(500);           // backoff[0]
+    expect(createWorker.all.length).toBe(2);          // exactly one re-dial
+    expect(createWorker.latestFor(0)).not.toBe(w0);
+  });
+
+  it('failed DURING the grace ⇒ immediate terminal, grace canceled (no double escalation)', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, disconnectedGraceMs: 4000, backoff: [500] });
+    const sup = createFlowSupervisor(args); sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('connected');
+    w0.emit('disconnected');
+    clock.advance(1000);
+    w0.emit('failed');            // terminal before the grace
+    expect(args.onFlowDown).toHaveBeenCalledTimes(1);
+    clock.advance(500);           // one re-dial
+    expect(createWorker.all.length).toBe(2);
+    clock.advance(10000);         // the stale grace deadline passes — must NOT re-escalate
+    expect(args.onFlowDown).toHaveBeenCalledTimes(1);
+    expect(createWorker.all.length).toBe(2);
   });
 
   // Per-slot cap applies ONLY when a flow is LIVE (not a total outage): a slot
@@ -434,9 +480,13 @@ describe('transfer-flow-supervisor', () => {
     clock.advance(500);
     expect(sup.redialCount()).toBe(2); // a second real re-dial, different slot
 
-    // A transient 'disconnected' never re-dials — must not bump the counter.
+    // A transient 'disconnected' that self-heals within the grace window must
+    // not bump the counter (Task 1: a disconnect that never recovers WOULD
+    // eventually escalate to a real re-dial after disconnectedGraceMs — this
+    // reconnects well inside the default 4000ms grace, so it never does).
     createWorker.latestFor(0).emit('connected');
     createWorker.latestFor(0).emit('disconnected');
+    createWorker.latestFor(0).emit('connected'); // self-heal within grace
     clock.advance(100000);
     expect(sup.redialCount()).toBe(2); // unchanged
   });

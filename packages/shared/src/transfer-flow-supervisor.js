@@ -13,10 +13,21 @@
 // (createWorker) are injected, so a fake clock + fake workers unit-test every
 // guard. A LATER task wires this into the Electron transfer layer.
 //
-// Session-state semantics mirror assembleSendFlows' wireAliveness():
+// Session-state semantics mirror assembleSendFlows' wireAliveness(), with one
+// addition (Phase 3a Task 1 — F-B4/F-B11): a 'disconnected' slot gets a bounded
+// grace window to self-heal before it escalates, rather than staying not-alive
+// indefinitely.
 //   'connected'                      -> ALIVE (a flow appeared)
-//   'disconnected'                   -> not-alive but TRANSIENT (worker debounces
-//                                       an ICE-restart; never re-dial here)
+//   'disconnected'                   -> not-alive but TRANSIENT: arms a
+//                                       disconnectedGraceMs timer. Reconnecting
+//                                       before it fires cancels it (self-heal,
+//                                       no re-dial). If it fires first, escalates
+//                                       to the SAME terminal path as below (fails
+//                                       the parked chunk's channel -> unparks it
+//                                       -> re-dial) instead of waiting on the
+//                                       browser's own slow disconnected->failed
+//                                       escalation, which can outlast the 25s
+//                                       inactivity watchdog.
 //   'failed' | 'closed' | 'error:*'  -> TERMINAL (re-dial this slot)
 //
 // Slot 0 is the ctrl flow: whenever slot 0's worker connects (initial or
@@ -71,6 +82,7 @@ export function createFlowSupervisor({
   maxRedialsPerSlot = 8,
   maxConcurrentDials = 4,
   outageGiveupMs = 180000,
+  disconnectedGraceMs = 4000,
   isRunning,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
@@ -82,6 +94,7 @@ export function createFlowSupervisor({
     worker: null,
     attempt: 0,
     timer: null,
+    graceTimer: null, // pending 'disconnected' grace-timeout id (Task 1), null when none armed
     dialing: false, // true while this slot's CURRENT worker is mid-dial (created,
                     // not yet 'connected' or terminal) — it is then counted in
                     // inFlightDials and occupies one of the maxConcurrentDials
@@ -246,6 +259,7 @@ export function createFlowSupervisor({
     if (slot.worker !== worker) return;
 
     if (state === 'connected') {
+      if (slot.graceTimer != null) { clearTimer(slot.graceTimer); slot.graceTimer = null; }
       alive.set(worker, true);
       // This worker is no longer mid-dial — free its dial slot.
       releaseDialSlot(slot);
@@ -264,35 +278,59 @@ export function createFlowSupervisor({
       return;
     }
     if (state === 'disconnected') {
-      // Transient — the worker debounces an ICE-restart. Mark not-alive but do
-      // NOT re-dial; a true death escalates to 'failed' (terminal) below.
+      // Bounded grace: give the SAME PC a short window to self-heal a transient
+      // blip (browser ICE can recover 'disconnected'→'connected' with no action).
+      // If it doesn't recover in disconnectedGraceMs, escalate to the terminal path
+      // (fails the parked chunk's channel → unparks it → gap-redrive) rather than
+      // waiting for the browser's own slow 'failed' escalation (which can exceed the
+      // 25s inactivity watchdog — the F-B11 stall). The supervisor is the SOLE
+      // recovery owner (the worker no longer self-runs an ICE-restart — Task 2).
       alive.set(worker, false);
+      if (slot.graceTimer == null) {
+        slot.graceTimer = setTimer(() => {
+          slot.graceTimer = null;
+          if (!active || slot.worker !== worker) return; // replaced/stopped meanwhile
+          goTerminal(slotIndex, worker);
+        }, disconnectedGraceMs);
+      }
       if (liveCount() === 0) { fireStarved(); armOutageTimer(); }
       return;
     }
     const terminal = state === 'failed' || state === 'closed'
       || (typeof state === 'string' && state.startsWith('error:'));
     if (terminal) {
-      alive.set(worker, false);
-      // This worker is no longer mid-dial — free its dial slot before scheduling
-      // the next re-dial (and before draining), so the freed slot is available.
-      releaseDialSlot(slot);
-      // Task 4: release this DEAD flow's TURN allocation PROMPTLY — close the
-      // old worker now, before/when scheduling the re-dial, instead of leaving
-      // it to linger until whole-transfer teardown (a churny outage let dead
-      // workers accumulate to 755 concurrent coturn allocations). Only the
-      // worker that just went terminal is closed here — never slot.worker's
-      // eventual replacement, and never twice (closeWorker guards).
-      closeWorker(worker);
-      if (onFlowDown) onFlowDown(slotIndex);
-      if (liveCount() === 0) { fireStarved(); armOutageTimer(); }
-      scheduleRedial(slotIndex);
-      // Release a queued re-dial only if a flow is still live — a no-op during a
-      // total outage (probe mode keeps the rest queued until a probe connects).
-      drainQueue();
+      goTerminal(slotIndex, worker);
       return;
     }
     // Unknown/intermediate states (e.g. 'connecting') are ignored.
+  }
+
+  // Shared terminal escalation path — reached either directly from a
+  // 'failed'/'closed'/'error:*' state, or from a 'disconnected' slot whose
+  // disconnectedGraceMs grace timer expired without the slot reconnecting.
+  // Frees the dial slot, releases the dead flow's TURN allocation promptly,
+  // notifies the caller (which fails the parked chunk's channel, unparking
+  // it), tracks total-outage, and schedules the bounded-backoff re-dial.
+  function goTerminal(slotIndex, worker) {
+    const slot = slots[slotIndex];
+    if (slot.graceTimer != null) { clearTimer(slot.graceTimer); slot.graceTimer = null; }
+    alive.set(worker, false);
+    // This worker is no longer mid-dial — free its dial slot before scheduling
+    // the next re-dial (and before draining), so the freed slot is available.
+    releaseDialSlot(slot);
+    // Task 4: release this DEAD flow's TURN allocation PROMPTLY — close the
+    // old worker now, before/when scheduling the re-dial, instead of leaving
+    // it to linger until whole-transfer teardown (a churny outage let dead
+    // workers accumulate to 755 concurrent coturn allocations). Only the
+    // worker that just went terminal is closed here — never slot.worker's
+    // eventual replacement, and never twice (closeWorker guards).
+    closeWorker(worker);
+    if (onFlowDown) onFlowDown(slotIndex);
+    if (liveCount() === 0) { fireStarved(); armOutageTimer(); }
+    scheduleRedial(slotIndex);
+    // Release a queued re-dial only if a flow is still live — a no-op during a
+    // total outage (probe mode keeps the rest queued until a probe connects).
+    drainQueue();
   }
 
   function scheduleRedial(slotIndex) {
@@ -375,6 +413,7 @@ export function createFlowSupervisor({
       inFlightDials = 0;
       for (const slot of slots) {
         if (slot.timer != null) { clearTimer(slot.timer); slot.timer = null; }
+        if (slot.graceTimer != null) { clearTimer(slot.graceTimer); slot.graceTimer = null; }
         slot.dialing = false;
         // Guarded by closeWorker: a slot mid-backoff still points at the OLD
         // worker the terminal handler already closed — don't double-close it.
