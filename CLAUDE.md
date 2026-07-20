@@ -157,6 +157,29 @@ source of truth for done/progress/resume; (R9) honest status, deferrals written 
   (`getStats()` wired, no consumer reads it yet); F-B7 (the control-SESSION signaling reconnect in
   `peer.js` still runs its own ICE-restart — a separate code path from the transfer worker, untouched
   by this phase); flow-count auto-scaling (still a fixed default).
+- **A multi-flow RECEIVE is resilient to flow churn around the consent window (Phase 3b, 2026-07-20).**
+  Two guarantees, both unit-mutation-checked: (1) **group-ready is anchor-driven** — flow 0 is the
+  anchor that MUST fire (`transfer-group-rendezvous.js`); a missing flow 0 at the 8s join window arms a
+  bounded `anchorWaitMs` (20000ms) grace then fires anchorless so main aborts clean-loud
+  (`transfer group aborted (no flow 0)`), never hangs on a null bundle. (2) A flow that races the human
+  consent window — offered before the receive is `'accepted'` — is **BUFFERED, not dropped**
+  (`transfer-service.js` per-sessionId `receivePending`), then attached on accept and closed on
+  teardown; `main.js` `onFlowJoin` delegates to `offerRollingJoin`, logging `rolling-join` /
+  `rolling-join buffered` / `rolling-join dropped (receive ended)` distinctly. Real-wire gated by
+  `transfer-fault-e2e.mjs` `fb5` (receive flow 0 dropped mid-transfer) + `fb6` (a sender flow dropped
+  into an 8s-held consent so the supervisor's re-dial lands while the receive is PENDING → must show a
+  `rolling-join buffered` line) — both at flowCount=4, byte-identical N/N + `recv ev=completed`, now a
+  required CI gate alongside `fb1`/`fb2` (locally 3/3 each @4, 1/1 each @8). **Harness gotcha:** the
+  fault registry is PER-PROCESS — a `side:'receive'` fault dispatches on the RECEIVER's renderer, and
+  `fb6` must inject its SENDER-flow drop only AFTER the `consent prompt shown` log (an earlier drop lets
+  the ~500ms re-dial rejoin the still-forming rendezvous as a normal join, bypassing the buffer path).
+  **Deferred (R9):** **Phase 3b-2 (auth-inherit) is next** — a non-anchor/re-dialed flow still runs the
+  FULL handshake instead of inheriting the group's verified peer identity; pre-consent PC-count
+  reduction (all N flows connect before consent); a residual F-C4 leak window in `runMultiFlowReceive`
+  — between the jobId race and the `activeReceives` try/finally, a throw in `readPersistedRanges`/
+  `createReceiver` leaks the `receivePending` entry + any buffered handle (mirrors a PRE-EXISTING
+  unguarded `close()` in the same region; low-probability, ~6-line fix that also closes the older leak);
+  plus the still-open F-C5 and F-B7 above.
 - **Two GATED, outward-facing actions** require explicit user approval per homelab ops rules: the
   signaling deploy (public subdomain) and opening coturn firewall ports.
 - **Logging: connection modules run in the RENDERER**, not main — they log via the `log:renderer`

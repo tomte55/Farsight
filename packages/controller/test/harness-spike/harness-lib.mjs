@@ -191,7 +191,7 @@ export async function writeStandardPayload(srcRoot) {
 // Launches both apps, waits for host registration, arms auto-accept on the
 // receiver, waits for sender shell-ready. Returns everything a scenario needs:
 // { sendWs, recvWs, hostId, hostPw, recvDownloads, ports }.
-export async function bringUpPair({ signalingUrl, cleanups, tmp, extraEnv = {} }) {
+export async function bringUpPair({ signalingUrl, cleanups, tmp, extraEnv = {}, armConsent = true }) {
   const recvUserData = await tmp('spike-recv-ud-');
   const sendUserData = await tmp('spike-send-ud-');
   const recvDownloads = await tmp('spike-recv-dl-');
@@ -213,15 +213,24 @@ export async function bringUpPair({ signalingUrl, cleanups, tmp, extraEnv = {} }
   if (!hostId || hostId === '…' || !hostPw || hostPw === '…') throw new Error('failed to read host id/pw from receiver');
   log('receiver registered: hostId=', hostId);
 
-  await cdpEval(recvWs, `
-    window.__spikeAccepted = [];
-    window.farsightIpc.onTransferConsent((req) => {
-      window.__spikeAccepted.push(req.jobId);
-      window.farsightIpc.respondConsent({ jobId: req.jobId, accept: true });
-    });
-    true
-  `);
-  log('auto-accept armed on receiver');
+  // onTransferConsent APPENDS a listener (preload.cjs: ipcRenderer.on), it does
+  // NOT replace — so arming the instant auto-accept here AND re-arming a held
+  // variant later would DOUBLE-fire respondConsent. F-B6 needs the HELD variant,
+  // so it passes armConsent:false to skip this default and calls armConsentHold
+  // itself (exactly one consent listener from the harness either way).
+  if (armConsent) {
+    await cdpEval(recvWs, `
+      window.__spikeAccepted = [];
+      window.farsightIpc.onTransferConsent((req) => {
+        window.__spikeAccepted.push(req.jobId);
+        window.farsightIpc.respondConsent({ jobId: req.jobId, accept: true });
+      });
+      true
+    `);
+    log('auto-accept armed on receiver');
+  } else {
+    log('auto-accept NOT armed (armConsent:false — caller arms consent itself)');
+  }
 
   const sendWs = await cdpOpen(await cdpTargetFor(sendPort, 'renderer/index.html'));
   attachConsoleCapture(sendWs, 'send');
@@ -229,6 +238,24 @@ export async function bringUpPair({ signalingUrl, cleanups, tmp, extraEnv = {} }
   log('sender renderer ready');
 
   return { sendWs, recvWs, hostId, hostPw, recvDownloads, sendChild, recvChild };
+}
+
+// ---------- F-B6 harness: HELD consent (delayed auto-accept) ----------
+// Replaces the receiver's instant auto-accept with one that HOLDS the consent
+// prompt open for holdMs before accepting — the window during which a re-dialed
+// flow must be BUFFERED (not dropped). Records jobIds like the default. Call
+// AFTER bringUpPair({ …, armConsent:false }) so exactly one harness consent
+// listener is active (onTransferConsent APPENDS — see bringUpPair).
+export async function armConsentHold(recvWs, holdMs) {
+  await cdpEval(recvWs, `
+    window.__spikeAccepted = [];
+    window.farsightIpc.onTransferConsent((req) => {
+      window.__spikeAccepted.push(req.jobId);
+      setTimeout(() => window.farsightIpc.respondConsent({ jobId: req.jobId, accept: true }), ${Number(holdMs)});
+    });
+    true
+  `);
+  log(`held consent armed on receiver (holdMs=${Number(holdMs)})`);
 }
 
 // ---------- poll the receiver's real disk until all expected files land ----------

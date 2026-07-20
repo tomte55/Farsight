@@ -101,3 +101,23 @@ jobs:
         env:
           SPIKE_SCENARIO: 'fb2'
           SPIKE_FLOWS: '4'
+      # Phase 3b receive-consent-churn gates (Task 4, F-B5/F-B6). Both assert the
+      # SAME contract as fb1/fb2 — the fault surfaced loud + the receiver reaches
+      # a terminal 'completed' + byte-identical N/N delivery (verifyDelivery
+      # sha256). fb6 ADDITIONALLY asserts a `rolling-join buffered` log line, so a
+      # flow racing the held consent window must be BUFFERED (Task 2), never
+      # dropped — the gate goes red if that regresses. Confirmed locally: fb5@4
+      # 3/3, fb6@4 3/3 (plus fb5@8 1/1, fb6@8 1/1), each run completing in ~15-20s,
+      # so they're required gates like fb1/fb2 (not a maintainer-run fallback).
+      - name: Real-wire fault-injection harness (late receive flow 0, F-B5)
+        run: node packages/controller/test/harness-spike/transfer-fault-e2e.mjs
+        timeout-minutes: 5
+        env:
+          SPIKE_SCENARIO: 'fb5'
+          SPIKE_FLOWS: '4'
+      - name: Real-wire fault-injection harness (flow races held consent, F-B6)
+        run: node packages/controller/test/harness-spike/transfer-fault-e2e.mjs
+        timeout-minutes: 5
+        env:
+          SPIKE_SCENARIO: 'fb6'
+          SPIKE_FLOWS: '4'

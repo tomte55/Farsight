@@ -117,9 +117,41 @@ failures that hang or vanish instead of surfacing. These are the rules we hold e
      reconnect — `peer.js` still runs its own ICE-restart for the remote-control session, a *separate*
      code path from the transfer worker; not touched by this phase, revisit later); flow-count
      auto-scaling (still a fixed default, not adaptive to link quality).
-   - **Phase 3b — next up.** F-B5/F-B6: receive-side amplification under heavy re-dial churn, and a
-     rolling-join model so a resumed flow doesn't have to re-verify from scratch. Awaiting the
-     maintainer's go per the Phase 3a done gate above.
+   - **Phase 3b — receive resilient to consent-window flow churn. DONE (2026-07-20).** Closed F-B5/F-B6:
+     a multi-flow RECEIVE is now resilient to flow churn AROUND the human consent window. Two changes,
+     both mutation-checked by unit tests (the deterministic proofs): (1) **group-ready is
+     anchor-driven** (`transfer-group-rendezvous.js`) — flow 0 is the anchor that MUST fire; a missing
+     flow 0 at the 8s `joinWindowMs` arms a bounded `anchorWaitMs` (20000ms) grace, then fires anchorless
+     so main aborts clean-loud (`transfer group aborted (no flow 0)`) instead of hanging on a null
+     bundle. (2) A per-sessionId **pre-consent BUFFER** (`transfer-service.js`) — a flow offered before
+     the receive is `'accepted'` (during a held consent prompt) is BUFFERED, not dropped, drained+attached
+     on accept, and closed on teardown; `main.js` `onFlowJoin` delegates to `offerRollingJoin` and logs
+     `rolling-join` / `rolling-join buffered` / `rolling-join dropped (receive ended)` distinctly.
+     **Evidence — real-wire, `transfer-fault-e2e.mjs`:** `fb5` (F-B5, receive flow 0 dropped mid-transfer)
+     at flowCount=4: **3/3** byte-identical N/N, fault surfaced (`conn:error:signaling_dropped` in the
+     RECEIVER log), `recv ev=completed`; `fb6` (F-B6, a sender flow dropped INTO an 8s-held consent window,
+     so the supervisor's re-dial arrives while the receive is PENDING) at flowCount=4: **3/3**
+     byte-identical N/N, each run showing a `rolling-join buffered flow=1` line (the raced flow was HELD,
+     not dropped) then `recv ev=completed`. Both also **1/1** at flowCount=8. `fb5`/`fb6` at flowCount=4
+     are now a **required CI gate** (`.github/workflows/ci.yml`, `real-wire` job) alongside `fb1`/`fb2`;
+     each completes in ~15-20s. Full `npx vitest run` green (205 files / 1420 tests); baseline
+     `two-process-harness.mjs` re-confirmed byte-identical at N=1 and N=4, and `fb1`/`fb2` @4 still green —
+     the anchor fire-condition did not break normal all-N group firing.
+     **Diagnosis note (harness):** the fault registry is PER-PROCESS, so a `side:'receive'` fault must be
+     dispatched on the RECEIVER's renderer (receive workers only register there); and the re-dialed flow
+     that must be buffered is produced by the SENDER's supervisor re-dial (a `dropFlowSocket` surfaces a
+     terminal `error:` → `scheduleRedial`), so `fb6` drops a SENDER flow but must do so only AFTER the
+     `consent prompt shown` log — injecting earlier let the ~500ms re-dial rejoin the still-forming
+     rendezvous as a normal 4/4 join (no buffer path exercised).
+     **Honest deferrals (R9), carried to Phase 3b-2+:** **Phase 3b-2 (auth-inherit) is next** — a
+     non-anchor/re-dialed flow still runs the FULL handshake (password/keypair auth) rather than
+     inheriting the group's already-verified peer identity; pre-consent PC-count reduction (all N flows
+     are dialed + connected before consent, holding N peer connections open during the human decision);
+     F-C5 (`getStats()` wired, no consumer); F-B7 (the control-SESSION signaling reconnect in `peer.js`
+     still runs its own ICE-restart — a separate path from the transfer worker); a residual F-C4 leak
+     window in `runMultiFlowReceive` (a throw in `readPersistedRanges`/`createReceiver` between the jobId
+     race and the try/finally leaks the `receivePending` entry + any buffered handle — mirrors a
+     pre-existing unguarded `close()` there, low-probability, ~6-line fix that also closes the older leak).
 4. **Chunk manifest** — per-chunk hashing, cheap resume, within-transfer dedup, on a solid base.
 
 Evidence + rationale: `docs/private/superpowers/audits/2026-07-19-transfer-reliability-deep-dive.md`.

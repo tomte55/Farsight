@@ -160,4 +160,79 @@ describe('createGroupRendezvous', () => {
     expect(ready.length).toBe(1);
     expect(opened).toEqual([0, 1, 2]); // late offer's flow was NOT opened
   });
+
+  it('does NOT fire on the join window when flow 0 is absent — waits for the anchor (F-B5)', () => {
+    const clock = fakeClock();
+    const ready = [];
+    const gr = createGroupRendezvous({
+      openFlow: (r) => ({ flowIndex: r.flowIndex, close: () => {} }),
+      onGroupReady: (g) => ready.push(g),
+      joinWindowMs: 5000, anchorWaitMs: 20000, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    });
+    gr.offer({ sessionId: 's1', groupId: GROUP, flowIndex: 1, flowCount: 3, linked: true }); // only non-anchor flows
+    gr.offer({ sessionId: 's2', groupId: GROUP, flowIndex: 2, flowCount: 3, linked: true });
+    clock.fireAll(); // join window elapses — but no flow 0
+    expect(ready.length).toBe(0); // did NOT fire (would have aborted the whole receive before)
+  });
+
+  it('a flow-0 arriving during the anchor-wait fires the group with the anchor present (F-B5)', () => {
+    const clock = fakeClock();
+    const ready = [];
+    const gr = createGroupRendezvous({
+      openFlow: (r) => ({ flowIndex: r.flowIndex, close: () => {} }),
+      onGroupReady: (g) => ready.push(g),
+      joinWindowMs: 5000, anchorWaitMs: 20000, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    });
+    gr.offer({ sessionId: 's1', groupId: GROUP, flowIndex: 1, flowCount: 3, linked: true });
+    clock.fireAll();                 // window elapses, no anchor → awaiting-anchor
+    expect(ready.length).toBe(0);
+    gr.offer({ sessionId: 's0', groupId: GROUP, flowIndex: 0, flowCount: 3, linked: true }); // anchor arrives late
+    expect(ready.length).toBe(1);
+    expect(ready[0].flows.some((f) => f.flowIndex === 0)).toBe(true); // anchor present
+  });
+
+  it('the anchor-wait elapsing with STILL no flow 0 fires an anchorless group (main then aborts) (F-B5)', () => {
+    const clock = fakeClock();
+    const ready = [];
+    const gr = createGroupRendezvous({
+      openFlow: (r) => ({ flowIndex: r.flowIndex, close: () => {} }),
+      onGroupReady: (g) => ready.push(g),
+      joinWindowMs: 5000, anchorWaitMs: 20000, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    });
+    gr.offer({ sessionId: 's1', groupId: GROUP, flowIndex: 1, flowCount: 3, linked: true });
+    clock.fireAll(); // join window → awaiting-anchor (arms anchorWaitMs)
+    expect(ready.length).toBe(0);
+    clock.fireAll(); // anchorWaitMs elapses → fire anchorless (flows has no flowIndex 0)
+    expect(ready.length).toBe(1);
+    expect(ready[0].flows.some((f) => f.flowIndex === 0)).toBe(false); // no anchor → assembleReceiveGroup returns null → main aborts
+  });
+
+  it('a second non-anchor flow arriving during the anchor-wait does NOT fire (still no flow 0) (F-B5)', () => {
+    const clock = fakeClock();
+    const ready = [];
+    const gr = createGroupRendezvous({
+      openFlow: (r) => ({ flowIndex: r.flowIndex, close: () => {} }),
+      onGroupReady: (g) => ready.push(g),
+      joinWindowMs: 5000, anchorWaitMs: 20000, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    });
+    gr.offer({ sessionId: 's1', groupId: GROUP, flowIndex: 1, flowCount: 3, linked: true });
+    clock.fireAll(); // window elapses, no anchor → awaiting-anchor
+    expect(ready.length).toBe(0);
+    gr.offer({ sessionId: 's2', groupId: GROUP, flowIndex: 2, flowCount: 3, linked: true }); // still no flow 0
+    expect(ready.length).toBe(0); // must NOT prematurely fire an anchorless group on a non-anchor arrival
+  });
+
+  it('a partial group that HAS flow 0 still fires on the join window (anchor present)', () => {
+    const clock = fakeClock();
+    const ready = [];
+    const gr = createGroupRendezvous({
+      openFlow: (r) => ({ flowIndex: r.flowIndex, close: () => {} }),
+      onGroupReady: (g) => ready.push(g),
+      joinWindowMs: 5000, anchorWaitMs: 20000, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    });
+    gr.offer({ sessionId: 's0', groupId: GROUP, flowIndex: 0, flowCount: 3, linked: true }); // anchor present, partial
+    clock.fireAll();
+    expect(ready.length).toBe(1);
+    expect(ready[0].flows.length).toBe(1);
+  });
 });
