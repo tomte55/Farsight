@@ -83,6 +83,13 @@ export function createFlowSupervisor({
   maxConcurrentDials = 4,
   outageGiveupMs = 180000,
   disconnectedGraceMs = 4000,
+  // Phase 3a Task 4 (F-B8): a rate_limited terminal means the signaling
+  // server's per-IP connect budget was hit — re-dialing on the normal short
+  // backoff just hammers the same limiter again (worse with high flowCount).
+  // A rate_limited slot instead re-dials once on this much wider cooldown;
+  // the NEXT re-dial (if that one also fails, for a different reason) is back
+  // on normal backoff. Per-slot only — see slot.rateLimited in scheduleRedial.
+  rateLimitedCooldownMs = 30000,
   isRunning,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
@@ -95,6 +102,10 @@ export function createFlowSupervisor({
     attempt: 0,
     timer: null,
     graceTimer: null, // pending 'disconnected' grace-timeout id (Task 1), null when none armed
+    rateLimited: false, // Task 4 (F-B8): true from the terminal branch that saw
+                        // 'error:rate_limited' until the NEXT scheduleRedial
+                        // consumes it — makes that one re-dial use
+                        // rateLimitedCooldownMs instead of backoffFor.
     dialing: false, // true while this slot's CURRENT worker is mid-dial (created,
                     // not yet 'connected' or terminal) — it is then counted in
                     // inFlightDials and occupies one of the maxConcurrentDials
@@ -309,6 +320,10 @@ export function createFlowSupervisor({
     const terminal = state === 'failed' || state === 'closed'
       || (typeof state === 'string' && state.startsWith('error:'));
     if (terminal) {
+      // Task 4 (F-B8): stash whether THIS terminal was a rate-limit hit before
+      // handing off to goTerminal (which does not receive `state`) — consumed
+      // by scheduleRedial to pick the wider cooldown for this one re-dial.
+      slot.rateLimited = (state === 'error:rate_limited');
       goTerminal(slotIndex, worker);
       return;
     }
@@ -370,10 +385,19 @@ export function createFlowSupervisor({
       // Total outage: re-dial on the tail backoff. Do NOT advance `attempt` (it's
       // already at/above the array length, so backoffFor stays at the longest
       // value) — this keeps the probe cycling until connect or outage giveup.
-      armSlotTimer(slot, () => dial(slotIndex), backoffFor(slot.attempt));
+      // A rate-limited signal means back off regardless — apply the wider
+      // cooldown here too (Task 4 / F-B8), consuming the one-shot flag.
+      const outageDelay = slot.rateLimited ? rateLimitedCooldownMs : backoffFor(slot.attempt);
+      slot.rateLimited = false;
+      armSlotTimer(slot, () => dial(slotIndex), outageDelay);
       return;
     }
-    const delay = backoffFor(slot.attempt);
+    // Task 4 (F-B8): a rate-limited terminal re-dials once on the wider
+    // cooldown instead of the normal backoff — one cooldown per hit; the flag
+    // is consumed here, so the NEXT re-dial (if it fails again) is back on
+    // normal backoff.
+    const delay = slot.rateLimited ? rateLimitedCooldownMs : backoffFor(slot.attempt);
+    slot.rateLimited = false;
     slot.attempt += 1;
     armSlotTimer(slot, () => dial(slotIndex), delay);
   }

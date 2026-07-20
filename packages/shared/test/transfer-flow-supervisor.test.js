@@ -758,6 +758,30 @@ describe('transfer-flow-supervisor', () => {
     expect(w0b.close).not.toHaveBeenCalled(); // the fresh worker is untouched
   });
 
+  // Phase 3a Task 4 (F-B8): a rate_limited terminal must not hammer the
+  // signaling server's per-IP connect budget on the normal short backoff — it
+  // re-dials on a much WIDER, per-slot cooldown instead. Per-slot only: other
+  // slots are unaffected (not asserted here directly — see the supervisor's
+  // per-slot `slot.rateLimited` flag — but this pins the delay used for the
+  // rate-limited slot itself).
+  it('error:rate_limited terminal re-dials on the wider cooldown, not backoff', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], rateLimitedCooldownMs: 30000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    createWorker.latestFor(0).emit('error:rate_limited');
+    clock.advance(500);                       // normal backoff would re-dial here
+    expect(createWorker.all.length).toBe(1);  // it did NOT
+    clock.advance(29500);                     // t=30000, the cooldown
+    expect(createWorker.all.length).toBe(2);  // re-dialed on the cooldown
+  });
+
+  it('a non-rate-limited terminal still uses the normal backoff', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, backoff: [500], rateLimitedCooldownMs: 30000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    createWorker.latestFor(0).emit('error:ice');
+    clock.advance(500);
+    expect(createWorker.all.length).toBe(2);  // normal backoff[0]
+  });
+
   it('stop(): cancels pending re-dial timers and closes live workers; no re-dials afterward', () => {
     const { clock, createWorker, args } = baseArgs({ flowCount: 2, backoff: [500] });
     const sup = createFlowSupervisor(args);
