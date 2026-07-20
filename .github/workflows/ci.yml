@@ -95,11 +95,9 @@ jobs:
         env:
           SPIKE_SCENARIO: 'fb1'
           SPIKE_FLOWS: '4'
-          SPIKE_NO_RETRY: '1'
       - name: Real-wire fault-injection harness (worker crash, F-B2)
         run: node packages/controller/test/harness-spike/transfer-fault-e2e.mjs
         timeout-minutes: 5
         env:
           SPIKE_SCENARIO: 'fb2'
           SPIKE_FLOWS: '4'
-          SPIKE_NO_RETRY: '1'

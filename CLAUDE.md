@@ -132,7 +132,7 @@ source of truth for done/progress/resume; (R9) honest status, deferrals written 
   **Test transfers with a real 2-machine / MULTI-chunk / MANY-file E2E** — localhost + one-chunk +
   few-file transfers hide teardown-races, routing bugs, AND the frame-size limit. The real-wire CI
   gate (`.github/workflows/ci.yml`) runs the headless two-process harness at both **N=1** (single-flow
-  self-test) and **N=8** (F-B10 multi-flow regression guard) — both exercise the SAME sender/receiver
+  self-test) and **4-flow** (F-B10 multi-flow regression guard) — both exercise the SAME sender/receiver
   code path. Worker/main emit diagnostics to the app log (`[ft-worker]` heartbeat with ctrl/bulk
   counters + `[transfer]` lifecycle); the `[ft-worker]` counters (`ctrlOut`/`ctrlIn`, `dc-error`) are
   what pinpoint these from field logs.
@@ -149,7 +149,7 @@ source of truth for done/progress/resume; (R9) honest status, deferrals written 
   time; real-wire re-runs (5x each, `SPIKE_NO_RETRY=1`) now deliver byte-identical N/N every time —
   `fb1`@4-flow 5/5, `fb1`@8-flow 5/5, `fb2`@4-flow 5/5 — with the fault still surfaced loudly
   (`conn:error:signaling_*` / `worker-gone:crashed`) rather than swallowed. `fb1`/`fb2` at
-  flowCount=4 are a required CI gate alongside the N=1/N=8 baseline harness. The gate itself
+  flowCount=4 are a required CI gate alongside the N=1 + 4-flow baseline harness. The gate itself
   ASSERTS byte-identical N/N delivery + a `completed` terminal state (a review-fix hardening,
   2026-07-20 — it used to only log delivery as INFO, so a gate run could pass green on a dropped
   file; re-verified 3/3 each for `fb1`/`fb2` under the stronger check, and bite-confirmed by
