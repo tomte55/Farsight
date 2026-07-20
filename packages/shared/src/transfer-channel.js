@@ -1,7 +1,7 @@
 // packages/shared/src/transfer-channel.js
-// SP3 (design §3, §8.4): adapts injected IPC primitives into the orchestrator's
+// SP3 (design §3, §8.4): adapts injected IPC primitives into the sender/receiver
 // channel contract `{ sendCtrl, sendBulk, onCtrl, onBulk }`. MAIN-ONLY in
-// production (the transfer-orchestrator lives in main), but kept pure and
+// production (transfer-sender.js/transfer-receiver.js live in main), but kept pure and
 // runtime-agnostic like the rest of shared/ — no Electron import here. `send`
 // and `on` are injected: production wires them to ipcMain/webContents.send for
 // a specific worker window (see controller/src/transfer-worker.js); tests

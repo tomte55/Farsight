@@ -7,7 +7,7 @@
 import { bytesDone, filesDone, formatBytes, formatRate, formatDuration, etaSeconds } from './transfer-rate.js';
 
 // Human-readable text for a file-failed reason code. Only 'io_error' is emitted
-// today (transfer-orchestrator.js's terminal per-file-retry-exhausted path) but
+// today (transfer-receiver.js's terminal per-file-retry-exhausted path) but
 // an unknown/future code still shows something readable — the raw code — rather
 // than nothing.
 const REASON_LABELS = {

@@ -52,9 +52,28 @@ failures that hang or vanish instead of surfacing. These are the rules we hold e
    `docs/private/superpowers/specs/2026-07-19-transfer-phase1-honest-observable-design.md`
    (plan: `docs/private/superpowers/plans/2026-07-19-transfer-phase1a-honest-state-ci.md`).
 2. **One path** — collapse to the coverage model; delete the single-flow stack; unify
-   completion/resume/hash/writer.
+   completion/resume/hash/writer. **DONE (2026-07-20).** Evidence: single-flow `createSender`/
+   `createReceiver` and the dead `transfer-engine.js` deleted, grep-proven zero live callers; ONE
+   sender + ONE receiver, split into `packages/shared/src/transfer-sender.js` +
+   `transfer-receiver.js` (+ shared helpers in `transfer-orchestrator-shared.js`); F-D3 (corrupt
+   jobs-store record surfaces as a reapable error, not a silent vanish) and the legacy-resume
+   clean-break both fixed with mutation-checked tests; F-A4 (`completed_with_errors` wiring) and
+   F-C6 (`recoverStaleJobs()` recv sweep) regressions confirmed still green through the collapse;
+   real-wire headless two-process harness byte-identical GREEN at both **N=1** (single-flow
+   self-test) and **N=8** (F-B10 multi-flow regression guard), both wired as required CI gates in
+   `.github/workflows/ci.yml`; full `npx vitest run` suite green (205 files / 1405 tests).
+   **Honest deferrals (R9), carried to Phase 3/4:** the default flow count stays N=8 — the
+   supervisor is un-hardened above that until Phase 3 does the reliability work; the F-B11 resupply
+   gap is still present in the default path, but it's loud (visible stall/error) and resumable, not
+   silent; the F-D4 auth-gate buffering trim is deferred; `skipExisting`'s disk-skip optimization is
+   now dead code (candidate cleanup for Phase 4, not deleted yet); the F-A2 fix (legacy single-flow
+   recv records always restart from zero, never cross-model resume) is an *emergent* safety
+   property of the current code shape — a future ".part size == final size → skip resend"
+   optimization would reintroduce the exact hazard F-A2 fixed, so it must be re-checked against the
+   Task 8 regression test before landing.
 3. **Reliable supervisor at 8–16 flows** — speed is a hard requirement (the maintainer's link to
-   his dad is slow); make high flow counts genuinely trustworthy.
+   his dad is slow); make high flow counts genuinely trustworthy. **Next up** — awaiting the
+   maintainer's go per the Phase 2 done gate.
 4. **Chunk manifest** — per-chunk hashing, cheap resume, within-transfer dedup, on a solid base.
 
 Evidence + rationale: `docs/private/superpowers/audits/2026-07-19-transfer-reliability-deep-dive.md`.

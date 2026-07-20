@@ -1,8 +1,9 @@
 // packages/shared/src/transfer-service.js
-// SP3 MAIN-ONLY pipeline that assembles the orchestrator + jobs-store + queue
-// into an app-facing service. Electron-free: `openChannel` is injected so this
-// module is unit-testable via loopback (see transfer-orchestrator.test.js's
-// loopback() pattern) with no real WebRTC/worker involved.
+// SP3 MAIN-ONLY pipeline that assembles the sender/receiver (transfer-sender.js
+// /transfer-receiver.js) + jobs-store + queue into an app-facing service.
+// Electron-free: `openChannel` is injected so this module is unit-testable via
+// loopback (see transfer-service.test.js's loopback() pattern) with no real
+// WebRTC/worker involved.
 //
 // Concurrency model: SENDS are serialized through one `createQueue()` — only
 // the head job's channel is opened/run at a time (spec-driven UX: one active
@@ -104,7 +105,7 @@ export function resolveFlowCount(preferred, fallback) {
 }
 
 // createSender's readerFor(fileId) is called SYNCHRONOUSLY (see
-// initialPass/gapPass in transfer-orchestrator.js -- there is no `await
+// initialPass/gapPass in transfer-sender.js -- there is no `await
 // readerFor(...)`), but transfer-io.js's openSourceReader is async. Return a
 // plain {readAt,close} object immediately and open the real fd lazily on first
 // readAt (memoized) -- the same lazy-open pattern Plan 2's own loopback test
@@ -147,10 +148,10 @@ function ivalsCoverFile(ivals, size) {
 }
 
 // Persist the multi-flow receive record with each file's current byte-ranges
-// attached (perFile[i].ivals), alongside the same fields the single-flow receive
-// record carried (dir/tier/peer/destRoot/manifest/jobState -- see the removed
-// single-flow receiver driver's own saveRecord, formerly in
-// transfer-orchestrator.js). Called periodically
+// attached (perFile[i].ivals), alongside the same fields the (now-deleted)
+// single-flow receive record used to carry (dir/tier/peer/destRoot/manifest/
+// jobState -- see the removed single-flow receiver driver's own saveRecord,
+// formerly in the pre-collapse transfer-orchestrator.js). Called periodically
 // (createReceiver's persistRanges seam, every reportIntervalMs) and once
 // more with the terminal state when the receive settles. store.save() is itself
 // serialized per jobId (jobs-store.js), so concurrent calls here are safe
@@ -471,8 +472,8 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // and poke the resume watcher to try again as soon as the peer is online.
       const recoverable = (tier === 'fleet' || tier === 'contact') && !isTerminalReason(reason);
       // A receiver-initiated cancel surfaces here as reason === 'canceled' (the
-      // orchestrator's sole message for an inbound cancel frame — see
-      // transfer-orchestrator.js). Persist the accurate 'canceled' state rather
+      // sole message transfer-receiver.js emits for an inbound cancel frame).
+      // Persist the accurate 'canceled' state rather
       // than a generic 'error'; it's still excluded from RESUMABLE_STATES
       // (transfer-queue.js) and still terminal per isTerminalReason's `canceled`
       // match above, so `recoverable` is unaffected and this can never be
@@ -739,7 +740,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // is now the ONLY shape it ever resolves, even at flowCount:1). createReceiver
   // takes jobId as a CONSTRUCTOR param and filters EVERY
   // ctrl frame -- including the OFFER itself -- by exact jobId match (see
-  // transfer-orchestrator.js), but jobId is sender-chosen and only appears ON
+  // transfer-receiver.js), but jobId is sender-chosen and only appears ON
   // the OFFER frame; nothing in the rendezvous (TRANSFER_REQUEST only carries
   // sessionId/groupId/flowIndex/flowCount/linked -- see transfer-group-
   // rendezvous.js) tells us jobId ahead of time. So: tap the raw ctrl first to

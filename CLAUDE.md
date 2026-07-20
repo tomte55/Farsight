@@ -109,24 +109,33 @@ source of truth for done/progress/resume; (R9) honest status, deferrals written 
   specifically to pin a guard. Change the guard, watch the test fail, change it back. A green suite is
   not evidence a guard is pinned; count-only assertions (`toHaveBeenCalledTimes`) are the classic tell.
 - **SP3 file-transfer worker** (`packages/*/src/transfer-worker*`, `shared/transfer-*`): a hidden
-  `BrowserWindow{show:false}` owns a dedicated RTCPeerConnection + signaling; main runs the
-  orchestrator and forwards frames over IPC. Gotchas that all bit v1.9.0 (DOA) and were fixed by
-  v1.9.7 — do not regress: (1) the worker's inline importmap needs a **sha256 CSP hash** (its CSP is
-  stricter — `script-src 'self'`, no `'unsafe-inline'`), guarded by `transfer-worker-importmap.test.js`;
-  (2) `webContents.send()` to the worker is **queued until `did-finish-load`** (Electron drops sends to
-  a not-yet-loaded renderer); (3) the worker uses a **dedicated one-shot signaling client**, NOT the
-  app's auto-registering main one; (4) hidden workers set `backgroundThrottling:false`; (5) completion
-  is a **two-sided delivery ACK** (receiver `complete{ok}` after every file is hash-verified; sender
-  waits before closing); (6) **byte-routing is by manifest-order cursor**, never by `FILE_BEGIN` timing
-  (ctrl/bulk are separate channels); (7) **no single `ft-ctrl` frame may exceed the ~256KB WebRTC
-  data-channel `send()` limit** — a frame over it throws and KILLS the channel before delivery (v1.11.2:
-  a 2974-file folder's one-shot OFFER was 346KB → `dc-error` + stuck at 0). Any per-file-scaling frame
+  `BrowserWindow{show:false}` owns a dedicated RTCPeerConnection (N of them, at N=1 by default in a
+  degenerate one-flow group) + signaling; main runs `transfer-sender.js`/`transfer-receiver.js` (the
+  ONE coverage-model sender/receiver — Phase 2, 2026-07-20 — the old single-flow driver + dead
+  `transfer-engine.js` are deleted) and forwards frames over IPC. Gotchas that all bit v1.9.0 (DOA)
+  and were fixed by v1.9.7 — do not regress: (1) the worker's inline importmap needs a **sha256 CSP
+  hash** (its CSP is stricter — `script-src 'self'`, no `'unsafe-inline'`), guarded by
+  `transfer-worker-importmap.test.js`; (2) `webContents.send()` to the worker is **queued until
+  `did-finish-load`** (Electron drops sends to a not-yet-loaded renderer); (3) the worker uses a
+  **dedicated one-shot signaling client**, NOT the app's auto-registering main one; (4) hidden
+  workers set `backgroundThrottling:false`; (5) completion is a **two-sided delivery ACK** (receiver
+  `complete{ok}` after every file is hash-verified; sender waits before closing); (6) **bulk
+  byte-routing is POSITIONAL, by self-addressed chunk offset** — every bulk frame carries its own
+  `[fileId][offset][length][payload]` (see `transfer-chunk.js` / `transfer-receive-router.js`), so a
+  re-delivered chunk is a harmless overwrite at the same offset; this replaced an earlier, since-
+  deleted single-flow "manifest-order cursor" scheme, never `FILE_BEGIN` timing (ctrl/bulk are
+  separate channels); (7) **no single `ft-ctrl` frame may exceed the ~256KB WebRTC data-channel
+  `send()` limit** — a frame over it throws and KILLS the channel before delivery (v1.11.2: a
+  2974-file folder's one-shot OFFER was 346KB → `dc-error` + stuck at 0). Any per-file-scaling frame
   must chunk or filter: the OFFER chunks (`offer_begin`→`offer_entries*`→`offer_end`, ≤48KB batches), the
   accept sends only non-zero resume offsets, and **Phase-5 remote-FS directory listings must paginate**.
   **Test transfers with a real 2-machine / MULTI-chunk / MANY-file E2E** — localhost + one-chunk +
-  few-file transfers hide teardown-races, routing bugs, AND the frame-size limit. Worker/main emit
-  diagnostics to the app log (`[ft-worker]` heartbeat with ctrl/bulk counters + `[transfer]` lifecycle);
-  the `[ft-worker]` counters (`ctrlOut`/`ctrlIn`, `dc-error`) are what pinpoint these from field logs.
+  few-file transfers hide teardown-races, routing bugs, AND the frame-size limit. The real-wire CI
+  gate (`.github/workflows/ci.yml`) runs the headless two-process harness at both **N=1** (single-flow
+  self-test) and **N=8** (F-B10 multi-flow regression guard) — both exercise the SAME sender/receiver
+  code path. Worker/main emit diagnostics to the app log (`[ft-worker]` heartbeat with ctrl/bulk
+  counters + `[transfer]` lifecycle); the `[ft-worker]` counters (`ctrlOut`/`ctrlIn`, `dc-error`) are
+  what pinpoint these from field logs.
 - **Two GATED, outward-facing actions** require explicit user approval per homelab ops rules: the
   signaling deploy (public subdomain) and opening coturn firewall ports.
 - **Logging: connection modules run in the RENDERER**, not main — they log via the `log:renderer`

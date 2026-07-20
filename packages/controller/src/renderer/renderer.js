@@ -2030,7 +2030,7 @@ async function refreshTransfersList() {
 }
 
 // Live progress push from main (transfer-service's onEvent, forwarded per
-// transfer-orchestrator's event shape plus jobId/direction). Completion comes
+// transfer-sender.js/transfer-receiver.js's event shape plus jobId/direction). Completion comes
 // from the real 'completed' event — the receiver's delivery ACK, sent only once
 // every file is hash-verified on disk — NEVER from progress.fraction reaching 1,
 // which means "all bytes pushed into the local send buffer", not "received"

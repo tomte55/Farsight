@@ -190,7 +190,7 @@ function freeBytesAt(startDir) {
 }
 
 // Consent round-trip for an INCOMING transfer (v2: the unified app can now
-// receive, not just send). transfer-orchestrator's createReceiver calls
+// receive, not just send). transfer-receiver.js's createReceiver calls
 // consent({jobId, manifest}) with the REAL sender-assigned jobId — use it as the
 // correlation id so the prompt, the IPC round-trip, and the persisted record all
 // agree. Own-fleet offers auto-accept inside transfer-service (peerAuth tier),
