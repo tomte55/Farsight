@@ -72,8 +72,36 @@ failures that hang or vanish instead of surfacing. These are the rules we hold e
    optimization would reintroduce the exact hazard F-A2 fixed, so it must be re-checked against the
    Task 8 regression test before landing.
 3. **Reliable supervisor at 8–16 flows** — speed is a hard requirement (the maintainer's link to
-   his dad is slow); make high flow counts genuinely trustworthy. **Next up** — awaiting the
-   maintainer's go per the Phase 2 done gate.
+   his dad is slow); make high flow counts genuinely trustworthy.
+   - **Phase 3a — flow-death recovery. DONE (2026-07-20).** Closed F-B11: before this phase, the
+     fault-injection harness's flow-death scenarios (a live flow's signaling socket dropped, or its
+     worker renderer crashed mid-transfer) delivered only 5/6 files ~⅔ of the time and stalled to the
+     25s watchdogs the rest. Fix: **one recovery owner** — the supervisor now bounds a flow's
+     `'disconnected'` state with a mutation-checked `disconnectedGraceMs` (4000ms) grace timer before
+     escalating to a re-dial, and the worker's own autonomous ICE-restart was **deleted** (grep-proven
+     zero remaining callers) so there is exactly one place a dead flow gets recovered, not two racing
+     each other; the send-pool got a mutation-checked per-chunk `chunkStallMs` (10000ms) backstop so a
+     stranded in-flight chunk promise can never block completion; `rate_limited` slots re-dial on a
+     wider, separate `rateLimitedCooldownMs` (30000ms), not the normal per-attempt backoff.
+     **Evidence — real-wire, `transfer-fault-e2e.mjs`, 5 repeat runs each, `SPIKE_NO_RETRY=1`:**
+     `fb1` (F-B1, dropped flow signaling socket) at flowCount=4: **5/5** byte-identical N/N;
+     `fb1` at flowCount=8: **5/5** byte-identical N/N; `fb2` (F-B2, crashed worker renderer) at
+     flowCount=4: **5/5** byte-identical N/N. All 15/15 runs surfaced the fault loudly (sender log
+     `conn:error:signaling_*` for fb1, `worker-gone:crashed` for fb2) AND reached `recv ev=completed`
+     — never `interrupted`/`stalled`, never a silent hang. `fb1`/flowCount=4 and `fb2`/flowCount=4 are
+     now a **required CI gate** (`.github/workflows/ci.yml`, `real-wire` job); `fb1`/flowCount=8 stays
+     a maintainer pre-merge check (redundant scale confirmation, not worth the extra shared-runner
+     minutes on every push). Full `npx vitest run` green (205 files / 1416 tests); baseline
+     `two-process-harness.mjs` (no fault injection) re-confirmed byte-identical at N=1 and N=8 — happy
+     path not regressed.
+     **Honest deferrals (R9), carried to Phase 3b+:** F-C5 (`getStats()` wired but no consumer reads
+     it — deferred until something needs the numbers); F-B7 (the control-SESSION signaling
+     reconnect — `peer.js` still runs its own ICE-restart for the remote-control session, a *separate*
+     code path from the transfer worker; not touched by this phase, revisit later); flow-count
+     auto-scaling (still a fixed default, not adaptive to link quality).
+   - **Phase 3b — next up.** F-B5/F-B6: receive-side amplification under heavy re-dial churn, and a
+     rolling-join model so a resumed flow doesn't have to re-verify from scratch. Awaiting the
+     maintainer's go per the Phase 3a done gate above.
 4. **Chunk manifest** — per-chunk hashing, cheap resume, within-transfer dedup, on a solid base.
 
 Evidence + rationale: `docs/private/superpowers/audits/2026-07-19-transfer-reliability-deep-dive.md`.
