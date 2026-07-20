@@ -289,6 +289,16 @@ export function createFlowSupervisor({
       if (slot.graceTimer == null) {
         slot.graceTimer = setTimer(() => {
           slot.graceTimer = null;
+          // DEFENSIVE: guards a real-setTimeout race where this grace
+          // macrotask is already dispatched (queued to run) at the moment
+          // stop() or a re-dial clears slot.graceTimer/slot.worker out from
+          // under it — clearTimer() can't retract a callback that has
+          // already fired. A synchronous fake clock (as used in this test
+          // file) can't reproduce that race (its clearTimer removes the
+          // pending entry outright, so a cleared timer never runs at all),
+          // so this branch is intentionally not unit-pinned; see
+          // 'stop() cancels a pending grace' for the clear-on-stop path that
+          // feeds it.
           if (!active || slot.worker !== worker) return; // replaced/stopped meanwhile
           goTerminal(slotIndex, worker);
         }, disconnectedGraceMs);

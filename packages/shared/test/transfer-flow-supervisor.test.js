@@ -225,6 +225,41 @@ describe('transfer-flow-supervisor', () => {
     expect(createWorker.all.length).toBe(2);
   });
 
+  // Review follow-up (Fix 1): the `if (slot.graceTimer == null)` re-arm guard
+  // in the 'disconnected' branch was previously untested. A repeat
+  // 'disconnected' while a grace is already pending must NOT arm a second
+  // timer — only ONE escalation (close + onFlowDown + re-dial) may happen.
+  it('a repeat disconnected while a grace is pending does NOT arm a second timer (single escalation)', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, disconnectedGraceMs: 4000, backoff: [500] });
+    const sup = createFlowSupervisor(args); sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('connected');
+    w0.emit('disconnected');
+    w0.emit('disconnected');       // repeat while grace pending — must NOT arm a 2nd timer
+    clock.advance(4000);           // grace fires ONCE
+    expect(args.onFlowDown).toHaveBeenCalledTimes(1);
+    expect(w0.close).toHaveBeenCalledTimes(1);
+    clock.advance(500);
+    expect(createWorker.all.length).toBe(2);   // exactly one re-dial, not two
+  });
+
+  // Review follow-up (Fix 2): the grace-callback staleness guard
+  // (`if (!active || slot.worker !== worker) return;`) is DEFENSIVE — it
+  // protects against a real-setTimeout race (the grace macrotask already
+  // dispatched when stop() or a re-dial clears it) that this synchronous fake
+  // clock cannot reproduce, since clearTimer() here removes the timer entry
+  // outright rather than racing an already-fired callback. This test at least
+  // pins the clear-on-stop path that feeds that guard's intent.
+  it('stop() cancels a pending grace (no escalation after stop)', () => {
+    const { clock, createWorker, args } = baseArgs({ flowCount: 1, disconnectedGraceMs: 4000 });
+    const sup = createFlowSupervisor(args); sup.start();
+    const w0 = createWorker.latestFor(0);
+    w0.emit('connected'); w0.emit('disconnected');
+    sup.stop();
+    clock.advance(10000);
+    expect(args.onFlowDown).not.toHaveBeenCalled();  // grace was cleared by stop()
+  });
+
   // Per-slot cap applies ONLY when a flow is LIVE (not a total outage): a slot
   // that cannot connect while OTHER flows are up IS individually broken, so it
   // goes dead after maxRedialsPerSlot. (During a total outage the probe slots
