@@ -65,4 +65,22 @@ describe('createTtlCache', () => {
     await cache.get(f);
     expect(calls).toBe(2);
   });
+
+  it('invalidate() discards a fetch that was already in flight when it resolves later (no fail-open)', async () => {
+    let now = 0;
+    let calls = 0;
+    let resolveFirst;
+    const f = () => {
+      calls += 1;
+      if (calls === 1) return new Promise((r) => { resolveFirst = r; });
+      return Promise.resolve('B');
+    };
+    const cache = createTtlCache({ now: () => now, ttlMs: 1000 });
+    const first = cache.get(f);           // fetch #1 (e.g. account A) starts, not yet resolved
+    cache.invalidate();                   // e.g. account switch A -> B, cache invalidated mid-fetch
+    resolveFirst('A');                    // fetch #1 resolves AFTER invalidation — must NOT be seated
+    expect(await first).toBe('A');        // the caller who started it still gets its own result
+    expect(await cache.get(f)).toBe('B'); // next get() must RE-FETCH, not serve stale 'A'
+    expect(calls).toBe(2);                // proves a real re-fetch happened, not a cache hit
+  });
 });

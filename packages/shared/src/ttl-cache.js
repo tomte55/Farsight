@@ -8,14 +8,19 @@
 export function createTtlCache({ now = () => Date.now(), ttlMs, shouldCache = () => true } = {}) {
   let entry = null;     // { value, at }
   let inflight = null;  // Promise<value> while a fetch is pending
+  let generation = 0;   // bumped by invalidate() so a stale in-flight write is discarded
 
   return {
     get(fetchFn) {
       if (entry && (now() - entry.at) < ttlMs) return Promise.resolve(entry.value);
       if (inflight) return inflight;                     // COALESCE concurrent callers
+      const gen = generation;                             // capture BEFORE the fetch starts
       const p = (async () => {
         const value = await fetchFn();
-        entry = shouldCache(value) ? { value, at: now() } : null; // fail-closed: don't cache non-ok
+        // Only seat the result if invalidate() hasn't run since this fetch started —
+        // otherwise a fetch in flight at invalidation time would re-populate the
+        // cache with a stale value AFTER the invalidation (fail-open).
+        if (gen === generation) entry = shouldCache(value) ? { value, at: now() } : null;
         return value;
       })();
       inflight = p;
@@ -24,6 +29,6 @@ export function createTtlCache({ now = () => Date.now(), ttlMs, shouldCache = ()
       p.then(() => { if (inflight === p) inflight = null; }, () => { if (inflight === p) inflight = null; });
       return p;
     },
-    invalidate() { entry = null; inflight = null; },
+    invalidate() { entry = null; inflight = null; generation++; },
   };
 }
