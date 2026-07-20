@@ -1,6 +1,6 @@
 // packages/shared/src/transfer-report-batch.js
 // Bound a range_report to the data-channel message limit by MEASURED serialized
-// bytes (mirroring transfer-orchestrator's batchEntriesBySize used for the OFFER).
+// bytes (mirroring transfer-sender.js's batchEntriesBySize used for the OFFER).
 // applyReport REPLACES a file's coverage, so one file's ivals is never split across
 // frames — instead capIvals drops the SMALLEST covered runs of an over-budget file
 // (those bytes just get re-sent — harmless positional overwrite, never over-reports),

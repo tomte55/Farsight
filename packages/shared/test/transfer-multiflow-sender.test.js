@@ -1,6 +1,7 @@
 // packages/shared/test/transfer-multiflow-sender.test.js
 import { describe, it, expect } from 'vitest';
-import { createMultiFlowSender } from '../src/transfer-orchestrator.js';
+import { createSender } from '../src/transfer-sender.js';
+import { createReceiver } from '../src/transfer-receiver.js';
 import { decodeBulkFrame } from '../src/transfer-chunk.js';
 import { parseCtrlFrame, acceptFrame, rangeReportFrame, completeFrame } from '../src/transfer-protocol.js';
 
@@ -72,8 +73,8 @@ function wire({ manifest, sources, flowCount = 3, dropFileOffsets = new Set() })
 const readerFor = (sources) => (fileId) => ({ readAt: (o, l) => Promise.resolve(sources.get(fileId).subarray(o, o + l)), close: () => {} });
 const fakeHash = () => ({ update() {}, digest: () => 'H' });
 
-describe('createMultiFlowSender', () => {
-  // Plan 3 Task 6: a `limiter` passed to createMultiFlowSender is threaded into
+describe('createSender', () => {
+  // Plan 3 Task 6: a `limiter` passed to createSender is threaded into
   // the (single, per-transfer) send pool -- transfer-send-pool.js's ONE choke
   // point where every flow's sendBulk() is dispatched -- so take() is called
   // for every chunk regardless of which of the N flows it lands on, proving
@@ -87,7 +88,7 @@ describe('createMultiFlowSender', () => {
     const rig = wire({ manifest, sources });
     const takenCalls = [];
     const limiter = { take: (n) => { takenCalls.push(n); return Promise.resolve(); } };
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 3,
       groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash, limiter,
     });
@@ -107,7 +108,7 @@ describe('createMultiFlowSender', () => {
     const sources = new Map([[0, A], [1, B]]);
     const manifest = { entries: [{ fileId: 0, size: A.length }, { fileId: 1, size: B.length }] };
     const rig = wire({ manifest, sources });
-    const sender = createMultiFlowSender({ ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 3, groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash });
+    const sender = createSender({ ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 3, groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash });
     const r = await sender.start();
     expect(r).toEqual({ jobId: JOB, ok: true });
     expect(Buffer.from(rig.dest.get(0)).equals(Buffer.from(A))).toBe(true);
@@ -125,7 +126,7 @@ describe('createMultiFlowSender', () => {
     const manifest = { entries: [{ fileId: 0, size: A.length }] };
     const rig = wire({ manifest, sources, flowCount: 1 });
     const events = [];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 1,
       groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
       onEvent: (ev) => events.push(ev),
@@ -162,7 +163,7 @@ describe('createMultiFlowSender', () => {
     // flowsTotal would pass a naive test but must fail THIS one.
     rig.flows[2].isAlive = () => false;
     const events = [];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 3,
       groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
       onEvent: (ev) => events.push(ev),
@@ -188,7 +189,7 @@ describe('createMultiFlowSender', () => {
     const manifest = { entries: [{ fileId: 0, size: A.length }] };
     const rig = wire({ manifest, sources, flowCount: 1 });
     const events = [];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 64, flowCount: 1,
       groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
       onEvent: (ev) => events.push(ev),
@@ -207,7 +208,7 @@ describe('createMultiFlowSender', () => {
     const manifest = { entries: [{ fileId: 0, size: A.length }] };
     const rig = wire({ manifest, sources, flowCount: 1 });
     const events = [];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 1,
       groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
       onEvent: (ev) => events.push(ev),
@@ -225,7 +226,7 @@ describe('createMultiFlowSender', () => {
     const manifest = { entries: [{ fileId: 0, size: A.length }, { fileId: 1, size: B.length }] };
     const rig = wire({ manifest, sources, flowCount: 2 });
     const events = [];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 2,
       groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
       onEvent: (ev) => events.push(ev),
@@ -247,7 +248,7 @@ describe('createMultiFlowSender', () => {
     // After pass 1 the receiver reports the gap; un-drop so pass 2 delivers it.
     const origReport = rig.report;
     rig.report = () => { dropped.delete('0:8192'); return origReport(); };
-    const sender = createMultiFlowSender({ ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 3, groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash, reconcileWaitMs: 50 });
+    const sender = createSender({ ctrl: rig.ctrl, flows: rig.flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 3, groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash, reconcileWaitMs: 50 });
     const r = await sender.start();
     expect(r.ok).toBe(true);
     expect(Buffer.from(rig.dest.get(0)).equals(Buffer.from(A))).toBe(true);
@@ -268,7 +269,7 @@ describe('createMultiFlowSender', () => {
       onCtrl: (cb) => { onCtrl = cb; },
     };
     const flows = [{ isAlive: () => true, sendBulk: () => Promise.resolve() }];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl, flows, jobId: JOB, manifest: { entries: [{ fileId: 0, size }] }, chunkSize: 4096, flowCount: 1,
       groupId: 'b'.repeat(32),
       readerFor: () => ({ readAt: (o, l) => Promise.resolve(A.subarray(o, o + l)), close: () => {} }),
@@ -302,7 +303,7 @@ describe('createMultiFlowSender', () => {
       onCtrl: (cb) => { onCtrl = cb; },
     };
     const flows = [{ isAlive: () => true, sendBulk: () => Promise.resolve() }];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl, flows, jobId: JOB, manifest: { entries: [{ fileId: 0, size }] }, chunkSize: 4096, flowCount: 1,
       groupId: 'b'.repeat(32),
       readerFor: () => ({ readAt: (o, l) => Promise.resolve(A.subarray(o, o + l)), close: () => {} }),
@@ -344,7 +345,7 @@ describe('createMultiFlowSender', () => {
         } else if (f.t === 'file_end') {
           // Simulate the real receiver finalizing the file: its range_report
           // OMITS the file entirely (never reports it covered), then it settles
-          // the sender via `complete` — mirroring createMultiFlowReceiver's
+          // the sender via `complete` — mirroring createReceiver's
           // maybeComplete()/router.isComplete() path, WITHOUT this task's
           // receiver-side fix (reportFiles()).
           onCtrl(rangeReportFrame({ jobId: JOB, files: [] }));
@@ -357,7 +358,7 @@ describe('createMultiFlowSender', () => {
       isAlive: () => true,
       sendBulk: () => { sendBulkCalls += 1; return Promise.resolve(); },
     }];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl, flows, jobId: JOB, manifest: { entries: [{ fileId: 0, size }] }, chunkSize: 4096, flowCount: 1,
       groupId: 'b'.repeat(32),
       readerFor: () => ({ readAt: (o, l) => Promise.resolve(A.subarray(o, o + l)), close: () => {} }),
@@ -398,7 +399,7 @@ describe('createMultiFlowSender', () => {
       onCtrl: (cb) => { onCtrl = cb; },
     };
     const flows = [{ isAlive: () => true, sendBulk: () => Promise.resolve() }];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl, flows, jobId: JOB, manifest: { entries: [{ fileId: 0, size }] }, chunkSize: 4096, flowCount: 1,
       groupId: 'b'.repeat(32),
       readerFor: () => ({ readAt: (o, l) => Promise.resolve(A.subarray(o, o + l)), close: () => {} }),
@@ -436,7 +437,7 @@ describe('createMultiFlowSender', () => {
     const c2 = manualCtrl();
     const flows = [{ isAlive: () => true, sendBulk: () => Promise.resolve() }];
     const events = [];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl: c1.ch, flows, jobId: JOB, manifest, chunkSize: 4096, flowCount: 1,
       groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash,
       onEvent: (ev) => events.push(ev),
@@ -483,7 +484,7 @@ describe('createMultiFlowSender', () => {
 // throwing no_live_flows. Proves the wiring end-to-end: start pump with only a
 // DEAD flow, and only after awaitFlow is invoked (and a live flow pushed into
 // the SAME array) does delivery complete.
-describe('createMultiFlowSender awaitFlow threading', () => {
+describe('createSender awaitFlow threading', () => {
   it('a starved pump waits on awaitFlow, then completes once a live flow is resupplied', async () => {
     const A = new Uint8Array(60).map((_, i) => (i * 5) & 0xff);
     const sources = new Map([[0, A]]);
@@ -511,7 +512,7 @@ describe('createMultiFlowSender awaitFlow threading', () => {
     let resolveAwait = null;
     const awaitFlow = () => { awaitCalls += 1; return new Promise((res) => { resolveAwait = res; }); };
 
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl, flows, jobId: JOB, manifest, chunkSize: 60, flowCount: 1,
       groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash, awaitFlow,
     });
@@ -529,11 +530,11 @@ describe('createMultiFlowSender awaitFlow threading', () => {
   });
 });
 
-// Final-review #2: createMultiFlowSender's pump can park indefinitely on the
+// Final-review #2: createSender's pump can park indefinitely on the
 // send pool's awaitFlow when every flow is down and the supervisor never reaches
 // all-slots-`dead` (so awaitFlow never rejects). The receiver has a ~25s
 // inactivity watchdog; the sender needs one too, or the send hangs forever.
-describe('createMultiFlowSender — Final-review #2 stall watchdog', () => {
+describe('createSender — Final-review #2 stall watchdog', () => {
   // Deterministic injected clock: setTimer records a callback+due-time, advance()
   // fires everything due. unref is a no-op (real timers get it; this doesn't need it).
   function fakeClock() {
@@ -567,7 +568,7 @@ describe('createMultiFlowSender — Final-review #2 stall watchdog', () => {
     const clk = fakeClock();
     const ctrl = makeCtrl();
     const flows = [{ isAlive: () => false, sendBulk: () => Promise.resolve() }];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
       groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
       awaitFlow: () => new Promise(() => {}), // parks forever
@@ -585,7 +586,7 @@ describe('createMultiFlowSender — Final-review #2 stall watchdog', () => {
     const clk = fakeClock();
     const ctrl = makeCtrl();
     const flows = [{ isAlive: () => false, sendBulk: () => Promise.resolve() }];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
       groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
       awaitFlow: () => new Promise(() => {}),
@@ -605,7 +606,7 @@ describe('createMultiFlowSender — Final-review #2 stall watchdog', () => {
     // sendBulk parks so pump stays in-flight and the ONLY watchdog reset is the
     // receiver's range_report cadence — isolating "steady progress keeps it alive".
     const flows = [{ isAlive: () => true, sendBulk: () => new Promise(() => {}) }];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
       groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
       inactivityMs: 1000, setTimer: clk.setTimer, clearTimer: clk.clearTimer, completionTimeoutMs: 0, progressIntervalMs: 0,
@@ -634,7 +635,7 @@ describe('createMultiFlowSender — Final-review #2 stall watchdog', () => {
 // gives up (via the pool's awaitFlow-reject path). The gate is INJECTED
 // (watchdogGate) — the assembly composes it from the supervisor's liveCount()/
 // hasGivenUp(); here it's driven directly for deterministic fake-clock control.
-describe('createMultiFlowSender — Task 6 stall-watchdog outage gate', () => {
+describe('createSender — Task 6 stall-watchdog outage gate', () => {
   function fakeClock() {
     let now = 0, id = 0; const timers = new Map();
     return {
@@ -668,7 +669,7 @@ describe('createMultiFlowSender — Task 6 stall-watchdog outage gate', () => {
     // the supervisor is quietly re-dialing). liveCount 0 and NOT given up, so the
     // gate is CLOSED and the watchdog must keep re-arming rather than fail.
     const flows = [{ isAlive: () => false, sendBulk: () => Promise.resolve() }];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
       groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
       awaitFlow: () => new Promise(() => {}), // parks forever (gentle recovery in progress)
@@ -689,7 +690,7 @@ describe('createMultiFlowSender — Task 6 stall-watchdog outage gate', () => {
     // A LIVE flow whose sendBulk parks: the pump stays in-flight, no range_report
     // ever comes back — bytes should be moving but aren't. The gate is OPEN.
     const flows = [{ isAlive: () => true, sendBulk: () => new Promise(() => {}) }];
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
       groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
       watchdogGate: () => true, // liveCount() >= 1
@@ -708,7 +709,7 @@ describe('createMultiFlowSender — Task 6 stall-watchdog outage gate', () => {
     const ctrl = makeCtrl();
     const flows = [{ isAlive: () => false, sendBulk: () => Promise.resolve() }];
     let rejectAwait = null;
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl, flows, jobId: JOB, manifest: oneFile, chunkSize: 100, flowCount: 1,
       groupId: 'b'.repeat(32), readerFor: readerFor(src), newHash: fakeHash,
       // The supervisor's starvation waiter, parked until its outage timer fires
@@ -724,5 +725,86 @@ describe('createMultiFlowSender — Task 6 stall-watchdog outage gate', () => {
     expect(typeof rejectAwait).toBe('function'); // still parked, not torn down by the watchdog
     rejectAwait(new Error('outage_giveup')); // supervisor gave up (outageGiveupMs elapsed)
     await expect(done).rejects.toThrow('no_live_flows'); // failed via the pool's awaitFlow-reject path
+  });
+});
+
+// Phase 2 Task 3 (one-path cleanup): the single-flow driver's regression test
+// for the v1.11.2 field bug ("a 2974-file folder packed the whole manifest
+// into ONE ft-ctrl OFFER (~300KB), overran the ~256KB channel limit, and the
+// send killed ft-ctrl before delivery -> receiver never saw the OFFER ->
+// controller stuck") was deleted along with the single-flow drivers it
+// exercised. batchEntriesBySize/offerBatchBytes is SHARED code — the
+// multi-flow sender chunks its OFFER the identical way (see :398-404 in the
+// orchestrator) — but nothing proved that end-to-end for createSender
+// + createReceiver until this test. Real drivers, a real (small)
+// simulated channel-size limit, and a manifest big enough to force
+// offer_begin -> offer_entries* -> offer_end instead of one legacy `offer`
+// frame.
+function sizedCtrlPair(maxBytes) {
+  let toA = null, toB = null;
+  const stats = { maxCtrl: 0, dropped: 0 };
+  const send = (s, deliver) => {
+    stats.maxCtrl = Math.max(stats.maxCtrl, s.length);
+    if (s.length > maxBytes) { stats.dropped += 1; return; } // oversized -> lost, as a real dc.send() throw would kill delivery
+    queueMicrotask(() => deliver && deliver(s));
+  };
+  const senderCtrl = { sendCtrl: (s) => send(s, toB), onCtrl: (cb) => { toA = cb; } };
+  const receiverCtrl = { sendCtrl: (s) => send(s, toA), onCtrl: (cb) => { toB = cb; } };
+  return { senderCtrl, receiverCtrl, stats };
+}
+
+// One bulk flow bridging a real sender's sendBulk straight to a real
+// receiver's onBulk registration.
+function bulkBridge() {
+  let cb = null;
+  const senderFlow = { isAlive: () => true, sendBulk: (buf) => { queueMicrotask(() => cb && cb(buf)); return Promise.resolve(); } };
+  const receiverFlow = { onBulk: (fn) => { cb = fn; } };
+  return { senderFlow, receiverFlow };
+}
+
+describe('createSender + createReceiver: OFFER chunking over a size-limited channel', () => {
+  it('a large manifest is split into offer_begin/offer_entries*/offer_end so no ctrl frame exceeds the channel limit, and the receiver reassembles every file', async () => {
+    const N = 60;
+    const entries = [];
+    const sources = new Map();
+    for (let i = 0; i < N; i += 1) {
+      const path = `file-with-a-moderately-long-name-${String(i).padStart(4, '0')}.dat`;
+      const data = new Uint8Array(24).fill((i * 37 + 3) & 0xff);
+      sources.set(i, data);
+      entries.push({ fileId: i, path, size: data.length, mtime: 0 });
+    }
+    const manifest = { entries, totalBytes: entries.reduce((a, e) => a + e.size, 0), totalFiles: N };
+
+    const MAX = 4096; // pretend data-channel message limit -- one legacy `offer` frame for 60 files would exceed this
+    const { senderCtrl, receiverCtrl, stats } = sizedCtrlPair(MAX);
+    const { senderFlow, receiverFlow } = bulkBridge();
+
+    const dest = new Map();
+    const rx = createReceiver({
+      ctrl: receiverCtrl, flows: [receiverFlow], jobId: JOB, consent: async () => true,
+      openPart: (relPath) => {
+        const entry = entries.find((e) => e.path === relPath);
+        const b = new Uint8Array(entry.size);
+        dest.set(relPath, b);
+        return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null });
+      },
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      reportIntervalMs: 10_000,
+    });
+    const rxDone = rx.start();
+
+    const sender = createSender({
+      ctrl: senderCtrl, flows: [senderFlow], jobId: JOB, manifest, chunkSize: 512, flowCount: 1,
+      groupId: 'b'.repeat(32), readerFor: readerFor(sources), newHash: fakeHash, offerBatchBytes: 1024,
+    });
+    const sndDone = sender.start();
+
+    const rxRes = await rxDone; // a dropped/oversized OFFER would leave this hanging
+    await sndDone;
+
+    expect(rxRes.ok).toBe(true);
+    expect(stats.dropped).toBe(0);          // no ctrl frame exceeded the channel limit
+    expect(stats.maxCtrl).toBeLessThanOrEqual(MAX);
+    for (const e of entries) expect([...dest.get(e.path)]).toEqual([...sources.get(e.fileId)]);
   });
 });

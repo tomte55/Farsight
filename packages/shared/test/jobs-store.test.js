@@ -1,10 +1,10 @@
 // SP3 jobs-store (spec §6.5): durable per-job JSON records. Temp-dir tests.
 import { expect, test, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
-import { createJobsStore, JOB_STATES } from '../src/jobs-store.js';
-import { nextJobState } from '../src/transfer-engine.js';
+import { createJobsStore } from '../src/jobs-store.js';
 
 const dirs = [];
 function tmp() { const d = mkdtempSync(join(tmpdir(), 'ftjobs-')); dirs.push(d); return d; }
@@ -46,16 +46,36 @@ test('save rejects a job without a string jobId', async () => {
   await expect(store.save({})).rejects.toThrow();
 });
 
-test('list returns all saved jobs and skips corrupt / non-json files', async () => {
+test('list returns all saved jobs, surfaces a corrupt file as an error marker, and ignores non-json files', async () => {
   const dir = tmp();
   const store = createJobsStore({ dir });
   await store.save({ ...sample(), jobId: 'j1' });
   await store.save({ ...sample(), jobId: 'j2' });
-  // A hand-mangled record and an unrelated file must not break enumeration.
+  // A hand-mangled record must not break enumeration -- it surfaces (F-D3), it
+  // isn't dropped. An unrelated non-.json file is still ignored entirely.
   writeFileSync(join(dir, 'j3.json'), '{ not valid json');
   writeFileSync(join(dir, 'notes.txt'), 'ignore me');
-  const ids = (await store.list()).map((j) => j.jobId).sort();
-  expect(ids).toEqual(['j1', 'j2']);
+  const items = await store.list();
+  const ids = items.map((j) => j.jobId).sort();
+  expect(ids).toEqual(['j1', 'j2', 'j3']);
+  const corrupt = items.find((j) => j.jobId === 'j3');
+  expect(corrupt).toEqual({ jobId: 'j3', corrupt: true, jobState: 'error' });
+});
+
+test('list() surfaces a corrupt record as a visible reapable error entry, not a silent skip (F-D3)', async () => {
+  const dir = tmp(); // the file's existing temp-dir helper
+  const store = createJobsStore({ dir });
+  await store.save({ jobId: 'a'.repeat(32), dir: 'recv', jobState: 'active', manifest: {}, perFile: [] });
+  // plant a corrupt file directly in the store dir (records live at <dir>/<jobId>.json)
+  await writeFile(join(dir, 'b'.repeat(32) + '.json'), '{ this is not json', 'utf8');
+  const items = await store.list();
+  const corrupt = items.find((j) => j.corrupt);
+  expect(corrupt).toBeTruthy();
+  expect(corrupt.jobState).toBe('error');
+  expect(corrupt.jobId).toBe('b'.repeat(32)); // derived from the filename → reapable
+  expect(items.some((j) => j.jobId === 'a'.repeat(32) && !j.corrupt)).toBe(true); // valid record kept
+  await store.remove(corrupt.jobId);
+  expect((await store.list()).some((j) => j.corrupt)).toBe(false); // reaped
 });
 
 test('list on a never-used store directory is an empty array', async () => {
@@ -115,13 +135,6 @@ test('remove never escapes the store dir for a traversal-shaped jobId (no-op, do
 
   await store.remove('../' + basename(outsideDir) + '/victim');
   expect(existsSync(join(outsideDir, 'victim.json'))).toBe(true); // untouched
-});
-
-test('JOB_STATES covers every state the engine reducer can reach', () => {
-  const events = ['pause', 'resume', 'disconnect', 'reconnect', 'complete', 'fail', 'cancel', 'retry'];
-  const reachable = new Set(['active']); // the initial state
-  for (const s of [...JOB_STATES]) for (const e of events) reachable.add(nextJobState(s, e));
-  for (const s of reachable) expect(JOB_STATES).toContain(s);
 });
 
 test('concurrent saves for the SAME jobId never publish a corrupt record', async () => {

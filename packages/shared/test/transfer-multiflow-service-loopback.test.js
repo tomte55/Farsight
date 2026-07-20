@@ -4,8 +4,9 @@ import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { createMultiFlowSender, createMultiFlowReceiver } from '../src/transfer-orchestrator.js';
-import { createSparsePartFile, openSourceReader, finalizeReceivedFile } from '../src/transfer-io.js';
+import { createSender } from '../src/transfer-sender.js';
+import { createReceiver } from '../src/transfer-receiver.js';
+import { createSparsePartFile, openSourceReader, finalizeReceivedPath } from '../src/transfer-io.js';
 
 let srcDir, dstDir;
 beforeEach(async () => { srcDir = await mkdtemp(join(tmpdir(), 'mf-src-')); dstDir = await mkdtemp(join(tmpdir(), 'mf-dst-')); });
@@ -53,14 +54,16 @@ describe('multi-flow service loopback (real disk)', () => {
 
     const { senderCtrl, receiverCtrl, senderFlows, receiverFlows } = link({ flowCount: 4, dropFirst: [`0:131072`] });
 
-    const receiver = createMultiFlowReceiver({
+    const receiver = createReceiver({
       ctrl: receiverCtrl, flows: receiverFlows, jobId: JOB,
       consent: async () => true,
       openPart: (relPath) => createSparsePartFile({ destRoot: dstDir, relPath }),
-      verifyAndFinalize: ({ fileId, expectedHash, partFile }) => finalizeReceivedFile({ partFile, expectedHash, mtime: entries.find((e) => e.fileId === fileId).mtime }),
+      // Same seam production wires in transfer-service.js: finalize by PATH
+      // (no open handle required) via finalizeReceivedPath.
+      verifyAndFinalize: ({ path, expectedHash, mtime }) => finalizeReceivedPath({ destRoot: dstDir, relPath: path, expectedHash, mtime }),
       reportIntervalMs: 40,
     });
-    const sender = createMultiFlowSender({
+    const sender = createSender({
       ctrl: senderCtrl, flows: senderFlows, jobId: JOB, manifest, chunkSize: 131072, flowCount: 4, groupId: 'b'.repeat(32),
       readerFor: (fileId) => { let rp; return { readAt: async (o, l) => { rp = rp || await openSourceReader(absOf[fileId]); return rp.readAt(o, l); }, close: async () => { if (rp) await rp.close(); } }; },
     });

@@ -71,3 +71,8 @@ jobs:
       - name: Real-wire transfer harness (4-flow, multi-chunk, multi-file)
         run: node packages/controller/test/harness-spike/two-process-harness.mjs
         timeout-minutes: 10
+      - name: Real-wire transfer harness (single-flow self-test, N=1)
+        run: node packages/controller/test/harness-spike/two-process-harness.mjs
+        timeout-minutes: 10
+        env:
+          SPIKE_FLOWS: '1'

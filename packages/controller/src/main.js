@@ -190,7 +190,7 @@ function freeBytesAt(startDir) {
 }
 
 // Consent round-trip for an INCOMING transfer (v2: the unified app can now
-// receive, not just send). transfer-orchestrator's createReceiver calls
+// receive, not just send). transfer-receiver.js's createReceiver calls
 // consent({jobId, manifest}) with the REAL sender-assigned jobId — use it as the
 // correlation id so the prompt, the IPC round-trip, and the persisted record all
 // agree. Own-fleet offers auto-accept inside transfer-service (peerAuth tier),
@@ -315,7 +315,9 @@ const groupRendezvous = createGroupRendezvous({
   },
   onGroupReady: ({ groupId, flowCount, flows }) => {
     const linked = !!(flows[0] && flows[0].linked);
-    const bundle = flowCount > 1 ? assembleReceiveGroup(flows) : flows[0];
+    // Phase 2 (one path): every receive goes through the coverage receiver; a
+    // single-flow group is just assembleReceiveGroup over one flow.
+    const bundle = assembleReceiveGroup(flows);
     // C1 (I1): assembleReceiveGroup returns null for a partial group with no
     // flowIndex-0 handle -- there is no channel the manifest OFFER could ever
     // arrive on, so starting the receive would hang forever waiting for it.
@@ -356,11 +358,9 @@ function getTransferService() {
       // { role, target, sessionId } — 'initiate' carries target (sessionId
       // undefined), 'attach' carries sessionId (target undefined).
       openChannel: async ({ role, target, sessionId, linked, flowCount }) => {
-        // Plan 3 Task 4: SEND multi-flow — flowCount>1 opens N parallel
-        // transfer workers (one RTCPeerConnection each) sharing one groupId,
-        // instead of the single worker below. flowCount<=1 falls through to
-        // the EXISTING single-worker path, byte-for-byte unchanged.
-        if (role === 'initiate' && Number.isInteger(flowCount) && flowCount > 1) {
+        // Phase 2 (one path): EVERY initiate send goes through the coverage supervisor,
+        // N=1 as a 1-slot supervisor. flowCount is always an integer >=1 (service resolves it).
+        if (role === 'initiate' && Number.isInteger(flowCount) && flowCount >= 1) {
           const groupId = newJobId();
           return assembleSendFlows({
             flowCount,
@@ -396,46 +396,6 @@ function getTransferService() {
           log?.child('transfer').warn(`openChannel(attach) found no pre-opened flow for session=${sessionId}`);
           return openAttachFlow({ sessionId, flowIndex: 0, groupId: undefined, linked });
         }
-
-        // ---- existing single-worker SEND path (flowCount<=1), unchanged ----
-        const worker = trackWorker('send', 0, createTransferWorker({ onLog: (obj) => log?.child('ft-worker').info(JSON.stringify(obj)), testHooks: TEST_HOOKS }));
-        const signalingUrl = currentSignalingUrl();
-        // Surface signaling-level rendezvous failures (host_offline, bad_password,
-        // transfer_timeout, busy, locked) to the transfer-service so a send fails
-        // fast with the real reason instead of hanging in "waiting for approval".
-        // The worker reports these as 'error:<reason>' session states.
-        let rendezvousErrorCb = null;
-        worker.onSessionState((state) => {
-          if (typeof state === 'string' && state.startsWith('error:') && rendezvousErrorCb) {
-            rendezvousErrorCb(state.slice('error:'.length));
-          }
-        });
-        // A non-linked (ad-hoc/password) send never runs the device-keypair
-        // handshake -> resolve null immediately (peerAuth is unused on the send
-        // path today, but kept for return-shape parity with attach).
-        let resolvePeerAuth;
-        const peerAuth = new Promise((res) => { resolvePeerAuth = res; });
-        worker.onPeerAuth(async ({ publicKey }) => {
-          let tier = null;
-          try { tier = await getAccountService().classifyPublicKey(publicKey); } catch { tier = null; }
-          resolvePeerAuth({ tier, publicKey });
-        });
-        worker.startRendezvous({
-          role: 'initiator',
-          signalingUrl,
-          targetId: target?.id,
-          password: target?.password,
-          // SP3 Phase 4: own-fleet send — pair password-free and authenticate
-          // end-to-end via the device keypair (no session password).
-          linked: !!target?.linked,
-          version: app.getVersion(),
-        });
-        return {
-          channel: worker.channel,
-          close: async () => worker.close(),
-          onRendezvousError: (cb) => { rendezvousErrorCb = cb; },
-          peerAuth,
-        };
       },
       onEvent: (ev) => {
         const prog = ev.progress ? ` files=${ev.progress.filesSent ?? ev.progress.filesDone}/${ev.progress.filesTotal}` : '';
@@ -644,9 +604,9 @@ ipcMain.handle('control-allowed:set', (_e, v) => writeControlAllowed(!!v));
 // send opens, plumbed to the send's `flowCount` (see the transfer:send handler
 // below). Default 8, clamped 1-32 by resolveParallelConnections (shared with
 // config.js's parse/serialize so the clamp/default logic lives in ONE place).
-// `flowCount === 1` reproduces the pre-Task-3 single-flow path exactly — the
-// multi-flow branch in getTransferService()'s openChannel above only triggers
-// when flowCount > 1.
+// Phase 2 (one path): EVERY flowCount (including 1) routes through the same
+// coverage-supervisor branch in getTransferService()'s openChannel above — a
+// `flowCount === 1` send just runs a 1-slot supervisor, no separate path.
 // NOTE: each flow opens its own signaling CONNECT, drawing the server's per-IP
 // `connectBurst` budget (default 30, never refunded on success — see
 // @farsight/shared/config MAX_PARALLEL_CONNECTIONS). A configured value near the

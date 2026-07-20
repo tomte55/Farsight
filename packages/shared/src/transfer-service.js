@@ -1,8 +1,9 @@
 // packages/shared/src/transfer-service.js
-// SP3 MAIN-ONLY pipeline that assembles the orchestrator + jobs-store + queue
-// into an app-facing service. Electron-free: `openChannel` is injected so this
-// module is unit-testable via loopback (see transfer-orchestrator.test.js's
-// loopback() pattern) with no real WebRTC/worker involved.
+// SP3 MAIN-ONLY pipeline that assembles the sender/receiver (transfer-sender.js
+// /transfer-receiver.js) + jobs-store + queue into an app-facing service.
+// Electron-free: `openChannel` is injected so this module is unit-testable via
+// loopback (see transfer-service.test.js's loopback() pattern) with no real
+// WebRTC/worker involved.
 //
 // Concurrency model: SENDS are serialized through one `createQueue()` — only
 // the head job's channel is opened/run at a time (spec-driven UX: one active
@@ -11,7 +12,8 @@
 // initiates it and the user has already consented per-offer.
 import { createHash } from 'node:crypto';
 import { resolveParallelConnections } from './config.js';
-import { createSender, createReceiver, createMultiFlowSender, createMultiFlowReceiver } from './transfer-orchestrator.js';
+import { createSender } from './transfer-sender.js';
+import { createReceiver } from './transfer-receiver.js';
 import { createQueue, selectResumable, newJobId } from './transfer-queue.js';
 import { parseCtrlFrame } from './transfer-protocol.js';
 import { walkSource, openSourceReader, createSparsePartFile, finalizeReceivedPath } from './transfer-io.js';
@@ -26,25 +28,6 @@ import { createRateLimiter } from './rate-limiter.js';
 // deterministic across an unchanged source re-walk.
 function manifestFingerprint(manifest) {
   return createHash('sha256').update(JSON.stringify(manifest.entries)).digest('hex');
-}
-
-// Wrap a channel so we can observe the jobId as soon as it appears on the wire
-// (the OFFER frame) without altering behavior — the real onCtrl callback still
-// receives every frame unchanged. Used on the receive side, where the jobId
-// isn't known to the service until the remote sender announces it.
-function tapJobId(channel, setJobId) {
-  return {
-    sendCtrl: (s) => channel.sendCtrl(s),
-    sendBulk: (b) => channel.sendBulk(b),
-    onCtrl(cb) {
-      channel.onCtrl((s) => {
-        const f = parseCtrlFrame(s);
-        if (f && typeof f.jobId === 'string') setJobId(f.jobId);
-        return cb(s);
-      });
-    },
-    onBulk(cb) { channel.onBulk(cb); },
-  };
 }
 
 function errMessage(err) {
@@ -100,29 +83,29 @@ export function jobStateForCompletion({ accepted, ok }) {
   return accepted ? 'completed_with_errors' : 'error';
 }
 
-// Multi-flow selection (Plan 3 Task 3): flowCount > 1 drives the Plan-2
-// createMultiFlowSender/createMultiFlowReceiver instead of the single-flow
-// createSender/createReceiver. Any non-positive-integer input (missing, 0,
-// negative, non-integer) is ignored and falls through to the next source, then
-// to 1 (single-flow) -- never silently coerces a bad value into "multi-flow".
+// Flow count resolution (Plan 3 Task 3; Phase 2 one-path): every send now
+// routes through createSender (including flowCount:1, a 1-slot
+// supervisor -- see Phase 2 Task 1), so this always resolves the flow count
+// THAT path uses. Any non-positive-integer input (missing, 0, negative,
+// non-integer) is ignored and falls through to the next source, then to 1.
 //
 // Task 6 review fix: whatever falls out of preferred/fallback/1 above is then
 // run through resolveParallelConnections (config.js) -- the SAME [1,32] clamp
 // the "Parallel connections" setting itself uses -- so this is the LAST-line
 // choke point. No caller-supplied value (target.flowCount, an out-of-range
-// serviceFlowCount, or anything else routed here) can ever reach the
-// multi-flow branch above 32 or below 1, regardless of what earlier call
+// serviceFlowCount, or anything else routed here) can ever reach
+// createSender above 32 or below 1, regardless of what earlier call
 // sites (e.g. main.js's override) did or didn't clamp. resolveParallelConnections
-// is a no-op on an already-valid integer in [1,32] (including 1, so single-flow
-// routing is unaffected), so this doesn't duplicate the literal 32 anywhere.
+// is a no-op on an already-valid integer in [1,32] (including 1), so this
+// doesn't duplicate the literal 32 anywhere.
 export function resolveFlowCount(preferred, fallback) {
   const p = Number.isInteger(preferred) && preferred > 0 ? preferred : undefined;
   const f = Number.isInteger(fallback) && fallback > 0 ? fallback : undefined;
   return resolveParallelConnections(p ?? f ?? 1);
 }
 
-// createMultiFlowSender's readerFor(fileId) is called SYNCHRONOUSLY (see
-// initialPass/gapPass in transfer-orchestrator.js -- there is no `await
+// createSender's readerFor(fileId) is called SYNCHRONOUSLY (see
+// initialPass/gapPass in transfer-sender.js -- there is no `await
 // readerFor(...)`), but transfer-io.js's openSourceReader is async. Return a
 // plain {readAt,close} object immediately and open the real fd lazily on first
 // readAt (memoized) -- the same lazy-open pattern Plan 2's own loopback test
@@ -143,7 +126,7 @@ function readerForSources(sources) {
 // Multi-flow RESUME (Plan 3 Task 3): the positional/sparse receive writer means
 // the .part file's on-disk SIZE is no longer the resume offset the way it is for
 // the single-flow writer (createPartFile) -- the receiver must persist each
-// file's actual covered byte-ranges explicitly (createMultiFlowReceiver's
+// file's actual covered byte-ranges explicitly (createReceiver's
 // persistRanges seam) and read them back on a fresh start (initialRangesFor).
 // Returns {fileId: ivals} the same way createReceiveRouter indexes
 // initialRanges (transfer-receive-router.js: `initialRanges[e.fileId]`); {} for
@@ -155,6 +138,15 @@ async function readPersistedRanges(store, jobId) {
   if (!rec || rec.dir !== 'recv' || !Array.isArray(rec.perFile)) return {};
   const out = {};
   for (const pf of rec.perFile) {
+    // F-A2 clean-break (load-bearing — see transfer-service-multiflow.test.js
+    // "legacy single-flow recv ... restart from zero"): resume coverage ONLY
+    // from an explicit `ivals` range list. A legacy single-flow record has no
+    // `ivals`, so it yields {} here -> the coverage receiver re-sends every
+    // byte, overwriting any stale sequential `.part` before it can publish.
+    // Do NOT add a shortcut that infers coverage from `.part` size/existence
+    // (e.g. "size == final -> skip resend"): a preallocated sparse `.part` is
+    // full-size but mostly zero, so that shortcut republishes a zero-filled
+    // file. Completion must stay driven by tracked write-coverage, never disk size.
     if (pf && typeof pf.fileId !== 'undefined' && Array.isArray(pf.ivals)) out[pf.fileId] = pf.ivals;
   }
   return out;
@@ -165,10 +157,11 @@ function ivalsCoverFile(ivals, size) {
 }
 
 // Persist the multi-flow receive record with each file's current byte-ranges
-// attached (perFile[i].ivals), alongside the same fields the single-flow receive
-// record carries (dir/tier/peer/destRoot/manifest/jobState -- see createReceiver's
-// own saveRecord in transfer-orchestrator.js). Called periodically
-// (createMultiFlowReceiver's persistRanges seam, every reportIntervalMs) and once
+// attached (perFile[i].ivals), alongside the same fields the (now-deleted)
+// single-flow receive record used to carry (dir/tier/peer/destRoot/manifest/
+// jobState -- see the removed single-flow receiver driver's own saveRecord,
+// formerly in the pre-collapse transfer-orchestrator.js). Called periodically
+// (createReceiver's persistRanges seam, every reportIntervalMs) and once
 // more with the terminal state when the receive settles. store.save() is itself
 // serialized per jobId (jobs-store.js), so concurrent calls here are safe
 // (last-writer-wins, matching the existing send-side saves' discipline).
@@ -217,8 +210,8 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // existing single-flow path exactly as it was.
   flowCount: serviceFlowCount = 1,
   // Plan 3 Task 6: ONE shared global rate limiter for ALL sender byte output
-  // (single-flow AND multi-flow -- see createSender/createMultiFlowSender's
-  // `limiter` param). rateLimitMbps<=0 (the default) constructs an unlimited
+  // (every flow in the coverage supervisor -- see createSender's `limiter`
+  // param). rateLimitMbps<=0 (the default) constructs an unlimited
   // no-op limiter (createRateLimiter's own <=0-is-unlimited contract), so a
   // caller that never touches this is byte-for-byte unchanged. `rateLimiter`
   // lets a caller/test inject its own instance (e.g. a fake that records
@@ -380,11 +373,10 @@ export function createTransferService({ store, transferDir, consent, openChannel
     let approvalTimer = null;
     const disarmApprovalTimer = () => { if (approvalTimer) { clearTimeout(approvalTimer); approvalTimer = null; } };
     try {
-      // Plan 3 Task 3: flowCount>1 (per-target override, else the service
-      // default) drives the multi-flow branch below via a multi-flow openChannel
-      // call; flowCount<=1 is the existing call/path, byte-for-byte unchanged.
       const flowCount = resolveFlowCount(target && target.flowCount, serviceFlowCount);
-      const openArgs = flowCount > 1 ? { role: 'initiate', target, flowCount } : { role: 'initiate', target };
+      // Phase 2 (one path): always pass flowCount so main routes EVERY initiate
+      // (including N=1) through assembleSendFlows — the single coverage path.
+      const openArgs = { role: 'initiate', target, flowCount };
       const opened = await openChannel(openArgs);
       ({ close, onRendezvousError } = opened);
       if (pendingSends.has(jobId)) {
@@ -400,41 +392,37 @@ export function createTransferService({ store, transferDir, consent, openChannel
           else if (ev.type === 'prompting') { disarmApprovalTimer(); }
           emit(jobId, 'send', ev);
         };
-        // Consume whichever shape openChannel actually returned (Plan 3 Task 4's
-        // grouped N-worker assembly resolves {ctrl,flows,...}; single-flow/legacy
-        // resolves the existing {channel,...}) rather than trusting our own
-        // flowCount decision blindly -- defensive against a partially-wired main.
-        const multi = !!(opened.ctrl && Array.isArray(opened.flows));
-        const sender = multi
-          ? createMultiFlowSender({
-              ctrl: opened.ctrl, flows: opened.flows, jobId, manifest,
-              // The real connected flow count (may differ from the requested one
-              // if main opened fewer) is more honest on the wire OFFER than the
-              // request we made.
-              flowCount: opened.flows.length || flowCount,
-              groupId: (target && typeof target.groupId === 'string') ? target.groupId : newJobId(),
-              readerFor: readerForSources(sources),
-              // Resilient multi-flow: the supervisor's starvation waiter, so the
-              // pool waits for a resupplied/late flow instead of failing when the
-              // live flow set momentarily empties (staggered dial / a flow death).
-              awaitFlow: opened.awaitFlow,
-              // Task 9: the supervisor's cumulative re-dial counter (via
-              // assembleSendFlows), surfaced in the aggregate progress event's
-              // `redials` field. undefined here (a caller/fixture with no
-              // supervisor wired) falls back to createMultiFlowSender's own
-              // `() => 0` default.
-              redialCount: opened.redialCount,
-              // Task 6 (common-mode-resilience): the supervisor-derived
-              // stall-watchdog gate (assembleSendFlows.watchdogGate). Lets the
-              // sender's watchdog fire only on a real wedge (≥1 flow alive) or a
-              // supervisor giveup — never during a total-outage gentle recovery.
-              // undefined for a caller/fixture with no supervisor wired falls
-              // back to createMultiFlowSender's own `() => true` (always fire).
-              watchdogGate: opened.watchdogGate,
-              onEvent: onSendEvent,
-              limiter,
-            })
-          : createSender({ channel: opened.channel, jobId, manifest, sources, onEvent: onSendEvent, limiter });
+        // main always resolves the coverage bundle now (Plan 3 Task 4's grouped
+        // N-worker assembly, {ctrl,flows,...}) — every initiate goes through
+        // createSender, including flowCount===1.
+        const sender = createSender({
+          ctrl: opened.ctrl, flows: opened.flows, jobId, manifest,
+          // The real connected flow count (may differ from the requested one
+          // if main opened fewer) is more honest on the wire OFFER than the
+          // request we made.
+          flowCount: opened.flows.length || flowCount,
+          groupId: (target && typeof target.groupId === 'string') ? target.groupId : newJobId(),
+          readerFor: readerForSources(sources),
+          // Resilient multi-flow: the supervisor's starvation waiter, so the
+          // pool waits for a resupplied/late flow instead of failing when the
+          // live flow set momentarily empties (staggered dial / a flow death).
+          awaitFlow: opened.awaitFlow,
+          // Task 9: the supervisor's cumulative re-dial counter (via
+          // assembleSendFlows), surfaced in the aggregate progress event's
+          // `redials` field. undefined here (a caller/fixture with no
+          // supervisor wired) falls back to createSender's own
+          // `() => 0` default.
+          redialCount: opened.redialCount,
+          // Task 6 (common-mode-resilience): the supervisor-derived
+          // stall-watchdog gate (assembleSendFlows.watchdogGate). Lets the
+          // sender's watchdog fire only on a real wedge (≥1 flow alive) or a
+          // supervisor giveup — never during a total-outage gentle recovery.
+          // undefined for a caller/fixture with no supervisor wired falls
+          // back to createSender's own `() => true` (always fire).
+          watchdogGate: opened.watchdogGate,
+          onEvent: onSendEvent,
+          limiter,
+        });
         abortFn = (reason) => sender.abort(reason);
         activeAbort = abortFn;
         activeCancelNotify = () => sender.notifyCancel(); // F-A7: cancel() calls this before teardown
@@ -442,7 +430,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
         // the sender the fresh ctrl channel so the control plane (OFFER/
         // range_report/complete) survives a slot-0 death. Registered AFTER the
         // sender exists (the assembly buffers a swap that fired earlier).
-        if (multi && typeof opened.onCtrlReplaced === 'function') {
+        if (typeof opened.onCtrlReplaced === 'function') {
           opened.onCtrlReplaced((newCtrl) => { try { sender.setCtrl(newCtrl); } catch { /* best-effort */ } });
         }
         // Signaling-level rendezvous errors (host_offline, bad_password,
@@ -465,18 +453,16 @@ export function createTransferService({ store, transferDir, consent, openChannel
           }, rendezvousTimeoutMs);
           if (approvalTimer.unref) approvalTimer.unref();
         }
-        // Single-flow createSender's start() resolves with NO value on success
-        // (r === undefined -> r?.ok !== false -> true, unchanged). Multi-flow
-        // createMultiFlowSender's start() can resolve { jobId, ok:false } on a
-        // completed-with-failures receive (see its 'complete' ctrl handler
-        // above) — honor that instead of hardcoding ok:true, so the persisted
+        // createSender's start() resolves { jobId, ok } — ok:false on
+        // a completed-with-failures receive (see its 'complete' ctrl handler
+        // above). Honor that instead of hardcoding ok:true, so the persisted
         // record's top-level ok matches the 'completed' event's ok. jobState is
         // derived the same way (F-A4, jobStateForCompletion): this success path
         // was reached, so the send is `accepted`, but a false `ok` still records
         // 'completed_with_errors', not a clean 'done' — per-file failures are
         // what the receiver's own perFile record captures.
         const r = await sender.start();
-        result = { jobId, ok: r?.ok !== false };
+        result = { jobId, ok: r.ok };
         await saveSendRecord({ jobId, manifest, createdAt, jobState: jobStateForCompletion({ accepted: true, ok: result.ok }), peer, tier, sourceRoots, flowCount: target && target.flowCount });
       } else {
         result = { jobId, ok: false, canceled: true };
@@ -495,8 +481,8 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // and poke the resume watcher to try again as soon as the peer is online.
       const recoverable = (tier === 'fleet' || tier === 'contact') && !isTerminalReason(reason);
       // A receiver-initiated cancel surfaces here as reason === 'canceled' (the
-      // orchestrator's sole message for an inbound cancel frame — see
-      // transfer-orchestrator.js). Persist the accurate 'canceled' state rather
+      // sole message transfer-receiver.js emits for an inbound cancel frame).
+      // Persist the accurate 'canceled' state rather
       // than a generic 'error'; it's still excluded from RESUMABLE_STATES
       // (transfer-queue.js) and still terminal per isTerminalReason's `canceled`
       // match above, so `recoverable` is unaffected and this can never be
@@ -758,12 +744,12 @@ export function createTransferService({ store, transferDir, consent, openChannel
     return { consentFn, getTier: () => resolvedTier || 'adhoc' };
   }
 
-  // Plan 3 Task 3: multi-flow receive. openChannel resolved {ctrl, flows, close,
-  // peerAuth} (Plan 3 Task 4's grouped N-worker assembly) instead of the
-  // single-flow {channel, ...} shape. Unlike single-flow createReceiver,
-  // createMultiFlowReceiver takes jobId as a CONSTRUCTOR param and filters EVERY
+  // Plan 3 Task 3: multi-flow receive. openChannel resolves {ctrl, flows, close,
+  // peerAuth} (Plan 3 Task 4's grouped N-worker assembly; Phase 2 Task 1: this
+  // is now the ONLY shape it ever resolves, even at flowCount:1). createReceiver
+  // takes jobId as a CONSTRUCTOR param and filters EVERY
   // ctrl frame -- including the OFFER itself -- by exact jobId match (see
-  // transfer-orchestrator.js), but jobId is sender-chosen and only appears ON
+  // transfer-receiver.js), but jobId is sender-chosen and only appears ON
   // the OFFER frame; nothing in the rendezvous (TRANSFER_REQUEST only carries
   // sessionId/groupId/flowIndex/flowCount/linked -- see transfer-group-
   // rendezvous.js) tells us jobId ahead of time. So: tap the raw ctrl first to
@@ -772,7 +758,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
   // While we're already tapping every frame, opportunistically reassemble the
   // manifest too (from offer/offer_begin/offer_entries/offer_end) purely for our
   // OWN bookkeeping -- this reassembly runs BEFORE the real receiver even
-  // exists (jobId isn't known yet), so it can't wait for createMultiFlowReceiver's
+  // exists (jobId isn't known yet), so it can't wait for createReceiver's
   // own 'accepted' event (which does now carry the manifest, mirroring
   // single-flow's) -- the jobs-store record needs the manifest sooner than that.
   async function runMultiFlowReceive({ ctrl, flows, close, peerAuth, sessionId }) {
@@ -859,7 +845,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     // 'file-failed' (no `reason`), which stays retryable and must NOT be
     // recorded as a terminal error here.
     const failedFileIds = new Set();
-    // createMultiFlowReceiver resolves {jobId, ok} from exactly two call
+    // createReceiver resolves {jobId, ok} from exactly two call
     // sites: beginReceive's decline path (ok:false, before any transfer
     // activity — 'accepted' never fires) and maybeComplete (a genuine
     // completion, possibly WITH per-file failures — ok can be true or false).
@@ -870,7 +856,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
     // recorded 'done' rather than 'error' (SP3 per-file-isolation).
     let accepted = false;
 
-    const receiver = createMultiFlowReceiver({
+    const receiver = createReceiver({
       ctrl: wrappedCtrl, flows, jobId, consent: receiveConsent,
       openPart: (relPath, size) => createSparsePartFile({ destRoot, relPath, size }),
       verifyAndFinalize: ({ path, expectedHash, mtime }) => finalizeReceivedPath({ destRoot, relPath: path, expectedHash, mtime }),
@@ -878,7 +864,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
       persistRanges: (files) => {
         if (!currentManifest) return; // no OFFER reassembled yet; nothing to persist against
         // Returning the write's promise (not fire-and-forget) lets
-        // createMultiFlowReceiver's `lastPersist` track it, so a settle
+        // createReceiver's `lastPersist` track it, so a settle
         // (cancel/stall/error) landing while this write is still in flight
         // waits for it before resolving/rejecting — otherwise a caller that
         // deletes destRoot/the store dir right after cancel can race an
@@ -916,7 +902,7 @@ export function createTransferService({ store, transferDir, consent, openChannel
         if (String(err && err.message) === 'canceled') await persistReceiveCanceled(jobId); // F-A7
         throw err;
       }
-      // createMultiFlowReceiver's own persistRanges cadence stops once it
+      // createReceiver's own persistRanges cadence stops once it
       // settles (stopReporter()) -- persist the TERMINAL state once more here so
       // a completed/failed job's record reflects final coverage, not whatever
       // the last periodic tick happened to catch.
@@ -990,59 +976,11 @@ export function createTransferService({ store, transferDir, consent, openChannel
       // pass — the signaling server relays `linked` in TRANSFER_REQUEST.
       const linked = (rendezvous && typeof rendezvous === 'object') ? !!rendezvous.linked : false;
       const opened = await openChannel({ role: 'attach', sessionId, linked });
-      // Plan 3 Task 3: openChannel resolves either the existing single-flow
-      // {channel, close, peerAuth} shape, or the multi-flow {ctrl, flows, close,
-      // peerAuth} shape (Plan 3 Task 4's grouped N-worker assembly, driven by the
-      // group-rendezvous coordinator -- NOT by anything this service decides).
-      // Consume whichever shape actually came back.
-      if (opened && opened.ctrl && Array.isArray(opened.flows)) {
-        return runMultiFlowReceive({ ...opened, sessionId });
-      }
-      const { channel, close, peerAuth } = opened;
-      let currentJobId = null;
-      let receiverRef = null;
-      const tapped = tapJobId(channel, (id) => {
-        // Every ctrl frame carrying a jobId re-invokes this callback (file_begin,
-        // file_end, job_done, …), not just the OFFER — only register once per
-        // jobId, otherwise every inbound frame after the OFFER needlessly mints
-        // and re-sets a fresh { abort } closure into activeReceives (review
-        // finding 3; functionally harmless since the closure just reads
-        // receiverRef, but there's no reason to churn it on every frame).
-        if (currentJobId === id) return;
-        currentJobId = id;
-        activeReceives.set(id, { abort: (r) => { if (receiverRef) receiverRef.abort(r); } });
-      });
-      // SP3 Phase 5 Task 6: an own-fleet transfer is auto-accepted — logging into
-      // your account on this machine is the standing consent, exactly as for
-      // own-fleet unattended control (2026-07-15 decision). A contact — and any
-      // ad-hoc/unverified peer — always PROMPTs. Classification comes from the
-      // device-keypair handshake's verified peer key (openChannel's `peerAuth`,
-      // resolved by main via classifyPublicKey), NOT the blanket `linked` flag —
-      // `linked` only says the rendezvous ran the handshake, not who it verified.
-      // `peerAuth` only resolves after an UNBOUNDED network call (classifyPublicKey
-      // against auth.sovexa.org) — race it against a timeout so a stalled/offline
-      // auth server can't hang the receive forever. Fail-closed means falling
-      // through to the human `consent` prompt, never auto-accepting.
-      const { consentFn: receiveConsent, getTier } = makeReceiveConsent(peerAuth);
-      const receiver = createReceiver({
-        channel: tapped, destRoot: (typeof transferDir === 'function' ? transferDir() : transferDir), store, consent: receiveConsent,
-        getTier,
-        onEvent: (ev) => emit(currentJobId, 'recv', ev),
-      });
-      receiverRef = receiver;
-      try {
-        return await receiver.start();
-      } catch (err) {
-        if (String(err && err.message) === 'canceled') await persistReceiveCanceled(currentJobId); // F-A7
-        throw err;
-      } finally {
-        if (currentJobId) activeReceives.delete(currentJobId);
-        // Grace before tearing down the worker so the receiver's `complete` ack
-        // has time to flush to the sender over the wire — otherwise destroying the
-        // window discards it and the sender waits out its whole completion timeout.
-        if (receiveCloseGraceMs > 0) { try { await delay(receiveCloseGraceMs); } catch { /* ignore */ } }
-        try { await close(); } catch { /* ignore close errors */ }
-      }
+      // main always resolves the multi-flow coverage bundle now ({ctrl, flows,
+      // close, peerAuth} — Plan 3 Task 4's grouped N-worker assembly, driven by
+      // the group-rendezvous coordinator), so every attach goes through
+      // runMultiFlowReceive, including flowCount===1.
+      return runMultiFlowReceive({ ...opened, sessionId });
     },
 
     // Resilient multi-flow rolling-join: the { addFlow, setCtrl } face of an

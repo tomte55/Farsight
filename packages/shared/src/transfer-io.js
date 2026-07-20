@@ -2,7 +2,7 @@
 // SP3 (spec §6) MAIN-ONLY streamed-to-disk transfer io. Uses node:fs/crypto/path
 // like updater.js/device-keypair.js — NEVER imported by a sandboxed renderer.
 // Consumes the pure transfer-manifest.js for path safety.
-import { statfs, stat, readdir, open, mkdir, rename, utimes, rm } from 'node:fs/promises';
+import { stat, readdir, open, mkdir, rename, utimes, rm } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { resolve, join, sep, basename, dirname } from 'node:path';
@@ -20,15 +20,6 @@ export function confineDestPath(destRoot, relPath) {
   const full = resolve(rootAbs, safe);
   if (full !== rootAbs && !full.startsWith(rootPrefix)) throw new Error('unsafe path');
   return full;
-}
-
-export async function freeSpaceBytes(destRoot) {
-  const s = await statfs(destRoot);
-  return Number(s.bsize) * Number(s.bavail);
-}
-
-export async function hasFreeSpace(destRoot, needBytes) {
-  return (await freeSpaceBytes(destRoot)) >= needBytes;
 }
 
 // Whole-file SHA-256 (hex). Used for the sender's FILE_END hash and for the
@@ -75,58 +66,6 @@ export async function walkSource(roots) {
   return { entries, sources };
 }
 
-// A resumable .part writer. The .part on-disk size IS the durable resume offset
-// (spec §6). Live hash is folded in only when hashLive (a continuous run); after
-// an app restart the caller passes hashLive:false and verifies by completion read.
-export async function createPartFile({ destRoot, relPath, resumeFrom, hashLive }) {
-  const finalPath = confineDestPath(destRoot, relPath);
-  const partPath = `${finalPath}.part`;
-  await mkdir(dirname(finalPath), { recursive: true });
-  // resumeFrom 0 → truncate (fresh or restart-at-0); else append at current size.
-  const fh = await open(partPath, resumeFrom === 0 ? 'w' : 'a');
-  let offset = 0;
-  if (resumeFrom !== 0) {
-    try { offset = (await fh.stat()).size; } catch { offset = 0; }
-  }
-  // A live hash is only valid if it covered the file from byte 0 within one
-  // continuous run. Resuming (resumeFrom > 0) re-opens the writer and can't
-  // reconstruct the prior bytes' hash state, so it MUST fall back to a
-  // completion read — force liveDigest() to null in that case (spec §6.4).
-  const hash = (hashLive && resumeFrom === 0) ? createHash('sha256') : null;
-  let digest = null; // memoized: Node's Hash.digest() throws if called twice
-  return {
-    offset,
-    partPath,
-    finalPath,
-    async write(buf) {
-      await fh.write(buf);
-      if (hash) hash.update(buf);
-    },
-    async fsync() { await fh.sync(); },
-    async close() { await fh.close(); },
-    liveDigest() {
-      if (!hash) return null;
-      if (digest === null) digest = hash.digest('hex');
-      return digest;
-    },
-  };
-}
-
-// Verify the received file's whole-file hash, then atomically publish it.
-// Live digest when available (continuous run); otherwise a single completion
-// read (spec §6.4). Mismatch discards the .part so the file re-requests from 0.
-export async function finalizeReceivedFile({ partFile, expectedHash, mtime }) {
-  const actual = partFile.liveDigest() ?? (await hashFile(partFile.partPath));
-  if (actual !== expectedHash) {
-    await rm(partFile.partPath, { force: true });
-    return { ok: false };
-  }
-  await rename(partFile.partPath, partFile.finalPath);
-  const secs = mtime / 1000;
-  await utimes(partFile.finalPath, secs, secs);
-  return { ok: true };
-}
-
 // Finalize a received file by PATH (no open handle) — for the multi-flow receiver,
 // where a resumed/already-complete file may have no open partFile. Reads the .part
 // fresh (no held fd → safe rename on Windows), verifies, publishes. Idempotent across
@@ -148,65 +87,11 @@ export async function finalizeReceivedPath({ destRoot, relPath, expectedHash, mt
   return { ok: true };
 }
 
-// Publish a file the receiver ALREADY has in full at accept time — i.e. a
-// skip-existing file (the final already on disk, matched by path+size+mtime) or a
-// complete `.part` left by a prior run. The sender skips such a file entirely (no
-// FILE_END), so the receiver must finalize it here rather than wait for a frame
-// that never arrives (otherwise the receive hangs). If a full `.part` exists, it
-// is renamed over the final and its mtime set; if only the final exists, this is a
-// no-op (any stray `.part` is cleaned). Idempotent.
-export async function publishFullyReceivedFile({ destRoot, relPath, mtime }) {
-  const finalPath = confineDestPath(destRoot, relPath);
-  const partPath = `${finalPath}.part`;
-  try {
-    await stat(partPath); // a complete .part from a prior run → publish it
-    await rename(partPath, finalPath); // rename overwrites an existing final
-    const secs = mtime / 1000;
-    await utimes(finalPath, secs, secs);
-  } catch {
-    // No .part (the common skip-existing case: the final file is already present
-    // and correct). Remove any stray/empty .part so it can't linger.
-    await rm(partPath, { force: true });
-  }
-}
-
-// Stream a file to the peer while computing its whole-file SHA-256. On resume
-// (offset > 0) the bytes before offset are hashed but NOT resent — the receiver
-// already has them (spec §6.1/§6.4). onChunk is awaited for backpressure.
-export function sendFile({ sourcePath, offset, chunkSize, onChunk }) {
-  return new Promise((res, rej) => {
-    const h = createHash('sha256');
-    const rs = createReadStream(sourcePath, { highWaterMark: chunkSize });
-    // Destroy the stream on any failure so a paused read never leaks its fd
-    // (onChunk rejecting mid-transfer leaves the stream paused otherwise).
-    const fail = (err) => { try { rs.destroy(); } catch { /* already gone */ } rej(err); };
-    let pos = 0;
-    let chain = Promise.resolve();
-    rs.on('data', (chunk) => {
-      h.update(chunk);
-      const start = pos;
-      const end = pos + chunk.length;
-      pos = end;
-      if (end > offset) {
-        const from = start >= offset ? 0 : offset - start;
-        const slice = chunk.subarray(from);
-        rs.pause();
-        chain = chain
-          .then(() => onChunk(slice))
-          .then(() => rs.resume())
-          .catch(fail);
-      }
-    });
-    rs.on('error', fail);
-    rs.on('end', () => { chain.then(() => res({ hash: h.digest('hex') })).catch(fail); });
-  });
-}
-
 // Positional (sparse) .part writer for the multi-flow receiver: chunks arrive out
 // of order on many flows and are written at their byte offset, so the .part is
 // sparse and its size is NOT the resume offset (received-ranges are; see the
 // orchestrator). liveDigest() is always null — an out-of-order file can only be
-// verified by a completion read at finalize. Shape matches finalizeReceivedFile.
+// verified by a completion read at finalize (see finalizeReceivedPath).
 export async function createSparsePartFile({ destRoot, relPath, size }) {
   const finalPath = confineDestPath(destRoot, relPath);
   const partPath = `${finalPath}.part`;

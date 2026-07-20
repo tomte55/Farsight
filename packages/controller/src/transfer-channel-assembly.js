@@ -8,7 +8,7 @@
 //
 // Shapes (must match transfer-service.js's Plan 3 Task 3 consumption exactly):
 //   SEND   ctrl.{sendCtrl,onCtrl} + flows[].{sendBulk,isAlive}  (createSendPool)
-//   RECEIVE ctrl.{sendCtrl,onCtrl} + flows[].{onBulk}            (createMultiFlowReceiver)
+//   RECEIVE ctrl.{sendCtrl,onCtrl} + flows[].{onBulk}            (createReceiver)
 // Both come out of createTransferChannel(), so `worker.channel` already
 // satisfies whichever shape is needed — SEND wraps it (sendBulk/isAlive),
 // RECEIVE uses it directly (it already has onBulk).
@@ -21,7 +21,7 @@ import { isAuthoritativeFlowError } from '@farsight/shared/transfer-service';
  * staggered initial dial plus a bounded-backoff re-dial of any slot that fails
  * to connect or dies mid-transfer — and fold it into the
  * {ctrl, flows, awaitFlow, onCtrlReplaced, close, onRendezvousError} shape
- * createMultiFlowSender consumes (via transfer-service).
+ * createSender consumes (via transfer-service).
  *
  * `flows` is the SAME live array the supervisor mutates: it starts EMPTY and
  * each slot appends a { sendBulk, isAlive } wrapper the instant it connects
@@ -195,14 +195,14 @@ export function assembleSendFlows({
 
   supervisor.start();
   // Seed with the initial slot-0 channel (set synchronously by start()'s dial) —
-  // the exact channel createMultiFlowSender reads from get ctrl() at construction.
+  // the exact channel createSender reads from get ctrl() at construction.
   // onCtrlReplaced skips forwarding this one (Minor #3), forwarding only re-dials.
   forwardedCtrl = ctrlChannel;
 
   return {
     // Getter, not a captured value: slot 0's channel is set on the synchronous
     // start() dial and re-set by each re-dial. transfer-service reads it once to
-    // seed createMultiFlowSender's ctrl; setCtrl (via onCtrlReplaced) swaps it
+    // seed createSender's ctrl; setCtrl (via onCtrlReplaced) swaps it
     // thereafter.
     get ctrl() { return ctrlChannel; },
     flows,
@@ -254,7 +254,7 @@ export function assembleSendFlows({
  *
  * Important #1: flow 0 is BOTH the ctrl channel AND a bulk flow — the sender
  * pushes a sendBulk wrapper for slot 0 (the pool dispatches bulk to it) and the
- * initial receive wires flow 0 as a bulk flow too (createMultiFlowReceiver
+ * initial receive wires flow 0 as a bulk flow too (createReceiver
  * iterates ALL flows including ordered[0]). `setCtrl` only re-attaches the ctrl
  * handler; it never wires onBulk. So a re-dialed replacement flow 0 must be wired
  * BOTH ways — setCtrl (control plane) AND addFlow(channel, 0) (bulk routing) —

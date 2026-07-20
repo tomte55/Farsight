@@ -101,7 +101,15 @@ export function createJobsStore({ dir }) {
       try { names = await readdir(dir); } catch { return out; }
       for (const n of names) {
         if (!n.endsWith('.json')) continue;
-        try { out.push(JSON.parse(await readFile(join(dir, n), 'utf8'))); } catch { /* skip corrupt */ }
+        try {
+          out.push(JSON.parse(await readFile(join(dir, n), 'utf8')));
+        } catch {
+          // F-D3: never silently drop a corrupt record — a vanished job can't be
+          // seen, resumed, or reaped. Surface a visible, reapable error marker.
+          // (No `dir` field: this store is constructed with a path and doesn't know
+          // the send/recv direction — that lives only in a valid record's own data.)
+          out.push({ jobId: n.slice(0, -'.json'.length), corrupt: true, jobState: 'error' });
+        }
       }
       return out;
     },

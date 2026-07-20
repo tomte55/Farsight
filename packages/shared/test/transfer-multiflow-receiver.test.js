@@ -1,6 +1,6 @@
 // packages/shared/test/transfer-multiflow-receiver.test.js
 import { describe, it, expect, vi } from 'vitest';
-import { createMultiFlowReceiver } from '../src/transfer-orchestrator.js';
+import { createReceiver } from '../src/transfer-receiver.js';
 import { encodeBulkFrame } from '../src/transfer-chunk.js';
 import { offerFrame, offerBeginFrame, offerEntriesFrame, offerEndFrame, fileEndFrame, jobDoneFrame, cancelFrame, promptingFrame, parseCtrlFrame } from '../src/transfer-protocol.js';
 import { createCoverageTracker } from '../src/transfer-reconcile.js';
@@ -25,14 +25,14 @@ function fakeClock() {
   return { setTimer, clearTimer, tickOnce, pending: () => timers.size };
 }
 
-describe('createMultiFlowReceiver', () => {
+describe('createReceiver', () => {
   it('accepts, reassembles out-of-order across flows, verifies, completes', async () => {
     const size = 12;
     const { ctrl, toReceiver, out } = ctrlPair();
     const parts = new Map();
     const flowCbs = [];
     const flows = [0, 1, 2].map(() => ({ onBulk: (cb) => flowCbs.push(cb) }));
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
@@ -62,7 +62,7 @@ describe('createMultiFlowReceiver', () => {
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
     const openedParts = [];
     const verifyAndFinalizeArgs = [];
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: (relPath) => {
@@ -91,15 +91,15 @@ describe('createMultiFlowReceiver', () => {
   // UI-event-wiring gap: the receiver drove real bytes onto disk but never told
   // the app UI the transfer had moved off "Waiting for approval" (no 'accepted')
   // nor that any bytes had arrived (no aggregate 'progress') — a WORKING
-  // transfer looked frozen. Mirrors single-flow createReceiver's onEvent({type:
-  // 'accepted', manifest: m}), emitted right after consent, before the accept
+  // transfer looked frozen. Mirrors the removed single-flow receiver driver's
+  // onEvent({type: 'accepted', manifest: m}), emitted right after consent, before the accept
   // frame goes out.
   it('emits an accepted event carrying the manifest right after consent (mirrors single-flow)', async () => {
     const size = 8;
     const { ctrl, toReceiver, out } = ctrlPair();
     const flows = [{ onBulk: () => {} }];
     const events = [];
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null }),
@@ -129,7 +129,7 @@ describe('createMultiFlowReceiver', () => {
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
     const events = [];
     let clock = 0;
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: () => { const b = new Uint8Array(size); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
@@ -171,7 +171,7 @@ describe('createMultiFlowReceiver', () => {
     const flowCbs = [];
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
     const events = [];
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: () => { const b = new Uint8Array(size); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
@@ -199,7 +199,7 @@ describe('createMultiFlowReceiver', () => {
 
   it('declines when consent says no', async () => {
     const { ctrl, toReceiver, out } = ctrlPair();
-    const rx = createMultiFlowReceiver({ ctrl, flows: [], jobId: JOB, consent: async () => false, openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve() }), verifyAndFinalize: () => Promise.resolve({ ok: true }) });
+    const rx = createReceiver({ ctrl, flows: [], jobId: JOB, consent: async () => false, openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve() }), verifyAndFinalize: () => Promise.resolve({ ok: true }) });
     const done = rx.start();
     toReceiver(offerFrame({ jobId: JOB, entries: [{ fileId: 0, path: 'x', size: 1, mtime: 0 }], totalBytes: 1, totalFiles: 1 }));
     const r = await done;
@@ -215,7 +215,7 @@ describe('createMultiFlowReceiver', () => {
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
     const persistRanges = vi.fn();
     const fake = fakeClock();
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
@@ -287,7 +287,7 @@ describe('createMultiFlowReceiver', () => {
   // periodic tick() (~reportIntervalMs later, default 3s). A multi-flow receive
   // canceled/interrupted within that window left NO jobs-store record at all —
   // it vanished from the Transfers list and could never be resumed. Mirrors
-  // single-flow createReceiver's immediate saveRecord('active') on accept. Uses
+  // the removed single-flow receiver driver's immediate saveRecord('active') on accept. Uses
   // a huge reportIntervalMs (never fired via tickOnce here) so the ONLY way
   // persistRanges could have been called is the new immediate accept-path call.
   it('persists the record ONCE immediately on accept, independent of the periodic tick (no vanish on fast cancel)', async () => {
@@ -297,7 +297,7 @@ describe('createMultiFlowReceiver', () => {
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
     const persistRanges = vi.fn();
     const fake = fakeClock();
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null }),
@@ -321,7 +321,7 @@ describe('createMultiFlowReceiver', () => {
   it('reports a finalized file as fully covered even though the router itself omits it (fixes the paired sender\'s livelock)', async () => {
     // router.rangesFor() drops a file entirely once it finalizes — if a
     // range_report just forwarded that straight to the wire, the paired
-    // createMultiFlowSender's coverage tracker would freeze at whatever
+    // createSender's coverage tracker would freeze at whatever
     // partial coverage the file had before finalizing and never see it as
     // complete. Two files: finalize the first while the second is still
     // in flight, and check the very next range_report reports file 0 as
@@ -331,7 +331,7 @@ describe('createMultiFlowReceiver', () => {
     const parts = new Map();
     const flowCbs = [];
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: (relPath) => { const b = new Uint8Array(relPath === 'a.bin' ? size0 : size1); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
@@ -401,7 +401,7 @@ describe('createMultiFlowReceiver', () => {
       const flowCbs = [];
       const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
       const fake = fakeClock();
-      const rx = createMultiFlowReceiver({
+      const rx = createReceiver({
         ctrl, flows, jobId: JOB,
         consent: async () => true,
         openPart: (relPath) => {
@@ -475,8 +475,8 @@ describe('createMultiFlowReceiver', () => {
     expect(unboundedTracker.coveredFor(4).toJSON()).toEqual([]);          // untouched
   });
 
-  // Unlike single-flow createReceiver — whose ctrl handler has no `cancel`
-  // branch at all (a single-flow receive instead recovers from a vanished
+  // Unlike the removed single-flow receiver driver — whose ctrl handler had no
+  // `cancel` branch at all (a single-flow receive instead recovers from a vanished
   // sender via its own inactivity watchdog, once the sender's channel
   // teardown stops bytes arriving) — the multi-flow receiver adds EXPLICIT
   // inbound-cancel handling: a sender-initiated cancel must settle the
@@ -490,7 +490,7 @@ describe('createMultiFlowReceiver', () => {
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
     const events = [];
     const fake = fakeClock();
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
@@ -512,8 +512,8 @@ describe('createMultiFlowReceiver', () => {
     expect(fake.pending()).toBe(0); // every timer (reporter + watchdog) cleared, none dangling
   });
 
-  // Mirrors createReceiver's inactivity watchdog: a consented, active receive
-  // that stops getting ANY ctrl/bulk traffic (sender vanished, connection
+  // Mirrors the removed single-flow receiver driver's inactivity watchdog: a
+  // consented, active receive that stops getting ANY ctrl/bulk traffic (sender vanished, connection
   // dropped) must not hang at 'active' forever.
   it('fails the receive on inactivity: no ctrl/bulk frame within inactivityMs after accept stalls it', async () => {
     const size = 8;
@@ -523,7 +523,7 @@ describe('createMultiFlowReceiver', () => {
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
     const events = [];
     const fake = fakeClock();
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
@@ -560,7 +560,7 @@ describe('createMultiFlowReceiver', () => {
     const events = [];
     vi.useFakeTimers();
     try {
-      const rx = createMultiFlowReceiver({
+      const rx = createReceiver({
         ctrl, flows, jobId: JOB,
         consent: async () => true,
         openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
@@ -595,8 +595,8 @@ describe('createMultiFlowReceiver', () => {
   // frames — pokeWatchdog() is called at the very top of the ctrl handler,
   // before the frame is even parsed for jobId/type. Uses a `prompting` frame
   // as the poke: it's a valid, parseable ctrl frame for this jobId that the
-  // multi-flow receiver's ctrl handler has NO case for (unlike single-flow
-  // createReceiver, it never surfaces a 'prompting' event), so besides the
+  // multi-flow receiver's ctrl handler has NO case for (unlike the removed
+  // single-flow receiver driver, it never surfaces a 'prompting' event), so besides the
   // watchdog reset it has no side effect at all — nothing here completes or
   // cancels the transfer, isolating exactly the ctrl-side reset behavior.
   it('watchdog reset: a ctrl frame delivered just before the deadline delays the stall past it', async () => {
@@ -608,7 +608,7 @@ describe('createMultiFlowReceiver', () => {
     const events = [];
     vi.useFakeTimers();
     try {
-      const rx = createMultiFlowReceiver({
+      const rx = createReceiver({
         ctrl, flows, jobId: JOB,
         consent: async () => true,
         openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
@@ -642,7 +642,7 @@ describe('createMultiFlowReceiver', () => {
 
   // Orchestrator-level wiring for the fd-leak fix: the committed tests for
   // createReceiveRouter.closeAll() only exercise it in isolation. This pins that
-  // createMultiFlowReceiver actually CALLS it (via closeRouterParts) when a real
+  // createReceiver actually CALLS it (via closeRouterParts) when a real
   // receive settles with a genuinely open, non-finalized part in flight — not
   // just that closeAll() itself works when invoked directly.
   it('closes an OPEN, non-finalized part on settle (pins the orchestrator-level closeAll() wiring)', async () => {
@@ -651,7 +651,7 @@ describe('createMultiFlowReceiver', () => {
     const flowCbs = [];
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
     const openedParts = [];
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: () => {
@@ -690,7 +690,7 @@ describe('createMultiFlowReceiver', () => {
   // UI-legibility gap: live-observed as sender "21/22 · 0 MB/s", receiver
   // "20/22 · 0 MB/s", no phase label — the receiver never told the UI it had
   // entered the verify-only tail (all bytes in, still hashing/finalizing).
-  // Mirrors single-flow createReceiver's job_done `pending.size > 0` check,
+  // Mirrors the removed single-flow receiver driver's job_done `pending.size > 0` check,
   // but computed from router coverage since multi-flow completion is
   // coverage-defined. Two files: file 0 finalizes fast; file 1's
   // verifyAndFinalize hangs on a controllable promise so the receive sits in
@@ -703,7 +703,7 @@ describe('createMultiFlowReceiver', () => {
     const events = [];
     let resolveVerify;
     const verifyGate = new Promise((res) => { resolveVerify = res; });
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null }),
@@ -763,7 +763,7 @@ describe('createMultiFlowReceiver', () => {
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
     const fake = fakeClock();
     let closeCalled = false;
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: () => Promise.resolve({
@@ -809,7 +809,7 @@ describe('createMultiFlowReceiver', () => {
       const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
       const events = [];
       const part1 = { writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null };
-      const rx = createMultiFlowReceiver({
+      const rx = createReceiver({
         ctrl, flows, jobId: JOB,
         consent: async () => true,
         openPart: (relPath) => (relPath === 'bad.bin'
@@ -890,7 +890,7 @@ describe('createMultiFlowReceiver', () => {
     const parts = new Map();
     const flowCbs = [];
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
@@ -934,7 +934,7 @@ describe('createMultiFlowReceiver', () => {
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
     const consent = vi.fn(async () => true);
     const events = [];
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB,
       consent,
       openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null }),
@@ -981,7 +981,7 @@ describe('createMultiFlowReceiver', () => {
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
     const consent = vi.fn(async () => true);
     const events = [];
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl, flows, jobId: JOB, consent,
       openPart: () => Promise.resolve({ writeAt: () => Promise.resolve(), close: () => Promise.resolve(), liveDigest: () => null }),
       verifyAndFinalize: () => Promise.resolve({ ok: true }),
@@ -1032,7 +1032,7 @@ describe('createMultiFlowReceiver', () => {
     const parts = new Map();
     const flowCbs = [];
     const flows = [{ onBulk: (cb) => flowCbs.push(cb) }];
-    const rx = createMultiFlowReceiver({
+    const rx = createReceiver({
       ctrl: p1.ctrl, flows, jobId: JOB,
       consent: async () => true,
       openPart: (relPath) => { const b = new Uint8Array(size); parts.set(relPath, b); return Promise.resolve({ writeAt: (o, x) => { b.set(x, o); return Promise.resolve(); }, close: () => Promise.resolve(), liveDigest: () => null }); },
