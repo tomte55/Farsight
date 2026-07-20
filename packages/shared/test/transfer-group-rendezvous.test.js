@@ -207,6 +207,21 @@ describe('createGroupRendezvous', () => {
     expect(ready[0].flows.some((f) => f.flowIndex === 0)).toBe(false); // no anchor → assembleReceiveGroup returns null → main aborts
   });
 
+  it('a second non-anchor flow arriving during the anchor-wait does NOT fire (still no flow 0) (F-B5)', () => {
+    const clock = fakeClock();
+    const ready = [];
+    const gr = createGroupRendezvous({
+      openFlow: (r) => ({ flowIndex: r.flowIndex, close: () => {} }),
+      onGroupReady: (g) => ready.push(g),
+      joinWindowMs: 5000, anchorWaitMs: 20000, setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    });
+    gr.offer({ sessionId: 's1', groupId: GROUP, flowIndex: 1, flowCount: 3, linked: true });
+    clock.fireAll(); // window elapses, no anchor → awaiting-anchor
+    expect(ready.length).toBe(0);
+    gr.offer({ sessionId: 's2', groupId: GROUP, flowIndex: 2, flowCount: 3, linked: true }); // still no flow 0
+    expect(ready.length).toBe(0); // must NOT prematurely fire an anchorless group on a non-anchor arrival
+  });
+
   it('a partial group that HAS flow 0 still fires on the join window (anchor present)', () => {
     const clock = fakeClock();
     const ready = [];

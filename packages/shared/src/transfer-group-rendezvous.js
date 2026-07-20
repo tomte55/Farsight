@@ -13,9 +13,19 @@
  *   Opens one attaching worker for a flow and returns its handle. The handle
  *   is expected to (optionally) expose a `close()` method, called on cancel.
  * @param {(group: {groupId: string, flowCount: number, flows: any[]}) => void} deps.onGroupReady
- *   Fired exactly once per group, either once `flowCount` flows have arrived
- *   or once the join window elapses with at least one flow connected.
+ *   Fired exactly once per group. Flow 0 (the anchor, carrying the manifest
+ *   OFFER) is mandatory to fire: once it has arrived, the group fires as soon
+ *   as either all `flowCount` flows have arrived or the join window elapses
+ *   (partial group OK, anchor present). If the join window elapses with flow
+ *   0 still missing, firing is NOT aborted — a bounded `anchorWaitMs` grace is
+ *   started instead: flow 0 arriving during the grace fires immediately, and
+ *   the grace elapsing with flow 0 still missing fires an anchorless group
+ *   (`flows` has no flowIndex-0 entry) for the caller to abort.
  * @param {number} [deps.joinWindowMs]
+ * @param {number} [deps.anchorWaitMs]
+ *   Bounded grace, started when the join window elapses with flow 0 still
+ *   missing, to give the sender's supervisor time to (re-)dial the anchor
+ *   flow before giving up. Default 20000ms.
  * @param {typeof setTimeout} [deps.setTimer]
  * @param {typeof clearTimeout} [deps.clearTimer]
  * @param {(handle: any, flowIndex: number) => void} [deps.onFlowJoin]
@@ -34,7 +44,7 @@ export function createGroupRendezvous({
   clearTimer = clearTimeout,
   onFlowJoin,
 }) {
-  /** @type {Map<string, {flowCount: number, flows: Map<number, any>, timer: any, fired: boolean}>} */
+  /** @type {Map<string, {flowCount: number, flows: Map<number, any>, timer: any, fired: boolean, awaitingAnchor: boolean}>} */
   const groups = new Map();
 
   function fireReady(groupId, group) {
