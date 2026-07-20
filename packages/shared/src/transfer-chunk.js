@@ -19,6 +19,11 @@
 // an unordered, possibly-duplicating flow.
 export const BULK_HEADER_BYTES = 16;
 
+// The transfer chunk grid unit: one bulk frame payload == one coverage interval
+// == one per-chunk-hash unit (Phase 4). Sender/receiver/producer/router all key
+// off this single constant so the send grid and the hash grid can never drift.
+export const TRANSFER_CHUNK_BYTES = 131072;
+
 export function encodeBulkFrame({ fileId, offset, length, payload }) {
   const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
   if (bytes.byteLength !== length) throw new Error('length must equal payload.byteLength');

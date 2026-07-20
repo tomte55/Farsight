@@ -18,7 +18,8 @@
 // which flow carried which chunk. Round 2 delivers everything to the real
 // router, so reconciliation has a known, reproducible gap to refill.
 import { describe, it, expect } from 'vitest';
-import { decodeBulkFrame } from '../src/transfer-chunk.js';
+import { decodeBulkFrame, encodeBulkFrame } from '../src/transfer-chunk.js';
+import { createHash } from 'node:crypto';
 import { createChunkProducer } from '../src/transfer-producer.js';
 import { createSendPool } from '../src/transfer-send-pool.js';
 import { createReceiveRouter } from '../src/transfer-receive-router.js';
@@ -129,6 +130,42 @@ describe('multi-flow loopback', () => {
     expect(tracker.isComplete()).toBe(true); // gap refilled
 
     await router.onFileHash(0, 'H');
+    expect(router.isComplete()).toBe(true);
+    expect(Buffer.from(dest).equals(Buffer.from(src))).toBe(true);
+  });
+
+  // Phase 4: the headline resume property — persisted coverage is a VERIFIED set,
+  // so a resume trusts it and re-hashes NOTHING for the covered region; only the
+  // gap chunks flow (and get hashed). A 90GB-in 100GB file resumes by reading its
+  // record, not by re-hashing 90GB.
+  it('resume trusts persisted verified coverage: no re-hash of covered chunks, only gaps re-hashed', async () => {
+    const cb = 4096;
+    const size = cb * 6;
+    const src = new Uint8Array(size).map((_, i) => (i * 13) & 0xff);
+    const H = (b) => createHash('sha256').update(b).digest('hex');
+    const hashes = [];
+    for (let o = 0; o < size; o += cb) hashes.push(H(src.subarray(o, o + cb)));
+    // .part already holds chunks 0..3 from a prior session; coverage SEEDED from
+    // persisted ivals [[0, cb*4]] — the receiver must trust them, re-hashing none.
+    const dest = new Uint8Array(size);
+    dest.set(src.subarray(0, cb * 4), 0);
+    let hashCalls = 0;
+    const router = createReceiveRouter({
+      manifest: { entries: [{ fileId: 0, size }] },
+      initialRanges: { 0: [[0, cb * 4]] },
+      openPart: () => Promise.resolve({ writeAt: (off, b) => { dest.set(b, off); return Promise.resolve(); }, readAt: (o, l) => Promise.resolve(dest.subarray(o, o + l)), close: () => Promise.resolve() }),
+      verifyAndFinalize: () => Promise.resolve({ ok: true }),
+      hashChunk: (b) => { hashCalls += 1; return H(b); },
+      onFileDone: () => {}, onProgress: () => {},
+    });
+    await router.setChunkHashes(0, cb, hashes); // nothing arrived pre-hash -> zero hashing here
+    expect(hashCalls).toBe(0);                  // covered chunks are TRUSTED, not re-hashed
+    for (let idx = 4; idx < 6; idx += 1) {      // only the gap chunks flow now
+      const off = idx * cb;
+      await router.onBulkFrame(encodeBulkFrame({ fileId: 0, offset: off, length: cb, payload: src.subarray(off, off + cb) }));
+    }
+    await router.onFileHash(0, 'H');
+    expect(hashCalls).toBe(2);                  // exactly the 2 gap chunks — never the 4 covered ones
     expect(router.isComplete()).toBe(true);
     expect(Buffer.from(dest).equals(Buffer.from(src))).toBe(true);
   });
