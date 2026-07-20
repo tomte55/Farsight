@@ -194,6 +194,27 @@ source of truth for done/progress/resume; (R9) honest status, deferrals written 
   version skew + reduced per-flow verification, to save ~2 local round-trips). Proof is unit/integration
   (the CI two-process harness runs password, not linked, transfers — R9); the live drop is fleet-setup
   measurable.
+- **Per-chunk hashes give durable, verified, chunk-granular resume (Phase 4, 2026-07-20).** Integrity used to
+  be a whole-file SHA-256 (verified once at finalize) + coverage that meant merely "arrived"; a resume that hit
+  ANY corruption re-downloaded the WHOLE file (`resetFile`). Phase 4 adds per-chunk SHA-256 on the existing
+  128KB bulk/coverage unit (one exported `TRANSFER_CHUNK_BYTES`): the sender **pre-hashes each incomplete file
+  and sends its digests as an optional, OFFER-style chunked `file_hashes` frame BEFORE that file's bulk** —
+  which MUST chunk like the OFFER (`file_hashes_begin`→`_entries*`→`_end`, ≤48KB batches) or it trips the 256KB
+  DC limit (the v1.11.2 class). The receiver **verifies each chunk in memory as it lands and adds ONLY verified
+  chunks to its `RangeSet`**, so persisted coverage now MEANS "verified" — a resume **trusts it and re-hashes
+  nothing** (a 90GB-in 100GB file resumes by reading its record, not re-hashing 90GB). The whole-file hash
+  stays the finalize gate; a finalize mismatch **locates the bad chunks by hashing the `.part` and re-drives
+  ONLY those** (`router.locateAndPunch` + `RangeSet.remove`), bounded to a loud `completed_with_errors` after
+  `locateMaxAttempts`, never `resetFile` the whole file. `file_hashes` is **version-skew-safe** (absent ⇒
+  today's whole-file behavior). Two non-obvious traps, both real: (1) ctrl and bulk are **independently
+  ordered**, so a chunk can beat its hash frame — handled by a `pendingVerify` retro-verify (add optimistically,
+  re-hash from `.part` and remove-if-bad when the hashes land); (2) **`finalizeReceivedPath` must NOT delete the
+  `.part` on a hash mismatch** — locate reads it back to repair in place, and deleting it (the pre-Phase-4
+  behavior) makes locate reopen a fresh zero-filled preallocated file and punch EVERY chunk (a silent
+  whole-file re-download — found live by the `fb7` harness). Gated by mutation-checked unit tests + the
+  real-wire **`fb7`** (corrupt on-disk chunks → repair only the bad ones; asserts chunk-granular re-send, not a
+  whole-file re-download). **Deferred (R9):** within-transfer dedup + content-verified skip-existing (F-A6);
+  skipping the finalize whole-file read as a future large-file speedup (the backstop is deliberately kept).
 - **Two GATED, outward-facing actions** require explicit user approval per homelab ops rules: the
   signaling deploy (public subdomain) and opening coturn firewall ports.
 - **Logging: connection modules run in the RENDERER**, not main — they log via the `log:renderer`

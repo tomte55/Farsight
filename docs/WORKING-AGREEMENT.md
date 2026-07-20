@@ -172,6 +172,33 @@ failures that hang or vanish instead of surfacing. These are the rules we hold e
      window in `runMultiFlowReceive` (a throw in `readPersistedRanges`/`createReceiver` between the jobId
      race and the try/finally leaks the `receivePending` entry + any buffered handle — mirrors a
      pre-existing unguarded `close()` there, low-probability, ~6-line fix that also closes the older leak).
-4. **Chunk manifest** — per-chunk hashing, cheap resume, within-transfer dedup, on a solid base.
+4. **Chunk manifest — durable, verified, chunk-granular resume. DONE (2026-07-20).** Closes the F-A1/F-A2
+   "trust-by-size / trust-the-record" resume-integrity class *by construction* on the surviving coverage path.
+   Per-chunk SHA-256 rides the existing 128KB bulk/coverage unit (one exported `TRANSFER_CHUNK_BYTES`): the
+   sender pre-hashes each incomplete file and sends its digests as an **optional, OFFER-style chunked
+   `file_hashes` frame BEFORE that file's bulk** (version-skew-safe — an old peer that never sends/parses it
+   falls back to today's whole-file behavior). The receiver **verifies each chunk in memory as it lands and
+   adds ONLY verified chunks to its `RangeSet`**, so persisted coverage now MEANS "verified" — a resume trusts
+   it and **re-hashes nothing** for the covered region (the maintainer's large-file concern: a 90GB-in 100GB
+   file resumes by reading its record, not re-hashing 90GB). The whole-file SHA-256 stays the finalize gate; on
+   a (rare) finalize mismatch the receiver **locates the bad chunks by hashing the `.part` and punches only
+   those out of coverage** (`RangeSet.remove`), and the existing `range_report`→gap-drive loop re-sends exactly
+   them — bounded to a loud terminal (`completed_with_errors`) after `locateMaxAttempts`, never a loop. The
+   ctrl/bulk independent-ordering race (a chunk beating its hash frame) is handled by a `pendingVerify`
+   retro-verify. **Evidence:** mutation-checked unit tests for every guard (verify-before-add, retro-verify,
+   `RangeSet.remove`, locate-only-bad-chunks, bounded→terminal, resume-trusts-record re-hashes-nothing); full
+   `npx vitest run` green (206 files / 1446 tests); **real-wire `fb7`** (corrupt on-disk chunks mid-transfer →
+   finalize mismatch → locate → repair) a required CI gate alongside `fb1/fb2/fb5/fb6`, asserting a detected
+   mismatch (`recv ev=file-failed`) + `recv ev=completed` + byte-identical N/N **AND chunk-granular re-send**
+   (~212 chunks, not the ~400 a whole-file re-download would cost); `fb1` baseline re-confirmed byte-identical.
+   The harness earned its keep again: it found live that `finalizeReceivedPath` **deleted the `.part` on a hash
+   mismatch**, so locate reopened a fresh zero-filled preallocated file and punched all 201 chunks (a silent
+   whole-file re-download) — fixed by keeping the `.part` on mismatch (locate repairs it in place; the
+   old-sender `resetFile` path overwrites it), which dropped `removed` 201→2 and re-sent 400→212.
+   **Honest deferrals (R9):** within-transfer **dedup** and content-verified skip-existing (F-A6) are OUT
+   (not free — they need content-defined chunking / hashes for would-be-skipped files); **skipping the finalize
+   whole-file read** (trust live per-chunk verify) is a future large-file finalize speedup, gated on its own
+   decision (the whole-file hash is deliberately kept as the complete backstop); the carried-forward 3b/3b-2
+   deferrals (pre-consent PC-count reduction, F-C5, F-B7, the F-C4 leak window) are untouched by this phase.
 
 Evidence + rationale: `docs/private/superpowers/audits/2026-07-19-transfer-reliability-deep-dive.md`.
